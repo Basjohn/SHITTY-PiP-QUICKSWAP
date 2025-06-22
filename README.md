@@ -79,7 +79,7 @@ Access the settings panel from the system tray menu to configure:
 - Windows 10/11 SDK (for building from source)
 
 ### Building
-
+0. Skip this step and just use the exe like a human.
 1. Clone the repository
 2. Create a virtual environment:
    ```bash
@@ -87,11 +87,13 @@ Access the settings panel from the system tray menu to configure:
    .\venv\Scripts\activate
    ```
 3. Install dependencies:
+   Skip this too!
    ```bash
    pip install -r requirements.txt
    ```
 4. Run the application:
    ```bash
+   THE EXE, IT CALLS TO YOU MORTAL.
    python Py/main.py
    ```
 
