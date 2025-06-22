@@ -11,21 +11,21 @@ Shitty Picture In Picture QuickSwap is a multiple overlay application allowing s
 
 ## Features
 
-- ** Live Window Overlay creation that tracks your most recent application and let's you seamlessly swap applications like Microsoft remembered what Alt-Tab was meant to do. Swapping can be done via double-click, right click or custom hotkey combo.
+- * Live Window Overlay creation that tracks your most recent application and let's you seamlessly swap applications like Microsoft remembered what Alt-Tab was meant to do. Swapping can be done via double-click, right click or custom hotkey combo.
 
 - * Caveat 1 - Many applications are smart ass bitches and stop animation when you minimize them, DWM cannot avoid this. There are mitigators to try and lie to applications that they are still in focus but it isn't aggressive as basic function was more important. This is not an issue with games unless you use exclusive fullscreen which is a *you* thing. WANT VIDEO?! Only tested solution is something live mpv.net and then NOT minimizing it, just opening your other applications afterwards while it plays. (Maximize others)
 
-- ** KINDA SORTA ACTUAL DESKTOP FUCKING CAPTURE. Sure that's a weird thing to be excited about but if you knew how bad pythons capture libraries were and the documentation on DWM saying this is "impossible" well, it ain't. Using the mystical art of reading the god damn window entries the application isolates and lies to you about the desktop using a feature Windows has been meaning to depreciate since W3.x but were too busy fucking up libraries. It could be removed at any time but it's been 30 years, you do the guessing.
+- * KINDA SORTA ACTUAL DESKTOP FUCKING CAPTURE. Sure that's a weird thing to be excited about but if you knew how bad pythons capture libraries were and the documentation on DWM saying this is "impossible" well, it ain't. Using the mystical art of reading the god damn window entries the application isolates and lies to you about the desktop using a feature Windows has been meaning to depreciate since W3.x but were too busy fucking up libraries. It could be removed at any time but it's been 30 years, you do the guessing.
 
-- ** Overlay Passthrough. This was surprisingly less hellish than everything else to get working but you probably DON'T WANT TO TURN THIS ON if you game online. DEFAULTS TO OFF, gives a big fucking warning too. It's a benign feature but I don't want false positives on users. Neat for pure media though, when it works. You can't accidentally turn this on.
+- * Overlay Passthrough. This was surprisingly less hellish than everything else to get working but you probably DON'T WANT TO TURN THIS ON if you game online. DEFAULTS TO OFF, gives a big fucking warning too. It's a benign feature but I don't want false positives on users. Neat for pure media though, when it works. You can't accidentally turn this on.
 
-- ** Live MONITOR Overlay with seamless swap to and from the Window Overlay, custom fps speed option. (Match your other screen's refresh or just put big numbers and complain about a bsod - I'm kidding, 240 is the limit. People who want more than 240 can send me a motivational letter from their GP.)
+- * Live MONITOR Overlay with seamless swap to and from the Window Overlay, custom fps speed option. (Match your other screen's refresh or just put big numbers and complain about a bsod - I'm kidding, 240 is the limit. People who want more than 240 can send me a motivational letter from their GP.)
 
-- * Caveat - Microsoft have fucked the python ecosystem royally. WGC/WINRT/DXGI/D3DSHOT are all fucked for this task in different ways. So MSS had to be used. It is not particularly flawless or as smooth as I would like, but it is the only option and I made the UI with this feature in mind so fucking hell I'm putting it in there.
+- * Caveat 2 - Microsoft have fucked the python ecosystem royally. WGC/WINRT/DXGI/D3DSHOT are all fucked for this task in different ways. So MSS had to be used. It is not particularly flawless or as smooth as I would like, but it is the only option and I made the UI with this feature in mind so fucking hell I'm putting it in there.
 
-- ** Super sexy settings menu. YES THIS IS A FEATURE. Designed to look like an app that never should have worked, you have a clean, themed, multiple route interface for whatever the hell you'll use this for. With full feature context menus built into every overlay and the system tray. Subsettings (The Settings *inside* SETTINGS!) give live opacity, hot key, fps control and sorting algorithm. 
+- * Super sexy settings menu. YES THIS IS A FEATURE. Designed to look like an app that never should have worked, you have a clean, themed, multiple route interface for whatever the hell you'll use this for. With full feature context menus built into every overlay and the system tray. Subsettings (The Settings *inside* SETTINGS!) give live opacity, hot key, fps control and sorting algorithm. 
 
-# - There's also a fairly easy to find easter egg that makes me cling to the days I was not entirely. a rotting bag of flesh.
+#There's also a fairly easy to find easter egg that makes me cling to the days I was not entirely. a rotting bag of flesh.
 
    ```
 ## Usage
