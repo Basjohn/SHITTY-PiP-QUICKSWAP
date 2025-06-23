@@ -25,7 +25,7 @@ Shitty Picture In Picture QuickSwap is a multiple overlay application allowing s
 
 - * Super sexy settings menu. YES THIS IS A FEATURE. Designed to look like an app that never should have worked, you have a clean, themed, multiple route interface for whatever the hell you'll use this for. With full feature context menus built into every overlay and the system tray. Subsettings (The Settings *inside* SETTINGS!) give live opacity, hot key, fps control and sorting algorithm. 
 
-#There's also a fairly easy to find easter egg that makes me cling to the days I was not entirely. a rotting bag of flesh.
+#There's also a fairly easy to find easter egg that makes me cling to the days I was not entirely a rotting bag of flesh.
 
    ```
 ## Usage
