@@ -49,7 +49,8 @@ Shitty Picture In Picture QuickSwap is a multiple overlay application allowing s
 - `I don't know who the hell put those short-cuts there, I just did the custom hotkey shit so uh, good luck.
 
 Now a gaming example from a game that really could have used prettier snow.
-<img width="600" alt="GAMINGEXAMPLE" src="https://github.com/user-attachments/assets/541ad282-b9c8-499a-97f6-c9fb61c707a0" />
+
+<img width="600" alt="GAMINGEXAMPLE" src="https://github.com/user-attachments/assets/165ea7c8-4823-4ed6-9a8d-07038585486d" />
 
 
 
