@@ -48,19 +48,6 @@ Shitty Picture In Picture QuickSwap is a multiple overlay application allowing s
 - `Right-Click` on overlay: Show context menu
 - `I don't know who the hell put those short-cuts there, I just did the custom hotkey shit so uh, good luck.
 
-Now a gaming example from a game that really could have used prettier snow.
-
-<img width="600" alt="GAMINGEXAMPLE" src="https://github.com/user-attachments/assets/165ea7c8-4823-4ed6-9a8d-07038585486d" />
-
-
-
-## Customization
-
-### Themes
-
-You can switch between dark and light themes in the settings panel.
-They work slightly better after closing and reopening. I did say slightly.
-
 ### Settings
 
 Access the settings panel from the system tray menu to configure:
@@ -69,15 +56,6 @@ Access the settings panel from the system tray menu to configure:
 - Theme preferences
 - Startup behavior
 - Performance options
-
-## Building from Source
-
-### Prerequisites
-
-- Python 3.8+
-- pip
-- Git
-- Windows 10/11 SDK (for building from source)
 
 ### Building
 0. Skip this step and just use the exe like a human.
@@ -97,6 +75,10 @@ Access the settings panel from the system tray menu to configure:
    THE EXE, IT CALLS TO YOU MORTAL.
    python Py/main.py
    ```
+Now a gaming example from a game that really could have used prettier snow.
+
+<img width="600" alt="GAMINGEXAMPLE" src="https://github.com/user-attachments/assets/165ea7c8-4823-4ed6-9a8d-07038585486d" />
+
 
 ## Contributing
 
