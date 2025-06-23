@@ -1,0 +1,36 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+<qresource prefix="/">
+    <!-- Theme files -->
+    <file>themes/dark.qss</file>
+    <file>themes/light.qss</file>
+    <file>themes/combo_styles.qss</file>
+    
+    <!-- Icon files -->
+    <file>Resources/Blank.ico</file>
+    <file>Resources/ShittyPIP.ico</file>
+    
+    <!-- Badge files -->
+    <file>Resources/Badge0.png</file>
+    <file>Resources/Badge1.png</file>
+    <file>Resources/Badge2.png</file>
+    <file>Resources/Badge3.png</file>
+    <file>Resources/Badge4.png</file>
+    <file>Resources/Badge5.png</file>
+    <file>Resources/Badge6.png</file>
+    <file>Resources/Badge7.png</file>
+    <file>Resources/Badge8.png</file>
+    <file>Resources/Badge9.png</file>
+    <file>Resources/Badge10.png</file>
+    <file>Resources/Badge11.png</file>
+    <file>Resources/Badge12.png</file>
+    <file>Resources/Badge13.png</file>
+    <file>Resources/Badge14.png</file>
+    <file>Resources/Badge15.png</file>
+    <file>Resources/Badge16.png</file>
+    <file>Resources/Badge17.png</file>
+    <file>Resources/Badge18.png</file>
+    <file>Resources/Badge19.png</file>
+    <file>Resources/Badge20.png</file>
+</qresource>
+</RCC>

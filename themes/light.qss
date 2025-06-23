@@ -1,0 +1,315 @@
+/* Main window styling - transparent with dark border */
+QMainWindow {
+    background-color: transparent;
+    border: 2px solid #333333;
+    border-radius: 12px;
+    padding: 0px;
+    margin: 0px;
+}
+
+QMainWindow::separator {
+    background: transparent;
+    width: 0px;
+    height: 0px;
+    margin: 0px;
+    padding: 0px;
+}
+
+/* Central widget with semi-transparent light background */
+QWidget#mainWidget {
+    background-color: rgba(240, 240, 240, 0.7);
+    border-radius: 10px;
+    border: 2px solid #333333;
+    padding: 0px;
+    margin: 0px;
+    opacity: 1;
+    background-clip: border-box;
+}
+
+/* Ensure child widgets remain fully opaque */
+QWidget#mainWidget > * {
+    background: transparent;
+    opacity: 1;
+}
+
+/* Combo box styling */
+QComboBox {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 16px;
+    padding: 6px 15px;
+    font-family: 'Segoe UI';
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+    min-height: 32px;
+    min-width: 200px;
+    text-align: left;
+    padding-right: 30px;
+}
+
+QComboBox:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    width: 24px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid #333333;
+    margin-right: 8px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: #e0e0e0;
+    outline: none;
+}
+
+QComboBox QAbstractItemView::item {
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+QComboBox QAbstractItemView::item:selected {
+    background-color: #e0e0e0;
+}
+
+QComboBox:disabled {
+    color: #999999;
+    border-color: #999999;
+}
+
+/* Fix for sharp corners */
+QMainWindow, QWidget#mainWidget {
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    border-bottom-left-radius: 12px;
+    border-bottom-right-radius: 12px;
+    background-clip: border-box;
+}
+
+/* Title bar */
+#titleBar {
+    background-color: transparent;
+    border: none;
+}
+
+/* Title frame */
+#titleFrame {
+    background-color: #e0e0e0;
+    border: 3px solid #333333;
+    border-radius: 15px;
+    margin: 0;
+    padding: 0;
+    min-width: 250px;
+}
+
+/* Title label */
+QLabel#titleLabel {
+    color: #333333;
+    font-family: 'Segoe UI';
+    font-size: 20px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 5px 15px;
+    text-align: center;
+}
+
+/* App title text */
+QLabel#appTitle {
+    color: #333333;
+    font-family: 'Arial', sans-serif;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    margin: 0;
+    padding: 8px 20px;
+    text-transform: uppercase;
+}
+
+/* Close button container */
+#closeButtonContainer {
+    padding-top: 5px;
+}
+
+/* Close button */
+QPushButton#closeButton {
+    background-color: #e0e0e0;
+    border: 2px solid #333333;
+    border-radius: 12px;
+    padding: 0px;
+    margin: 0px;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+}
+
+QPushButton#closeButton:hover {
+    background-color: #d0d0d0;
+    border-color: #555555;
+}
+
+QPushButton#closeButton:pressed {
+    background-color: #c0c0c0;
+    border-color: #333333;
+}
+
+/* Group boxes */
+QGroupBox {
+    border: 1px solid #999999;
+    border-radius: 6px;
+    margin-top: 16px;
+    padding-top: 16px;
+    font-family: 'Segoe UI';
+    font-size: 11px;
+    font-weight: bold;
+    color: #333333;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+}
+
+/* Action buttons */
+QPushButton#actionButton {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 20px;
+    padding: 5px 15px;
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    min-height: 32px;
+}
+
+QPushButton#actionButton:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+QPushButton#actionButton:pressed {
+    background-color: #d0d0d0;
+    border-color: #333333;
+}
+
+/* Select buttons */
+QPushButton#selectButton {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 16px;
+    padding: 5px 15px;
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    min-width: 108px;
+    min-height: 32px;
+}
+
+QPushButton#selectButton:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+QPushButton#selectButton:pressed {
+    background-color: #d0d0d0;
+    border-color: #333333;
+}
+
+/* Start buttons */
+QPushButton#startButton {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 16px;
+    padding: 5px 15px;
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    min-width: 56px;
+    min-height: 32px;
+}
+
+QPushButton#startButton:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+QPushButton#startButton:pressed {
+    background-color: #d0d0d0;
+    border-color: #333333;
+}
+
+/* Settings button */
+QPushButton#settingsButton {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 1px solid #999999;
+    border-radius: 20px;
+    padding: 5px 10px;
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    min-width: 90px;
+    min-height: 32px;
+}
+
+QPushButton#settingsButton:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+/* About button - Lowered by 2px for better centering */
+QPushButton#aboutButton {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 16px;
+    font-weight: bold;
+    font-size: 16px;
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+    margin-left: 8px;
+    padding: 0px;
+    text-align: center;
+    margin-top: 2px;
+}
+
+QPushButton#aboutButton:hover {
+    background-color: #e0e0e0;
+    border-color: #555555;
+}
+
+/* Badge display - Flush with bottom border and no clipping */
+QLabel#badgeLabel {
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+    margin: 0px;
+    margin-bottom: 0px;
+    min-height: 100px;
+    max-height: 100px;
+}

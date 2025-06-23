@@ -1,0 +1,212 @@
+/* Combo Box Styles */
+QComboBox {
+    background-color: #2e2e2e;
+    color: white;
+    border: 2px solid white;
+    border-radius: 16px;
+    padding: 6px 15px;
+    min-width: 200px;
+    min-height: 32px;
+    text-align: left;
+    padding-right: 40px;
+    combobox-popup: 0;
+    font-family: 'Segoe UI';
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+QComboBox:hover {
+    background-color: #3a3a3a;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    width: 30px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid white;
+    margin-right: 8px;
+}
+
+/* Dark theme specific styles */
+QComboBox QAbstractItemView {
+    background-color: #404040;
+    color: white;
+    border: 2px solid white;
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+}
+
+QComboBox QAbstractItemView::item {
+    padding: 6px 8px;
+    border-radius: 4px;
+    background-color: #404040;
+    color: white;
+}
+
+QComboBox QAbstractItemView::item:selected {
+    background-color: #555555;
+}
+
+QComboBox QAbstractItemView::item:hover {
+    background-color: #4a4a4a;
+}
+
+/* Light theme specific styles */
+QComboBox.light {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+}
+
+QComboBox.light:hover {
+    background-color: #e0e0e0;
+}
+
+QComboBox.light::down-arrow {
+    border-top-color: #333333;
+}
+
+QComboBox.light QAbstractItemView {
+    background-color: #f0f0f0;
+    color: #333333;
+    border: 2px solid #333333;
+}
+
+QComboBox.light QAbstractItemView::item {
+    background-color: #f0f0f0;
+    color: #333333;
+}
+
+QComboBox.light QAbstractItemView::item:selected {
+    background-color: #e0e0e0;
+}
+
+QComboBox.light QAbstractItemView::item:hover {
+    background-color: #d0d0d0;
+}
+
+/* Hover state */
+QComboBox:hover {
+    background-color: #3a3a3a;
+    border: 2px solid #cccccc;         /* Lighter border on hover */
+}
+
+/* Ensure the dropdown has no frame */
+QComboBox QFrame {
+    border: none;
+    background-color: transparent;
+}
+
+/* Scrollbar Styling */
+QScrollBar:vertical {
+    border: none;
+    background: #252526;
+    width: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: #3a3a3a;
+    min-height: 20px;
+    border-radius: 5px;
+    margin: 2px;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* Light Theme Overrides */
+.light QComboBox {
+    background-color: #f5f5f5;
+    color: #333333;
+    border: 2px solid #333333;
+    border-radius: 16px;
+    padding: 6px 15px;
+    padding-right: 40px;
+    /* Force custom popup */
+    combobox-popup: 0;        /* Disable native popup */
+}
+
+.light QComboBox QAbstractItemView {
+    background-color: #e8e8e8 !important;           /* Light grey background */
+    color: #333333 !important;                      /* Dark text */
+    border: none !important;                 /* Remove border completely */
+    border-radius: 8px;                      /* Keep radius but no border */
+    padding: 4px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Light theme QListView styling */
+.light QComboBox QListView {
+    background-color: #e8e8e8 !important;           /* Light grey background */
+    color: #333333 !important;                      /* Dark text */
+    selection-background-color: #d0d0d0 !important;  /* Darker grey when selected */
+    selection-color: #333333 !important;            /* Dark text when selected */
+    border: none !important;                 /* Remove border completely */
+    outline: 0;
+    padding: 2px;
+    border-radius: 8px;                      /* Keep radius but no border */
+    show-decoration-selected: 1;
+}
+
+.light QComboBox QListView::item {
+    background-color: transparent;
+    color: #333333;
+    padding: 6px 8px;
+    border: none;
+}
+
+.light QComboBox QListView::item:selected {
+    background-color: #d0d0d0;           /* Selection highlight */
+    color: #333333;
+}
+
+.light QComboBox QListView::item:hover {
+    background-color: #dadada;           /* Hover effect */
+    color: #333333;
+}
+
+.light QComboBox:hover {
+    background-color: #e0e0e0;
+    border-color: #666666;
+}
+
+.light QComboBox::drop-down {
+    background-color: transparent;
+    border-top-right-radius: 14px;
+    border-bottom-right-radius: 14px;
+}
+
+.light QComboBox::down-arrow {
+    width: 8px;
+    height: 8px;
+    background-color: #333333;         /* Dark circle for light theme */
+    border: none;
+    border-radius: 4px;                /* Perfect circle */
+    margin-right: 10px;
+}
+
+.light QComboBox QAbstractItemView::item:selected {
+    background-color: #d0d0d0;
+}
+
+.light QScrollBar:vertical {
+    background: #f0f0f0;
+}
+
+.light QScrollBar::handle:vertical {
+    background: #d0d0d0;
+}

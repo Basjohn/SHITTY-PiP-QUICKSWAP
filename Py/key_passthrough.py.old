@@ -1,0 +1,698 @@
+import logging
+import win32gui
+import win32api
+import win32con
+import win32process
+import ctypes
+import time
+from typing import Optional
+
+# Define missing constants
+WM_APPCOMMAND = 0x0319
+APPCOMMAND_MEDIA_PLAY_PAUSE = 0xE0000
+
+# Define the SendInput structure for key simulation
+PUL = ctypes.POINTER(ctypes.c_ulong)
+
+class KeyBdInput(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL)
+    ]
+
+class HardwareInput(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_ulong),
+        ("wParamL", ctypes.c_short),
+        ("wParamH", ctypes.c_ushort)
+    ]
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL)
+    ]
+
+class Input_I(ctypes.Union):
+    _fields_ = [
+        ("ki", KeyBdInput),
+        ("mi", MouseInput),
+        ("hi", HardwareInput)
+    ]
+
+class Input(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_ulong),
+        ("ii", Input_I)
+    ]
+
+logger = logging.getLogger(__name__)
+
+class KeyPassthrough:
+    def __init__(self):
+        self._original_foreground = None
+        self._enabled = False
+        self._aggressive_mode = False
+        self._target_hwnd = None
+
+    def set_target_window(self, hwnd: int):
+        """Set the target window for key passthrough."""
+        self._target_hwnd = hwnd
+        logger.debug(f"Key passthrough target window set to: {hwnd}")
+
+    def set_enabled(self, enabled: bool):
+        """Enable or disable key passthrough."""
+        self._enabled = enabled
+        logger.info(f"Key passthrough {'enabled' if enabled else 'disabled'}")
+        return enabled
+
+    def is_enabled(self) -> bool:
+        """Check if key passthrough is enabled."""
+        return self._enabled
+
+    def set_aggressive_mode(self, enabled: bool):
+        """Enable or disable aggressive key passthrough mode."""
+        self._aggressive_mode = enabled
+        logger.info(f"Aggressive key passthrough {'enabled' if enabled else 'disabled'}")
+        return enabled
+
+    def is_aggressive_mode(self) -> bool:
+        """Check if aggressive mode is enabled."""
+        return self._aggressive_mode
+
+    def send_key(self, vk_code: int) -> bool:
+        """Send a key to the target window if enabled."""
+        logger.debug(f"Attempting to send key: {vk_code} (enabled={self._enabled}, target_hwnd={self._target_hwnd})")
+        
+        if not self._enabled:
+            logger.debug("Key passthrough is disabled")
+            return False
+            
+        if not self._target_hwnd:
+            logger.debug("No target window set")
+            return False
+            
+        try:
+            if vk_code not in [win32con.VK_SPACE, win32con.VK_RETURN]:
+                logger.warning(f"Unsupported key code: {vk_code}")
+                return False
+                
+            logger.debug(f"Sending key: {'SPACE' if vk_code == win32con.VK_SPACE else 'ENTER'}")
+                
+            if self._aggressive_mode:
+                logger.debug("Using aggressive mode")
+                return self._send_key_aggressive(self._target_hwnd, vk_code)
+            else:
+                if vk_code == win32con.VK_SPACE:
+                    logger.debug("Sending spacebar")
+                    return self._send_spacebar(self._target_hwnd)
+                else:  # VK_RETURN
+                    logger.debug("Sending enter")
+                    return self._send_enter(self._target_hwnd)
+        except Exception as e:
+            logger.error(f"Failed to send key to window: {e}", exc_info=True)
+            return False
+
+    def _send_spacebar(self, hwnd):
+        """Send spacebar - try media commands for browsers/media apps, raw key for games."""
+        try:
+            logger.debug(f"Sending spacebar to hwnd: {hwnd}")
+            
+            app_type = self._identify_application(hwnd)
+            logger.debug(f"Identified application type: {app_type}")
+            
+            # For browsers and media players, try media commands first
+            if app_type in ['firefox', 'chromium', 'media_player']:
+                logger.debug("Trying media play/pause command")
+                try:
+                    if self._send_media_command(hwnd, 'play_pause'):
+                        logger.debug("Media play/pause command succeeded")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Media play/pause failed: {e}", exc_info=True)
+                
+                logger.debug("Media play/pause command failed, falling back to raw key")
+            
+            logger.debug("Sending raw space key")
+            result = self._send_raw_key(hwnd, win32con.VK_SPACE)
+            logger.debug(f"Raw space key send result: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Spacebar send failed: {e}", exc_info=True)
+            return False
+
+    def _send_enter(self, hwnd):
+        """Send enter key - always just raw key press."""
+        try:
+            logger.debug(f"Sending enter key to hwnd: {hwnd}")
+            result = self._send_raw_key(hwnd, win32con.VK_RETURN)
+            logger.debug(f"Enter key send result: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Enter send failed: {e}", exc_info=True)
+            return False
+
+    def _identify_application(self, hwnd):
+        """Simple app identification for spacebar handling."""
+        try:
+            class_name = win32gui.GetClassName(hwnd)
+            exe_name = self._get_process_name(hwnd).lower()
+            window_text = win32gui.GetWindowText(hwnd).lower()
+            
+            logger.debug(f"App identification - Class: {class_name}, Exe: {exe_name}, Text: {window_text}")
+            
+            if 'mozilla' in class_name.lower() or 'firefox' in exe_name:
+                return 'firefox'
+                
+            if any(browser in class_name.lower() for browser in ['chrome', 'edge', 'chromium']):
+                return 'chromium'
+                
+            if any(player in exe_name for player in ['spotify', 'mpv', 'vlc', 'wmplayer']) or 'spotify' in window_text:
+                return 'media_player'
+                
+            return 'other'
+            
+        except Exception as e:
+            logger.debug(f"Failed to identify application: {e}")
+            return 'other'
+
+    def _get_process_name(self, hwnd):
+        """Get the process name for a window."""
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            handle = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION, False, pid)
+            exe_path = win32process.GetModuleFileNameEx(handle, 0)
+            win32api.CloseHandle(handle)
+            return exe_path.split('\\')[-1]
+        except:
+            return ""
+
+    def send_media_play_pause(self):
+        """Send media play/pause command to the target window."""
+        if not self._target_hwnd or not self._enabled:
+            logger.debug("Media play/pause: No target window or key passthrough disabled")
+            return False
+        logger.debug("Sending media play/pause command")
+        return self._send_media_command(self._target_hwnd, 'play_pause')
+        
+    def send_media_next_track(self):
+        """Send next track command to the target window."""
+        if not self._target_hwnd or not self._enabled:
+            logger.debug("Next track: No target window or key passthrough disabled")
+            return False
+        logger.debug("Sending next track command")
+        return self._send_media_command(self._target_hwnd, 'next_track')
+        
+    def send_media_previous_track(self):
+        """Send previous track command to the target window."""
+        if not self._target_hwnd or not self._enabled:
+            logger.debug("Previous track: No target window or key passthrough disabled")
+            return False
+        logger.debug("Sending previous track command")
+        return self._send_media_command(self._target_hwnd, 'prev_track')
+        
+    def send_space(self):
+        """Send space key to the target window."""
+        if not self._target_hwnd or not self._enabled:
+            logger.debug("Space: No target window or key passthrough disabled")
+            return False
+        logger.debug("Sending space key")
+        return self._send_spacebar(self._target_hwnd)
+        
+    def send_enter(self):
+        """Send enter key to the target window."""
+        if not self._target_hwnd or not self._enabled:
+            logger.debug("Enter: No target window or key passthrough disabled")
+            return False
+        logger.debug("Sending enter key")
+        return self._send_enter(self._target_hwnd)
+
+    def _send_media_command(self, hwnd, command):
+        """Send media command to window using multiple methods for better compatibility.
+        
+        This method tries several approaches to send media commands, starting with the most
+        reliable and least intrusive methods first.
+        
+        Args:
+            hwnd: Target window handle
+            command: Media command to send ('play_pause', 'next_track', 'prev_track')
+            
+        Returns:
+            bool: True if the command was sent successfully, False otherwise
+        """
+        try:
+            # Map command to appropriate constants
+            if command == 'play_pause':
+                cmd = 0xE0000  # APPCOMMAND_MEDIA_PLAY_PAUSE
+                vk_code = 0xB3  # VK_MEDIA_PLAY_PAUSE
+                key_name = "Play/Pause"
+            elif command == 'next_track':
+                cmd = 0xB0000  # APPCOMMAND_MEDIA_NEXTTRACK
+                vk_code = 0xB0  # VK_MEDIA_NEXT_TRACK
+                key_name = "Next Track"
+            elif command == 'prev_track':
+                cmd = 0xC0000  # APPCOMMAND_MEDIA_PREVIOUSTRACK
+                vk_code = 0xB1  # VK_MEDIA_PREV_TRACK
+                key_name = "Previous Track"
+            else:
+                logger.warning(f"Unsupported media command: {command}")
+                return False
+                
+            # Get application type for specialized handling
+            app_type = self._identify_application(hwnd)
+            logger.debug(f"Sending {key_name} to {app_type} application (hwnd: {hwnd})")
+            
+            # Method 1: Try WM_APPCOMMAND with both SendMessage and PostMessage
+            def try_wm_appcommand():
+                try:
+                    # Try SendMessage first (blocks until processed)
+                    result1 = win32api.SendMessage(hwnd, win32con.WM_APPCOMMAND, hwnd, cmd)
+                    time.sleep(0.01)  # Small delay
+                    # Try PostMessage (asynchronous)
+                    result2 = win32api.PostMessage(hwnd, win32con.WM_APPCOMMAND, hwnd, cmd)
+                    
+                    if result1 or result2:
+                        logger.debug(f"WM_APPCOMMAND succeeded for {key_name}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"WM_APPCOMMAND failed for {key_name}: {e}")
+                return False
+            
+            # Method 2: Try sending media key directly to the window
+            def try_send_media_key():
+                try:
+                    # Try sending the media key directly
+                    self._send_key_to_window(hwnd, vk_code, is_media_key=True)
+                    logger.debug(f"Sent {key_name} key directly to window")
+                    return True
+                except Exception as e:
+                    logger.debug(f"Failed to send {key_name} key directly: {e}")
+                    return False
+            
+            # Method 3: For Chromium-based apps, try sending space/arrow keys
+            def try_chromium_specific():
+                if app_type != 'chromium':
+                    return False
+                    
+                try:
+                    if command == 'play_pause':
+                        # Try sending space to the window (works for web players)
+                        self._send_key_to_window(hwnd, win32con.VK_SPACE)
+                        logger.debug("Sent SPACE to Chromium window")
+                        return True
+                    elif command in ['next_track', 'prev_track']:
+                        # Try sending arrow keys (left/right)
+                        key = win32con.VK_RIGHT if command == 'next_track' else win32con.VK_LEFT
+                        self._send_key_to_window(hwnd, key)
+                        logger.debug(f"Sent {'RIGHT' if command == 'next_track' else 'LEFT'} arrow to Chromium window")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Failed to send key to Chromium window: {e}")
+                return False
+            
+            # Method 4: Try sending to child windows (for games and complex apps)
+            def try_child_windows():
+                try:
+                    if self._send_to_child_windows(hwnd, vk_code, is_media=True):
+                        logger.debug(f"Sent {key_name} to child window")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Failed to send to child windows: {e}")
+                return False
+            
+            # Method 5: As a last resort, try sending a system-wide media key
+            def try_system_media_key():
+                try:
+                    self._simulate_media_key(vk_code)
+                    logger.debug(f"Sent system-wide {key_name} key")
+                    return True
+                except Exception as e:
+                    logger.debug(f"Failed to send system media key: {e}")
+                return False
+            
+            # Try each method in order of preference
+            methods = [
+                ("WM_APPCOMMAND", try_wm_appcommand),
+                ("Direct Media Key", try_send_media_key),
+                ("Chromium Specific", try_chromium_specific),
+                ("Child Windows", try_child_windows),
+                ("System Media Key", try_system_media_key)
+            ]
+            
+            for name, method in methods:
+                logger.debug(f"Trying {name} method for {key_name}")
+                if method():
+                    logger.debug(f"Successfully sent {key_name} using {name}")
+                    return True
+            
+            logger.warning(f"All methods failed to send {key_name}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in _send_media_command for {command}: {e}", exc_info=True)
+            return False
+
+    def _send_firefox_spacebar(self, hwnd):
+        """Send spacebar to Firefox content areas."""
+        def enum_firefox_windows(child_hwnd, param):
+            try:
+                class_name = win32gui.GetClassName(child_hwnd)
+                if class_name in ['MozillaCompositorWindowClass', 'MozillaContentWindowClass']:
+                    self._send_raw_key(child_hwnd, win32con.VK_SPACE)
+                    win32api.SendMessage(child_hwnd, win32con.WM_CANCELMODE, 0, 0)
+            except:
+                pass
+            return True
+        
+        win32gui.EnumChildWindows(hwnd, enum_firefox_windows, None)
+
+    def _send_chromium_spacebar(self, hwnd):
+        """Send spacebar to Chrome/Edge content areas."""
+        def enum_chrome_windows(child_hwnd, param):
+            try:
+                class_name = win32gui.GetClassName(child_hwnd)
+                if class_name == 'Chrome_RenderWidgetHostHWND':
+                    rect = win32gui.GetWindowRect(child_hwnd)
+                    if (rect[2] - rect[0]) > 200 and (rect[3] - rect[1]) > 200:
+                        self._send_raw_key(child_hwnd, win32con.VK_SPACE)
+            except:
+                pass
+            return True
+        
+        win32gui.EnumChildWindows(hwnd, enum_chrome_windows, None)
+
+    def _send_raw_key(self, hwnd, vk_code):
+        """Send raw key press to window without stealing focus."""
+        def try_send_message(hwnd, msg, wparam, lparam, use_post=False):
+            try:
+                if use_post:
+                    return win32api.PostMessage(hwnd, msg, wparam, lparam)
+                return win32api.SendMessage(hwnd, msg, wparam, lparam)
+            except Exception as e:
+                logger.debug(f"{'Post' if use_post else 'Send'}Message failed: {e}")
+                if not use_post:  # Only try PostMessage if SendMessage failed
+                    try:
+                        return win32api.PostMessage(hwnd, msg, wparam, lparam)
+                    except Exception as e2:
+                        logger.debug(f"PostMessage also failed: {e2}")
+                return 0
+                
+        def send_key_sequence(hwnd, vk_code, is_media=False):
+            """Send a complete key sequence (down, char if needed, up)"""
+            scan_code = win32api.MapVirtualKey(vk_code, 0)
+            lparam_down = (1 | (scan_code << 16))
+            lparam_up = lparam_down | (1 << 30) | (1 << 31)  # Key up flag and transition state
+            
+            # Send key down
+            if not is_media:  # Don't send key down for media keys
+                try_send_message(hwnd, win32con.WM_KEYDOWN, vk_code, lparam_down, use_post=True)
+                
+                # For certain keys, send WM_CHAR
+                if vk_code in (win32con.VK_RETURN, win32con.VK_SPACE):
+                    char = '\r' if vk_code == win32con.VK_RETURN else ' '
+                    try_send_message(hwnd, win32con.WM_CHAR, ord(char), lparam_down, use_post=True)
+                
+                time.sleep(0.005)  # Small delay between down and up
+            
+            # Send key up
+            if not is_media:  # Don't send key up for media keys
+                try_send_message(hwnd, win32con.WM_KEYUP, vk_code, lparam_up, use_post=True)
+
+        try:
+            if not win32gui.IsWindow(hwnd):
+                logger.error(f"Window handle {hwnd} is not valid")
+                return False
+                
+            window_text = win32gui.GetWindowText(hwnd)
+            class_name = win32gui.GetClassName(hwnd)
+            key_name = 'SPACE' if vk_code == win32con.VK_SPACE else 'ENTER' if vk_code == win32con.VK_RETURN else f'0x{vk_code:X}'
+            
+            logger.debug(f"=== Sending {key_name} (VK: 0x{vk_code:X}) to window ===")
+            logger.debug(f"Window: '{window_text}'")
+            logger.debug(f"Class: {class_name}")
+            logger.debug(f"Handle: 0x{hwnd:X}")
+            
+            # Get window rect for logging
+            try:
+                rect = win32gui.GetWindowRect(hwnd)
+                logger.debug(f"Window rect: {rect} (L:{rect[0]}, T:{rect[1]}, R:{rect[2]}, B:{rect[3]})")
+                logger.debug(f"Window size: {rect[2]-rect[0]}x{rect[3]-rect[1]}")
+            except Exception as e:
+                logger.debug(f"Couldn't get window rect: {e}")
+            
+            # Log window style info
+            try:
+                style = win32api.GetWindowLong(hwnd, win32con.GWL_STYLE)
+                ex_style = win32api.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                logger.debug(f"Window style: 0x{style:X}, ExStyle: 0x{ex_style:X}")
+                logger.debug(f"IsWindowVisible: {win32gui.IsWindowVisible(hwnd)}")
+                logger.debug(f"IsWindowEnabled: {win32gui.IsWindowEnabled(hwnd)}")
+            except Exception as e:
+                logger.debug(f"Couldn't get window style info: {e}")
+            
+            # Get current foreground window for logging only
+            try:
+                current_foreground = win32gui.GetForegroundWindow()
+                logger.debug(f"Current foreground window: 0x{current_foreground:X}")
+                logger.debug(f"Target window is in foreground: {current_foreground == hwnd}")
+            except Exception as e:
+                logger.debug(f"Could not get foreground window: {e}")
+            
+            # Save current foreground window to restore later if needed
+            original_foreground = win32gui.GetForegroundWindow()
+            
+            try:
+                # Prepare key information
+                scan_code = win32api.MapVirtualKey(vk_code, 0)
+                lparam_down = (1 | (scan_code << 16))
+                lparam_up = lparam_down | (1 << 30) | (1 << 31)  # Key up flag and transition state
+                
+                # Try direct key press first
+                logger.debug(f"\n=== Attempting direct key press ===")
+                
+                # Try sending to main window
+                win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, lparam_down)
+                time.sleep(0.01)
+                
+                # Send WM_CHAR for certain keys
+                if vk_code in (win32con.VK_RETURN, win32con.VK_SPACE):
+                    char = '\r' if vk_code == win32con.VK_RETURN else ' '
+                    win32api.SendMessage(hwnd, win32con.WM_CHAR, ord(char), lparam_down)
+                
+                time.sleep(0.01)
+                win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, lparam_up)
+                
+                # For certain applications, try sending to child windows as well
+                app_type = self._identify_application(hwnd)
+                logger.debug(f"\nApplication type: {app_type}")
+                
+                if app_type == 'other':
+                    logger.debug("Trying to send to child windows")
+                    self._send_to_child_windows(hwnd, vk_code)
+                
+                # Try alternative methods if the direct method didn't work
+                if not self._verify_key_sent(hwnd, vk_code):
+                    logger.debug("Direct key press failed, trying alternative methods")
+                    
+                    # Try with window activation
+                    try:
+                        # Save current window state
+                        was_minimized = win32gui.IsIconic(hwnd)
+                        if was_minimized:
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        
+                        # Temporarily bring to foreground
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.05)
+                        
+                        # Send keys
+                        win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, lparam_down)
+                        time.sleep(0.01)
+                        if vk_code in (win32con.VK_RETURN, win32con.VK_SPACE):
+                            char = '\r' if vk_code == win32con.VK_RETURN else ' '
+                            win32api.SendMessage(hwnd, win32con.WM_CHAR, ord(char), lparam_down)
+                        time.sleep(0.01)
+                        win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, lparam_up)
+                        
+                        # Restore window state
+                        if was_minimized:
+                            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                        
+                    except Exception as e:
+                        logger.debug(f"Alternative method 1 failed: {e}")
+                        
+                        # Final fallback - use SendInput for system-wide key press
+                        try:
+                            logger.debug("Trying SendInput as last resort")
+                            extra = ctypes.c_ulong(0)
+                            ii_ = Input_I()
+                            ii_.ki = KeyBdInput(0, 0, 0, 0, ctypes.pointer(extra))
+                            x = Input(ctypes.c_ulong(1), ii_)
+                            
+                            # Key down
+                            x.ii.ki = KeyBdInput(vk_code, scan_code, 0, 0, ctypes.pointer(extra))
+                            ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+                            time.sleep(0.01)
+                            
+                            # Key up
+                            x.ii.ki = KeyBdInput(vk_code, scan_code, 0x0002, 0, ctypes.pointer(extra))
+                            ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+                            
+                        except Exception as e2:
+                            logger.debug(f"SendInput also failed: {e2}")
+                
+                logger.debug("\n=== Key send sequence completed ===\n")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Failed to send raw key {vk_code} to hwnd {hwnd}: {e}", exc_info=True)
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in _send_raw_key: {e}", exc_info=True)
+            return False
+            
+        finally:
+            # Try to restore original foreground window
+            if original_foreground and win32gui.IsWindow(original_foreground):
+                try:
+                    win32gui.SetForegroundWindow(original_foreground)
+                except:
+                    pass
+    
+    def _verify_key_sent(self, hwnd, vk_code):
+        """Verify if the key was actually sent to the window."""
+        # This is a simple check - we'll try to detect if the window state changed
+        # after sending the key. This is not foolproof but can help in some cases.
+        try:
+            # Get current window state
+            original_rect = win32gui.GetWindowRect(hwnd)
+            original_text = win32gui.GetWindowText(hwnd)
+            
+            # Wait a bit for any changes to take effect
+            time.sleep(0.1)
+            
+            # Check if anything changed
+            new_rect = win32gui.GetWindowRect(hwnd)
+            new_text = win32gui.GetWindowText(hwnd)
+            
+            # If window rect or text changed, assume the key was processed
+            if original_rect != new_rect or original_text != new_text:
+                return True
+                
+            # For certain applications, we might need additional checks
+            app_type = self._identify_application(hwnd)
+            
+            if app_type in ['firefox', 'chromium']:
+                # For browsers, we can't easily verify if the key was processed
+                # So we'll just assume it was successful
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Key verification failed: {e}")
+            # If we can't verify, assume it was successful
+            return True
+
+    def _send_to_child_windows(self, hwnd, vk_code):
+        """Send key to child windows for games/apps that need it."""
+        def enum_child_windows(child_hwnd, param):
+            try:
+                if win32gui.IsWindowVisible(child_hwnd):
+                    rect = win32gui.GetWindowRect(child_hwnd)
+                    if (rect[2] - rect[0]) > 100 and (rect[3] - rect[1]) > 100:
+                        win32api.SendMessage(child_hwnd, win32con.WM_KEYDOWN, vk_code, 0)
+                        win32api.SendMessage(child_hwnd, win32con.WM_KEYUP, vk_code, 0)
+                        if vk_code == win32con.VK_RETURN:
+                            win32api.SendMessage(child_hwnd, win32con.WM_CHAR, 13, 0)
+                        elif vk_code == win32con.VK_SPACE:
+                            win32api.SendMessage(child_hwnd, win32con.WM_CHAR, 32, 0)
+            except:
+                pass
+            return True
+        
+        win32gui.EnumChildWindows(hwnd, enum_child_windows, None)
+
+    def _send_key_aggressive(self, hwnd, vk_code):
+        """Send a key press to a window without bringing it to the foreground.
+        Uses multiple methods to ensure the key is delivered without stealing focus.
+        
+            vk_code: The virtual key code to send (VK_SPACE or VK_RETURN)
+            
+        Returns:
+            bool: True if the key was sent successfully, False otherwise
+        """
+        def try_send_message():
+            """Try sending the key using window messages."""
+            try:
+                # Try sending the key directly to the window
+                if self._send_raw_key(hwnd, vk_code):
+                    return True
+                    
+                # If that fails, try sending to child windows
+                if self._send_to_child_windows(hwnd, vk_code):
+                    return True
+                    
+            except Exception as e:
+                logger.debug(f"Send message failed: {e}")
+            return False
+            
+        def try_send_input():
+            """Try sending the key using SendInput."""
+            try:
+                # Create a keyboard event
+                extra = ctypes.c_ulong(0)
+                ii_ = Input_I()
+                ii_.ki = KeyBdInput(0, 0, 0, 0, ctypes.pointer(extra))
+                
+                # Key down
+                x = Input(ctypes.c_ulong(1), ii_)
+                x.ii.ki.wVk = vk_code
+                x.ii.ki.dwFlags = 0  # Key down
+                ctypes.windll.user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+                
+                # Small delay
+                time.sleep(0.01)
+                
+                # Key up
+                x.ii.ki.dwFlags = win32con.KEYEVENTF_KEYUP  # Key up
+                ctypes.windll.user32.SendInput(1, ctypes.byref(x), ctypes.sizeof(x))
+                
+                return True
+            except Exception as e:
+                logger.debug(f"SendInput failed: {e}")
+                return False
+                
+        # Try each method in order of preference
+        methods = [
+            ("Window Message", try_send_message),
+            ("SendInput", try_send_input)
+        ]
+        
+        for name, method in methods:
+            logger.debug(f"Trying {name} method for key {vk_code}")
+            if method():
+                logger.debug(f"Successfully sent key using {name}")
+                return True
+                
+        logger.warning(f"All methods failed to send key {vk_code}")
+        return False
+
+    def _get_main_window(self, hwnd):
+        """Get the main window (root parent) of a given window."""
+        current = hwnd
+        while True:
+            parent = win32gui.GetParent(current)
+            if not parent:
+                break
+            current = parent
+        return current
