@@ -146,7 +146,7 @@ QScrollBar::sub-line:vertical {
     border: none !important;                 /* Remove border completely */
     border-radius: 8px;                      /* Keep radius but no border */
     padding: 4px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+
 }
 
 /* Light theme QListView styling */

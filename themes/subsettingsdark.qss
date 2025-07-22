@@ -1,0 +1,338 @@
+/* Main Dialog/Window Styling */
+QDialog, QWidget {
+    background-color: rgba(45, 45, 45, 0.95);
+    color: #ffffff;
+    border-radius: 8px;
+}
+
+/* Title Bar / Header */
+QDialog::title {
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 10px;
+}
+
+/* Main Container */
+QFrame, QGroupBox {
+    background-color: rgba(45, 45, 45, 0.95);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 6px;
+    margin: 2px;
+}
+
+/* Labels */
+QLabel {
+    color: #ffffff;
+    font-size: 14px;
+    background-color: transparent;
+    padding: 4px;
+}
+
+/* Sliders - FORCE CUSTOM HANDLES */
+QSlider {
+    background: transparent;
+    outline: none;
+}
+
+QSlider::groove:horizontal {
+    border: 1px solid #464646;
+    height: 6px;
+    background: #1e1e1e;
+    border-radius: 3px;
+    margin: 0px;
+}
+
+QSlider::handle:horizontal {
+    background: #ffffff;
+    border: 2px solid #464646;
+    width: 20px;
+    height: 20px;
+    margin: -8px 0;
+    border-radius: 10px;
+    /* Force custom handle - remove native styling */
+    outline: none;
+    subcontrol-position: center;
+    subcontrol-origin: content;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #f0f0f0;
+    border: 2px solid #606060;
+}
+
+QSlider::handle:horizontal:pressed {
+    background: #e0e0e0;
+    border: 2px solid #808080;
+}
+
+/* Vertical sliders if needed */
+QSlider::groove:vertical {
+    border: 1px solid #464646;
+    width: 6px;
+    background: #1e1e1e;
+    border-radius: 3px;
+    margin: 0px;
+}
+
+QSlider::handle:vertical {
+    background: #ffffff;
+    border: 2px solid #464646;
+    width: 20px;
+    height: 20px;
+    margin: 0 -8px;
+    border-radius: 10px;
+    outline: none;
+    subcontrol-position: center;
+    subcontrol-origin: content;
+}
+
+QSlider::handle:vertical:hover {
+    background: #f0f0f0;
+    border: 2px solid #606060;
+}
+
+QSlider::handle:vertical:pressed {
+    background: #e0e0e0;
+    border: 2px solid #808080;
+}
+
+/* ComboBox (Dropdown) */
+QComboBox {
+    background-color: rgba(60, 60, 60, 0.9);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 4px;
+    padding: 6px 12px;
+    color: #ffffff;
+    font-size: 14px;
+    min-height: 20px;
+}
+
+QComboBox:hover {
+    background-color: rgba(70, 70, 70, 0.9);
+    border-color: rgba(90, 90, 90, 0.8);
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 6px solid #ffffff;
+    margin-right: 6px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: rgba(60, 60, 60, 0.95);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 4px;
+    color: #ffffff;
+    selection-background-color: rgba(80, 80, 80, 0.9);
+}
+
+/* Text Input Fields */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: rgba(50, 50, 50, 0.9);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 4px;
+    padding: 6px 8px;
+    color: #ffffff;
+    font-size: 14px;
+}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border-color: rgba(100, 150, 200, 0.8);
+    background-color: rgba(55, 55, 55, 0.9);
+}
+
+/* Spin Box */
+QSpinBox, QDoubleSpinBox {
+    background-color: rgba(50, 50, 50, 0.9);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #ffffff;
+    font-size: 14px;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    background-color: rgba(70, 70, 70, 0.8);
+    border: 1px solid rgba(90, 90, 90, 0.8);
+    width: 16px;
+}
+
+/* CheckBox and RadioButton - FORCE CUSTOM STYLING */
+QCheckBox, QRadioButton {
+    color: #ffffff;
+    font-size: 14px;
+    spacing: 8px;
+}
+
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #8c8c8c;
+    background-color: #323232;
+    border-radius: 3px;
+    /* Force custom appearance */
+    image: none;
+    subcontrol-position: left;
+    subcontrol-origin: content;
+}
+
+QCheckBox::indicator:unchecked {
+    background-color: #323232;
+    border: 2px solid #8c8c8c;
+    image: none;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #ffffff;
+    border: 2px solid #ffffff;
+    /* No image needed - we'll use a simple filled square to indicate checked */
+}
+
+QCheckBox::indicator:checked:hover {
+    background-color: #f0f0f0;
+    border: 2px solid #f0f0f0;
+}
+
+QCheckBox::indicator:unchecked:hover {
+    background-color: #404040;
+    border: 2px solid #a0a0a0;
+}
+
+QRadioButton::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #8c8c8c;
+    background-color: #323232;
+    border-radius: 9px;
+    /* Force custom appearance */
+    image: none;
+    subcontrol-position: left;
+    subcontrol-origin: content;
+}
+
+QRadioButton::indicator:unchecked {
+    background-color: #323232;
+    border: 2px solid #8c8c8c;
+}
+
+QRadioButton::indicator:checked {
+    background-color: #ffffff;
+    border: 2px solid #ffffff;
+    /* Simple filled circle - no image needed */
+}
+
+QRadioButton::indicator:checked:hover {
+    background-color: #f0f0f0;
+    border: 2px solid #f0f0f0;
+}
+
+QRadioButton::indicator:unchecked:hover {
+    background-color: #404040;
+    border: 2px solid #a0a0a0;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: rgba(70, 70, 70, 0.9);
+    border: 1px solid rgba(90, 90, 90, 0.8);
+    border-radius: 4px;
+    padding: 8px 16px;
+    color: #ffffff;
+    font-size: 14px;
+    min-height: 20px;
+}
+
+QPushButton:hover {
+    background-color: rgba(80, 80, 80, 0.9);
+    border-color: rgba(110, 110, 110, 0.8);
+}
+
+QPushButton:pressed {
+    background-color: rgba(60, 60, 60, 0.9);
+    border-color: rgba(70, 70, 70, 0.8);
+}
+
+/* Scroll Areas */
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    background-color: rgba(40, 40, 40, 0.8);
+    width: 12px;
+    border-radius: 6px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: rgba(100, 100, 100, 0.8);
+    border-radius: 6px;
+    min-height: 20px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: rgba(120, 120, 120, 0.8);
+}
+
+/* Tab Widget (if present) */
+QTabWidget::pane {
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    border-radius: 4px;
+    background-color: rgba(45, 45, 45, 0.95);
+}
+
+QTabBar::tab {
+    background-color: rgba(60, 60, 60, 0.9);
+    border: 1px solid rgba(70, 70, 70, 0.8);
+    padding: 8px 16px;
+    margin-right: 2px;
+    color: #ffffff;
+}
+
+QTabBar::tab:selected {
+    background-color: rgba(80, 80, 80, 0.9);
+    border-bottom-color: rgba(80, 80, 80, 0.9);
+}
+
+/* Experimental Section Styling */
+QLabel[text*="EXPERIMENTAL"] {
+    color: #ff6b6b;
+    font-weight: bold;
+    font-size: 12px;
+    text-align: center;
+}
+
+/* Close Button (X) */
+QPushButton[text="×"], QPushButton[text="✕"] {
+    background-color: transparent;
+    border: none;
+    color: #cccccc;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 4px;
+    max-width: 24px;
+    max-height: 24px;
+}
+
+QPushButton[text="×"]:hover, QPushButton[text="✕"]:hover {
+    background-color: rgba(200, 50, 50, 0.8);
+    border-radius: 12px;
+}
+
+/* Specific styling for transparency sliders */
+QSlider[objectName*="opacity"] QSlider::groove:horizontal,
+QSlider[objectName*="Opacity"] QSlider::groove:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                               stop:0 rgba(30, 30, 30, 0.8),
+                               stop:1 rgba(30, 30, 30, 0.2));
+}

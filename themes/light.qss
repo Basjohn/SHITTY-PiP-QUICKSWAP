@@ -1,7 +1,7 @@
-/* Main window styling - transparent with dark border */
+/* Main window styling - transparent with black border */
 QMainWindow {
     background-color: transparent;
-    border: 2px solid #333333;
+    border: 2px solid #000000;
     border-radius: 12px;
     padding: 0px;
     margin: 0px;
@@ -15,15 +15,16 @@ QMainWindow::separator {
     padding: 0px;
 }
 
-/* Central widget with semi-transparent light background */
+/* Central widget with white background */
 QWidget#mainWidget {
-    background-color: rgba(240, 240, 240, 0.7);
+    background-color: rgba(255, 255, 255, 0.8);
     border-radius: 10px;
-    border: 2px solid #333333;
+    border: 2px solid #000000;
     padding: 0px;
     margin: 0px;
     opacity: 1;
     background-clip: border-box;
+    color: #000000;
 }
 
 /* Ensure child widgets remain fully opaque */
@@ -32,11 +33,11 @@ QWidget#mainWidget > * {
     opacity: 1;
 }
 
-/* Combo box styling */
+/* Combo box styling - Light Theme */
 QComboBox {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 2px solid #333333;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 16px;
     padding: 6px 15px;
     font-family: 'Segoe UI';
@@ -112,8 +113,8 @@ QMainWindow, QWidget#mainWidget {
 
 /* Title frame */
 #titleFrame {
-    background-color: #e0e0e0;
-    border: 3px solid #333333;
+    background-color: #f0f0f0;
+    border: 3px solid #000000;
     border-radius: 15px;
     margin: 0;
     padding: 0;
@@ -122,7 +123,7 @@ QMainWindow, QWidget#mainWidget {
 
 /* Title label */
 QLabel#titleLabel {
-    color: #333333;
+    color: #000000;
     font-family: 'Segoe UI';
     font-size: 20px;
     font-weight: bold;
@@ -134,7 +135,7 @@ QLabel#titleLabel {
 
 /* App title text */
 QLabel#appTitle {
-    color: #333333;
+    color: #000000;
     font-family: 'Arial', sans-serif;
     font-size: 18px;
     font-weight: bold;
@@ -151,8 +152,8 @@ QLabel#appTitle {
 
 /* Close button */
 QPushButton#closeButton {
-    background-color: #e0e0e0;
-    border: 2px solid #333333;
+    background-color: #f0f0f0;
+    border: 2px solid #000000;
     border-radius: 12px;
     padding: 0px;
     margin: 0px;
@@ -160,6 +161,7 @@ QPushButton#closeButton {
     max-width: 24px;
     min-height: 24px;
     max-height: 24px;
+    color: #000000;
 }
 
 QPushButton#closeButton:hover {
@@ -174,14 +176,14 @@ QPushButton#closeButton:pressed {
 
 /* Group boxes */
 QGroupBox {
-    border: 1px solid #999999;
+    border: 1px solid #000000;
     border-radius: 6px;
     margin-top: 16px;
     padding-top: 16px;
     font-family: 'Segoe UI';
     font-size: 11px;
     font-weight: bold;
-    color: #333333;
+    color: #000000;
 }
 
 QGroupBox::title {
@@ -192,9 +194,9 @@ QGroupBox::title {
 
 /* Action buttons */
 QPushButton#actionButton {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 2px solid #333333;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 20px;
     padding: 5px 15px;
     font-weight: bold;
@@ -215,9 +217,9 @@ QPushButton#actionButton:pressed {
 
 /* Select buttons */
 QPushButton#selectButton {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 2px solid #333333;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 16px;
     padding: 5px 15px;
     font-weight: bold;
@@ -238,10 +240,38 @@ QPushButton#selectButton:pressed {
 }
 
 /* Start buttons */
+/* Context Menu Styling */
+QMenu {
+    background-color: #ffffff;
+    color: #000000;
+    border: 1px solid #000000;
+    padding: 2px;
+}
+
+QMenu::item {
+    padding: 6px 25px 6px 20px;
+    border-radius: 4px;
+    margin: 2px 5px;
+}
+
+QMenu::item:selected {
+    background-color: #e0e0e0;
+}
+
+QMenu::item:disabled {
+    color: #999999;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: #cccccc;
+    margin: 5px 10px;
+}
+
 QPushButton#startButton {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 2px solid #333333;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 16px;
     padding: 5px 15px;
     font-weight: bold;
@@ -263,9 +293,9 @@ QPushButton#startButton:pressed {
 
 /* Settings button */
 QPushButton#settingsButton {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 1px solid #999999;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 20px;
     padding: 5px 10px;
     font-weight: bold;
@@ -282,9 +312,9 @@ QPushButton#settingsButton:hover {
 
 /* About button - Lowered by 2px for better centering */
 QPushButton#aboutButton {
-    background-color: #f0f0f0;
-    color: #333333;
-    border: 2px solid #333333;
+    background-color: #ffffff;
+    color: #000000;
+    border: 2px solid #000000;
     border-radius: 16px;
     font-weight: bold;
     font-size: 16px;
