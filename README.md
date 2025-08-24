@@ -42,27 +42,31 @@ Every feature (except old ass keypassthrough) built to standards that should be 
 2. The application will start with its settings panel, you can also right-click the tray icon to access the menu. Or right click inside an overlay to access a menu with more menus. 
 
 3. To create a window overlay:
-   - Click "New Window Overlay" in the menu
-   - Click on the window you want to capture
+   - Click "Window Mode" in the menu
+   - Click on the window you want to capture and then >>
 
 4. To create a monitor overlay:
-   - Click "New Monitor Overlay" in the menu
-   - Click on the monitor you want to capture
+   - Click "Monitor Mode" in the menu
+   - Click on the monitor you want to capture and >>
 
-- `Ctrl+Shift+O`: Toggle overlay visibility
-- `Ctrl+Shift+Q`: Quit application
-- `Alt+Click` on overlay: Move overlay
-- `Right-Click` on overlay: Show context menu
-- `I don't know who the hell put those short-cuts there, I just did the custom hotkey shit so uh, good luck.
+Default hotkeys
+` = Quickswitch
+= = Increase Opacity
+- = Decrease Opacity
+
+Full customizable or removable.
 
 ### Settings
 
-Access the settings panel from the system tray menu to configure:
-- Default overlay size and position
+Access the subsettings panel from the system tray, context menu or main window.
+
 - Hotkeys
 - Theme preferences
-- Startup behavior
 - Performance options
+- Keypassthrough
+- Media Control when overlay is focused
+- Display Locked Switching
+- Rounded/Sharp Borders
 
 ### Building
 0. Skip this step and just use the exe like a human.
@@ -82,11 +86,6 @@ Access the settings panel from the system tray menu to configure:
    THE EXE, IT CALLS TO YOU MORTAL.
    python Py/main.py
    ```
-Now a gaming example from a game that really could have used prettier snow.
-
-<img width="600" alt="GAMINGEXAMPLE" src="https://github.com/user-attachments/assets/165ea7c8-4823-4ed6-9a8d-07038585486d" />
-
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request I can ignore because I have no idea what I'm doing here.
