@@ -1,9 +1,0 @@
-{
-  "exclude": [
-    "**/__pycache__",
-    "Backups"
-  ],
-  "reportMissingImports": true,
-  "pythonVersion": "3.11",
-  "pythonPlatform": "Windows"
-}
