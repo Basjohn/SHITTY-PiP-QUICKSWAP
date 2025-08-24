@@ -1,0 +1,71 @@
+# KeyPassthrough Blocklist
+#
+# How to use (one entry per line):
+# - You can write plain lines (no JSON) OR a JSON object per line.
+# - Plain line rules:
+#   * Ends with .exe  => match by process name (exe), case-insensitive
+#   * Otherwise       => match window title (contains); if multiple words, ALL must be present
+# - JSON object rules (advanced):
+#   {"exe": "cs2.exe"}
+#   {"title_exact": "PUBERTY SIMULATOR"}
+#   {"title_contains": "genshin impact"}
+# - Comments start with # and are ignored. Blank lines are OK. Trailing commas on a line are ignored.
+#
+# Example entries:
+# cs2.exe
+# valorant
+# genshin impact
+# {"title_exact": "PUBERTY SIMULATOR"}
+#
+# Default entries (popular online games with anti-cheat):
+cs2.exe
+VALORANT-Win64-Shipping.exe
+FortniteClient-Win64-Shipping.exe
+r5apex.exe
+TslGame.exe
+Overwatch.exe
+GenshinImpact.exe
+RustClient.exe
+DeadByDaylight-Win64-Shipping.exe
+EscapeFromTarkov.exe
+RainbowSix.exe
+Destiny2.exe
+FallGuys_client.exe
+Star Rail
+Zenless
+Hoyoplay
+Elden Ring
+Dark Souls
+Warcraft
+Limbus
+Monster Hunter
+notepad.exe
+
+# --- Additional popular games (2025-08-23) ---
+# Where exact .exe is confidently known, include it. Otherwise, include safe title-based rules.
+# World of Warcraft
+Wow.exe
+Wow-64.exe
+{"title_contains": "World of Warcraft"}
+# Hearthstone
+Hearthstone.exe
+{"title_contains": "Hearthstone"}
+# Elden Ring (FromSoftware)
+eldenring.exe
+{"title_contains": "ELDEN RING"}
+# Helldivers 2
+{"title_contains": "HELLDIVERS 2"}
+# Among Us
+Among Us.exe
+{"title_contains": "Among Us"}
+# Call of Duty (recent titles often use cod.exe)
+cod.exe
+{"title_contains": "Call of Duty"}
+# Battlefield series
+bf4.exe
+bfv.exe
+BF2042.exe
+{"title_contains": "Battlefield"}
+# HoYoverse titles (exact exe may vary by install; use title fallback in addition to existing lines)
+{"title_contains": "Honkai: Star Rail"}
+{"title_contains": "Zenless Zone Zero"}

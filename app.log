@@ -1,0 +1,136 @@
+16:08:57 - app - INFO - Initializing resource manager...
+16:08:57 - app - INFO - Initializing thread manager...
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized capture pool with 2 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized render pool with 1 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized io pool with 4 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized compute pool with None workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized ui pool with 2 workers
+16:08:57 - app - INFO - Initializing event system...
+16:08:57 - app - INFO - Initializing settings manager...
+16:08:57 - app - INFO - Initializing window manager...
+16:08:57 - app - INFO - Initializing opacity manager...
+2025-08-06 16:08:57 - core.hotkeys.manager - DEBUG - HotkeyManager initialized
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Attempting to register opacity decrease hotkey with sequence '-' and global_hotkey=True
+2025-08-06 16:08:57 - core.hotkeys.manager - DEBUG - Attempting to register system hotkey opacity_decrease with sequence '-'
+2025-08-06 16:08:57 - core.hotkeys.manager - ERROR - Exception while registering system hotkey opacity_decrease: module 'win32con' has no attribute 'VK_OEM_MINUS'
+2025-08-06 16:08:57 - core.hotkeys.manager - DEBUG - Registered hotkey: opacity_decrease
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Opacity decrease hotkey registration result: True
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Attempting to register opacity increase hotkey with sequence '=' and global_hotkey=True
+2025-08-06 16:08:57 - core.hotkeys.manager - DEBUG - Attempting to register system hotkey opacity_increase with sequence '='
+2025-08-06 16:08:57 - core.hotkeys.manager - ERROR - Exception while registering system hotkey opacity_increase: module 'win32con' has no attribute 'VK_OEM_PLUS'
+2025-08-06 16:08:57 - core.hotkeys.manager - DEBUG - Registered hotkey: opacity_increase
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Opacity increase hotkey registration result: True
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Opacity decrease hotkey is registered
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Opacity increase hotkey is registered
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - Registered global hotkeys for opacity adjustment
+2025-08-06 16:08:57 - core.opacity.manager - DEBUG - OpacityManager initialized
+16:08:57 - app - INFO - Application core initialization complete
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized capture pool with 2 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized render pool with 1 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized io pool with 4 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized compute pool with None workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized ui pool with 2 workers
+16:08:57 - app - INFO - Initializing resource manager...
+16:08:57 - app - INFO - Initializing thread manager...
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized capture pool with 2 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized render pool with 1 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized io pool with 4 workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized compute pool with None workers
+2025-08-06 16:08:57 - core.threading.manager - INFO - Initialized ui pool with 2 workers
+16:08:57 - app - INFO - Initializing event system...
+16:08:57 - app - INFO - Initializing settings manager...
+16:08:57 - app - INFO - Initializing window manager...
+16:08:57 - app - INFO - Initializing opacity manager...
+16:08:57 - app - INFO - Application core initialization complete
+2025-08-06 16:08:57 - core.application - INFO - Registered __pycache__ cleanup for: F:\Programming\Apps\SPQModular
+2025-08-06 16:08:57 - core.application - INFO - Starting application...
+2025-08-06 16:08:57 - core.application - INFO - Application icon set from: resources/ShittyPIP.ico
+2025-08-06 16:08:57 - utils.resource_manager - INFO - Resource manager initialized
+2025-08-06 16:08:57 - core.application - INFO - Ensuring core systems are initialized...
+2025-08-06 16:08:57 - utils.resource_manager - INFO - Resource manager initialized
+2025-08-06 16:08:57 - core.application - INFO - Theme manager initialized with theme: dark
+2025-08-06 16:08:57 - core.application - INFO - Opacity manager initialized
+2025-08-06 16:08:57 - core.application - INFO - Creating settings panel...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - SettingsPanel.__init__ starting
+2025-08-06 16:08:57 - ui.main_dialog - INFO - Initializing SettingsPanel...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Creating main frame...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Setting up window properties...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Setting window flags...
+2025-08-06 16:08:57 - ui.main_dialog - INFO - Window icon set from: resources/ShittyPIP.ico
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Initializing settings manager...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Initializing theme manager...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Applying theme: dark
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Applying styles for theme: dark
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Looking for theme file at: F:\Programming\Apps\SPQModular\themes\dark.qss
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Successfully read 24211 characters from theme file
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Successfully applied stylesheet to application
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Emitted style_changed signal
+2025-08-06 16:08:57 - utils.theme.theme_manager - INFO - Applied theme: dark (was: dark)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Theme 'dark' applied successfully
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Showing window...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Reached opacity control setup section
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - About to call _setup_opacity_control
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - _setup_opacity_control STARTING
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - _setup_opacity_control called
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity frame created
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity container created
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity fill and empty bars created and added to layout (layout id: 2222543679680)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity container layout children after setup: ['opacityFill', 'opacityEmpty']
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity widgets added to layout
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - About to load saved opacity
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Loading saved opacity: 24%
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Setting current_opacity to: 24%
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity will be set in showEvent with: 24%
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - _setup_opacity_control completed
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - _setup_opacity_control completed
+2025-08-06 16:08:57 - core.window.enumerator - DEBUG - Loaded fallback icon from: resources/Blank.ico
+2025-08-06 16:08:57 - core.window.enumerator - DEBUG - Enumerated 14 windows.
+2025-08-06 16:08:57 - utils.monitor_utils - INFO - Found 2 Qt screens
+2025-08-06 16:08:57 - utils.monitor_utils - DEBUG - Got DPI from GetDpiForMonitor: 144x144
+2025-08-06 16:08:57 - utils.monitor_utils - DEBUG - Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-06 16:08:57 - utils.monitor_utils - DEBUG - Got DPI from GetDpiForMonitor: 144x144
+2025-08-06 16:08:57 - utils.monitor_utils - DEBUG - Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-06 16:08:57 - utils.monitor_utils - INFO - Monitor 0: \\.\DISPLAY1 1707x960+0+0 (Primary: True)
+2025-08-06 16:08:57 - utils.monitor_utils - INFO - Monitor 1: \\.\DISPLAY2 2560x1440+2560+0 (Primary: False)
+2025-08-06 16:08:57 - core.window.enumerator - DEBUG - Enumerated 14 windows.
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window visible: False
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window geometry: PySide6.QtCore.QRect(554, 156, 600, 600)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window frame geometry: PySide6.QtCore.QRect(554, 156, 600, 600)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window frame size: PySide6.QtCore.QSize(600, 600)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window size: PySide6.QtCore.QSize(600, 600)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window position: PySide6.QtCore.QPoint(554, 156)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window flags: 0b1000000100000000001
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window is active: False
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Window has focus: False
+2025-08-06 16:08:57 - ui.main_dialog - INFO - SettingsPanel initialization complete
+2025-08-06 16:08:57 - core.application - INFO - Applying theme to settings panel...
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Applying styles for theme: dark
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Looking for theme file at: F:\Programming\Apps\SPQModular\themes\dark.qss
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Successfully read 24211 characters from theme file
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Successfully applied stylesheet to application
+2025-08-06 16:08:57 - utils.theme.theme_manager - DEBUG - Emitted style_changed signal
+2025-08-06 16:08:57 - utils.theme.theme_manager - INFO - Applied theme: dark (was: dark)
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Theme 'dark' applied successfully
+2025-08-06 16:08:57 - core.application - INFO - Showing settings panel...
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Layout id: 2222543679680
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Children: ['opacityFill', 'opacityEmpty']
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Stretch factors: 0=24, 1=76
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity set to 24% - Fill stretch: 24, Empty stretch: 76
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Layout id: 2222543679680
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Children: ['opacityFill', 'opacityEmpty']
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - [set_opacity] Stretch factors: 0=24, 1=76
+2025-08-06 16:08:57 - ui.main_dialog - DEBUG - Opacity set to 24% - Fill stretch: 24, Empty stretch: 76
+2025-08-06 16:08:57 - core.application - INFO - Settings panel shown
+2025-08-06 16:08:57 - core.application - INFO - Top level widgets: [<PySide6.QtWidgets.QFrame(0x205797e9e30) at 0x0000020579ED9E80>, <PySide6.QtWidgets.QFrame(0x20579782950) at 0x0000020579EEAB40>, <ui.main_dialog.SettingsPanel(0x20576f94570) at 0x0000020579EBAA40>]
+2025-08-06 16:08:57 - core.window.adapter - DEBUG - Window manager adapter initialized
+2025-08-06 16:08:57 - core.window.adapter - DEBUG - Window manager adapter initialized
+2025-08-06 16:08:57 - core.window.adapter - DEBUG - Window manager adapter initialized
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Initializing window manager...
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Window manager initialized
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Initializing window manager...
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Window manager initialized
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Initializing window manager...
+2025-08-06 16:08:57 - core.window.manager_impl - INFO - Window manager initialized
+2025-08-06 16:08:58 - ui.main_dialog - DEBUG - Ended drag operation
+2025-08-06 16:09:02 - utils.window.snapping - DEBUG - Setting cursor for edge: top
+2025-08-06 16:09:02 - ui.main_dialog - DEBUG - Ended drag operation

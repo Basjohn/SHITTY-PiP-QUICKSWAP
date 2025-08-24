@@ -1,0 +1,219 @@
+2025-08-22 02:57:04     INFO __main__: Unset deprecated QT_OPENGL=angle; Qt6 uses native OpenGL by default.
+02:57:04     INFO __main__: Unset deprecated QT_OPENGL=angle; Qt6 uses native OpenGL by default.
+2025-08-22 02:57:04    DEBUG utils.cache_cleaner: Registered __pycache__ cleanup for application exit
+2025-08-22 02:57:04     INFO __main__: Registered __pycache__ cleanup on exit for: F:\Programming\Apps\SPQModular
+02:57:04     INFO __main__: Registered __pycache__ cleanup on exit for: F:\Programming\Apps\SPQModular
+2025-08-22 02:57:04     INFO __main__: Starting application...
+02:57:04     INFO __main__: Starting application...
+2025-08-22 02:57:04     INFO __main__: Application icon set from: resources/ShittyPIP.ico
+02:57:04     INFO __main__: Application icon set from: resources/ShittyPIP.ico
+2025-08-22 02:57:04     INFO __main__: Ensuring core systems are initialized...
+02:57:04     INFO __main__: Ensuring core systems are initialized...
+02:57:04     INFO app: Initializing resource manager...
+02:57:04     INFO app: Initializing thread manager...
+2025-08-22 02:57:04     INFO core.threading.manager: Initialized capture pool with 2 workers
+2025-08-22 02:57:04     INFO core.threading.manager: Initialized render pool with 1 workers
+2025-08-22 02:57:04     INFO core.threading.manager: Initialized io pool with 4 workers
+2025-08-22 02:57:04     INFO core.threading.manager: Initialized compute pool with 23 workers
+2025-08-22 02:57:04     INFO core.threading.manager: Initialized ui pool with 2 workers
+2025-08-22 02:57:04    DEBUG core.threading.manager: Submitted task task_2162502972496 to io pool
+02:57:04     INFO app: Initializing event system...
+02:57:04     INFO app: Initializing settings manager...
+02:57:04     INFO app: Initializing window manager...
+02:57:04     INFO app: Initializing opacity manager...
+2025-08-22 02:57:04    DEBUG core.opacity.manager: Loaded hotkey settings: decrease='-', increase='=', quickswitch='`'
+2025-08-22 02:57:04    DEBUG core.opacity.manager: Using valid default hotkey settings after error
+2025-08-22 02:57:04    DEBUG core.opacity.manager: Unregistered global hotkeys for opacity adjustment
+2025-08-22 02:57:04    DEBUG core.opacity.manager: Registering global hotkeys for opacity adjustment: decrease='-', increase='='
+2025-08-22 02:57:05    DEBUG core.opacity.manager: Registered global hotkeys for opacity adjustment using keyboard module
+2025-08-22 02:57:05    DEBUG core.opacity.manager: OpacityManager initialized
+02:57:05     INFO app: Initializing quickswitch controller...
+2025-08-22 02:57:05    DEBUG core.graphics.backend_manager: Backend AUTO is unavailable: Not checked yet
+2025-08-22 02:57:05    DEBUG core.graphics.backend_manager: Backend DWM is available
+2025-08-22 02:57:05    DEBUG core.graphics.backend_manager: Backend OPENGL is unavailable: OpenGL not available: cannot import name 'gl_renderer' from 'core.graphics.backends' (F:\Programming\Apps\SPQModular\core\graphics\backends\__init__.py)
+2025-08-22 02:57:05    DEBUG core.graphics.backend_manager: Backend SOFTWARE is available
+2025-08-22 02:57:05    DEBUG core.graphics.backend_manager: Backend MONITOR is available
+2025-08-22 02:57:05    DEBUG core.graphics.overlay_manager: OverlayManager initialized with overlays_locked=False
+2025-08-22 02:57:05     INFO core.graphics.overlay_manager: Available overlay backends: DWM, SOFTWARE, MONITOR
+02:57:05     INFO core.graphics.overlay_manager: Available overlay backends: DWM, SOFTWARE, MONITOR
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: Keyboard library backend available for single-key suppression
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: HotkeyManager initialized
+2025-08-22 02:57:05    DEBUG QUICKSWITCH: Loaded quickswitch hotkey: '`'
+2025-08-22 02:57:05    DEBUG QUICKSWITCH: Registering quickswitch hotkey '`' via HotkeyManager
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: register_hotkey called id=quickswitch sequence='`' global=True suppress=True
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: VK_OEM_3 not found in win32con; using 0xC0 for backtick/tilde
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: Registered suppressed single-key via keyboard backend: quickswitch key='`'
+2025-08-22 02:57:05    DEBUG core.hotkeys.manager: Registered hotkey: quickswitch
+2025-08-22 02:57:05    DEBUG QUICKSWITCH: Initialized QuickSwitchController
+02:57:05     INFO app: Initializing focus tracker...
+2025-08-22 02:57:05    DEBUG FOCUS_TRACKER: Started focus tracking (poll interval: 200ms)
+2025-08-22 02:57:05    DEBUG FOCUS_TRACKER: Initialized FocusTracker
+02:57:05     INFO app: Initializing autoswitch controller...
+2025-08-22 02:57:05    DEBUG AUTOSWITCH: Initialized AutoswitchController
+02:57:05     INFO app: Initializing media system...
+2025-08-22 02:57:05    DEBUG MEDIA_KEEPALIVE: Initialized MediaPlayerKeepAlive enabled=True
+2025-08-22 02:57:05     INFO MEDIA_KEEPALIVE: MediaPlayerKeepAlive started
+02:57:05     INFO MEDIA_KEEPALIVE: MediaPlayerKeepAlive started
+02:57:05     INFO app: MediaPlayerKeepAlive started with efficient polling
+02:57:05     INFO app: Initializing window enumerator...
+2025-08-22 02:57:05    DEBUG core.application.window_enumerator: Loaded Blank.ico from resources: F:\Programming\Apps\SPQModular\resources\Blank.ico
+2025-08-22 02:57:05    DEBUG core.graphics.overlay_manager: OverlayManager app_instance provider set
+02:57:05     INFO app: Application core initialization complete
+2025-08-22 02:57:05     INFO __main__: Theme manager initialized with theme: dark
+02:57:05     INFO __main__: Theme manager initialized with theme: dark
+2025-08-22 02:57:05     INFO __main__: Opacity manager initialized
+02:57:05     INFO __main__: Opacity manager initialized
+2025-08-22 02:57:05     INFO __main__: Creating main dialog...
+02:57:05     INFO __main__: Creating main dialog...
+2025-08-22 02:57:05     INFO ui.main_dialog: Initializing MainDialog...
+02:57:05     INFO ui.main_dialog: Initializing MainDialog...
+2025-08-22 02:57:05    DEBUG core.window.enumerator: Loaded fallback icon from: resources/Blank.ico
+2025-08-22 02:57:05     INFO ui.main_dialog: Window icon set from: resources/ShittyPIP.ico
+02:57:05     INFO ui.main_dialog: Window icon set from: resources/ShittyPIP.ico
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Applying styles for theme: dark
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Looking for theme file at: F:\Programming\Apps\SPQModular\themes\dark.qss
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully read 29871 characters from theme file
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully applied stylesheet to application
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Emitted style_changed signal
+2025-08-22 02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Applied theme: dark
+2025-08-22 02:57:05    DEBUG core.window.enumerator: Enumerated 11 windows.
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Found 2 Qt screens
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Got DPI from GetDpiForMonitor: 144x144
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Got DPI from GetDpiForMonitor: 144x144
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-22 02:57:05     INFO utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+02:57:05     INFO utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+2025-08-22 02:57:05     INFO utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+02:57:05     INFO utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Found 2 Qt screens
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Restored main window geometry: {'x': 278, 'y': 0, 'width': 700, 'height': 540, 'maximized': False}
+2025-08-22 02:57:05     INFO ui.main_dialog: MainDialog initialization complete
+02:57:05     INFO ui.main_dialog: MainDialog initialization complete
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Applying styles for theme: dark
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Looking for theme file at: F:\Programming\Apps\SPQModular\themes\dark.qss
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully read 29871 characters from theme file
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully applied stylesheet to application
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Emitted style_changed signal
+2025-08-22 02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Applied theme: dark
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Found 2 Qt screens
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Found 2 Qt screens
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+2025-08-22 02:57:05    DEBUG utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Restored main window geometry: {'x': 278, 'y': 0, 'width': 700, 'height': 540, 'maximized': False}
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (207, 130)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Badge set to Badge19.png
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (207, 130)
+2025-08-22 02:57:05    DEBUG utils.window.behavior: Installed Windows native bounds filter for live monitor clamping during drag
+2025-08-22 02:57:05     INFO ui.main_dialog: Window behavior manager initialized
+02:57:05     INFO ui.main_dialog: Window behavior manager initialized
+2025-08-22 02:57:05     INFO __main__: Applying theme to main dialog...
+02:57:05     INFO __main__: Applying theme to main dialog...
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Applying styles for theme: dark
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Looking for theme file at: F:\Programming\Apps\SPQModular\themes\dark.qss
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully read 29871 characters from theme file
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Successfully applied stylesheet to application
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (207, 130)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Badge refreshed on style_changed
+2025-08-22 02:57:05    DEBUG utils.theme.theme_manager: Emitted style_changed signal
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (207, 130)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Badge refreshed on theme_changed: dark
+2025-08-22 02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+02:57:05     INFO utils.theme.theme_manager: Applied theme: dark (was: dark)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Applied theme: dark
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (207, 130)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Refreshed badge visuals after theme apply
+2025-08-22 02:57:05     INFO __main__: Showing main dialog...
+02:57:05     INFO __main__: Showing main dialog...
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (267, 190)
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Restored main window geometry: {'x': 278, 'y': 0, 'width': 700, 'height': 540, 'maximized': False}
+2025-08-22 02:57:05    DEBUG ui.main_dialog: Positioned badge at (267, 190)
+2025-08-22 02:57:05     INFO __main__: Main dialog shown
+02:57:05     INFO __main__: Main dialog shown
+2025-08-22 02:57:05     INFO __main__: Top level widgets: [<PySide6.QtWidgets.QFrame(0x1f72e500440) at 0x000001F735752D40>, <PySide6.QtWidgets.QFrame(0x1f72e86bf80) at 0x000001F7357A4580>, <ui.main_dialog.MainDialog(0x1f72e4f2530) at 0x000001F73572BBC0>, <PySide6.QtWidgets.QMenu(0x1f72e848760) at 0x000001F735760980>]
+02:57:05     INFO __main__: Top level widgets: [<PySide6.QtWidgets.QFrame(0x1f72e500440) at 0x000001F735752D40>, <PySide6.QtWidgets.QFrame(0x1f72e86bf80) at 0x000001F7357A4580>, <ui.main_dialog.MainDialog(0x1f72e4f2530) at 0x000001F73572BBC0>, <PySide6.QtWidgets.QMenu(0x1f72e848760) at 0x000001F735760980>]
+2025-08-22 02:57:05    DEBUG core.window.adapter: Window manager adapter initialized
+2025-08-22 02:57:05     INFO core.window.manager_impl: Initializing window manager...
+02:57:05     INFO core.window.manager_impl: Initializing window manager...
+2025-08-22 02:57:05     INFO core.window.manager_impl: Window manager initialized
+02:57:05     INFO core.window.manager_impl: Window manager initialized
+2025-08-22 02:57:10     INFO ui.main_dialog: Selected monitor: Unknown
+02:57:10     INFO ui.main_dialog: Selected monitor: Unknown
+2025-08-22 02:57:11    DEBUG core.graphics.backends.monitor.monitor_backend: MonitorBackend constructed
+2025-08-22 02:57:11    DEBUG Overlay[02d7b6db]: State changed: CREATED -> INITIALIZING
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Found 2 Qt screens
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Got DPI from GetDpiForMonitor: 144x144
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Added monitor 0: \\.\DISPLAY1 at 0,0
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Added monitor 1: \\.\DISPLAY2 at 2560,0
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Monitor 0: \\.\DISPLAY1 2560x1440+0+0 (Primary: True)
+2025-08-22 02:57:11    DEBUG utils.monitor_utils: Monitor 1: \\.\DISPLAY2 3840x2160+2560+0 (Primary: False)
+2025-08-22 02:57:11    DEBUG core.graphics.pipeline_manager: PipelineManager initialized
+2025-08-22 02:57:11    DEBUG utils.window.behavior: Installed Windows native bounds filter for live monitor clamping during drag
+2025-08-22 02:57:11    DEBUG core.graphics.capture.d3d11_monitor_renderer: D3D11MonitorRenderer initialized (QWidget blitter)
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.capture_display_widget: Renderer initialized (QWidget blitter)
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.capture_display_widget: Theme applied to CaptureDisplayWidget
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.capture_display_widget: CaptureDisplayWidget initialized
+2025-08-22 02:57:11    DEBUG utils.theme.theme_manager: Applied theme to widget MonitorOverlay
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.monitor_overlay: Theme applied to MonitorOverlay
+2025-08-22 02:57:11    DEBUG utils.theme.theme_manager: Applied theme to widget QMenu
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.monitor_overlay: MonitorOverlay initialized
+2025-08-22 02:57:11    DEBUG core.graphics.capture.monitor_capture_manager: MonitorCaptureManager initialized
+2025-08-22 02:57:11    DEBUG core.graphics.capture.monitor_capture_manager: Capture rate set to 120.0 FPS; ui_emit_min_interval_ms=8
+2025-08-22 02:57:11     INFO core.graphics.pipeline_manager: PipelineManager bound to pipeline: dxgi
+02:57:11     INFO core.graphics.pipeline_manager: PipelineManager bound to pipeline: dxgi
+2025-08-22 02:57:11     INFO core.graphics.capture.monitor_capture_manager: Target monitor set: 3840x2160 at 2560,0
+02:57:11     INFO core.graphics.capture.monitor_capture_manager: Target monitor set: 3840x2160 at 2560,0
+02:57:11     INFO core.graphics.capture.monitor_capture_manager: Target monitor set: 3840x2160 at 2560,0
+2025-08-22 02:57:11    DEBUG ui.overlays.monitor.capture_display_widget: Renderer FrameExchange set to monitor_frames_1
+2025-08-22 02:57:11     INFO ui.overlays.monitor.capture_display_widget: Target monitor set: \\.\DISPLAY2
+02:57:11     INFO ui.overlays.monitor.capture_display_widget: Target monitor set: \\.\DISPLAY2
+2025-08-22 02:57:11     INFO ui.overlays.monitor.monitor_overlay: Target monitor set: \\.\DISPLAY2
+02:57:11     INFO ui.overlays.monitor.monitor_overlay: Target monitor set: \\.\DISPLAY2
+2025-08-22 02:57:11     INFO core.graphics.backends.monitor.monitor_backend: MonitorBackend initialized for monitor: \\.\DISPLAY2
+02:57:11     INFO core.graphics.backends.monitor.monitor_backend: MonitorBackend initialized for monitor: \\.\DISPLAY2
+2025-08-22 02:57:11    DEBUG Overlay[02d7b6db]: State changed: INITIALIZING -> READY
+2025-08-22 02:57:11     INFO Overlay[02d7b6db]: Overlay initialized successfully
+02:57:11     INFO Overlay[02d7b6db]: Overlay initialized successfully
+2025-08-22 02:57:11     INFO core.graphics.capture.monitor_capture_manager: Monitor capture starting with backend: DXGI (requested='auto')
+02:57:11     INFO core.graphics.capture.monitor_capture_manager: Monitor capture starting with backend: DXGI (requested='auto')
+2025-08-22 02:57:11    DEBUG core.threading.manager: Submitted task monitor_capture_2161345345984 to capture pool
+2025-08-22 02:57:11     INFO core.graphics.capture.monitor_capture_manager: Monitor capture started (CAPTURE pool)
+02:57:11     INFO core.graphics.capture.monitor_capture_manager: Monitor capture started (CAPTURE pool)
+2025-08-22 02:57:11     INFO ui.overlays.monitor.monitor_overlay: Monitor capture started
+02:57:11     INFO ui.overlays.monitor.monitor_overlay: Monitor capture started
+2025-08-22 02:57:11    DEBUG Overlay[02d7b6db]: Overlay shown
+2025-08-22 02:57:11     INFO core.graphics.overlay_manager: Created overlay 02d7b6db-aa53-457e-b612-292864300a55 with backend MonitorBackend
+02:57:11     INFO core.graphics.overlay_manager: Created overlay 02d7b6db-aa53-457e-b612-292864300a55 with backend MonitorBackend
+2025-08-22 02:57:11     INFO ui.main_dialog: Created monitor overlay: 02d7b6db-aa53-457e-b612-292864300a55 at PySide6.QtCore.QRect(0, 0, 640, 360)
+02:57:11     INFO ui.main_dialog: Created monitor overlay: 02d7b6db-aa53-457e-b612-292864300a55 at PySide6.QtCore.QRect(0, 0, 640, 360)
+2025-08-22 02:57:12    DEBUG core.graphics.capture.monitor_capture_manager: DXGI capture loop starting on output_idx=1
+2025-08-22 02:57:12     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=26.43 copy_ms=3.75 size=3840x2160 bytes=33177600
+02:57:12     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=26.43 copy_ms=3.75 size=3840x2160 bytes=33177600
+2025-08-22 02:57:12    DEBUG MRU: Initialized MRUManager
+2025-08-22 02:57:12    DEBUG MRU: Recorded hwnd=2295928 title='SPQModular - Windsurf - 2025-08-21-monitor-overlay-visual-parity-plan.md\u25cf [Administrator]'; MRU size=1
+2025-08-22 02:57:12    DEBUG FOCUS_TRACKER: Focus change recorded: hwnd=2295928 title='SPQModular - Windsurf - 2025-08-21-monitor-overlay-visual-parity-plan.md\u25cf [Administrator]'
+2025-08-22 02:57:13     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=1622.51 copy_ms=4.02 size=3840x2160 bytes=33177600
+02:57:13     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=1622.51 copy_ms=4.02 size=3840x2160 bytes=33177600
+2025-08-22 02:57:15     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=1830.17 copy_ms=4.15 size=3840x2160 bytes=33177600
+02:57:15     INFO core.graphics.capture.monitor_capture_manager: DXGI timings: dup_ms=1830.17 copy_ms=4.15 size=3840x2160 bytes=33177600
+2025-08-22 02:57:15    DEBUG core.media.media_controller: Found 1 window(s) for spotify: [264538]
+2025-08-22 02:57:15    DEBUG core.media.media_controller: Selected window for spotify: hwnd=264538 title='Spotify Premium'
+2025-08-22 02:57:15    DEBUG core.media.media_controller: Found 2 window(s) for firefox: [197844, 2035622]
+2025-08-22 02:57:15    DEBUG core.media.media_controller: Selected window for firefox: hwnd=197844 title='Why æSilksongÆ Took Seven Years to Make : Games ù Mozilla Firefox'
+2025-08-22 02:57:15    DEBUG MEDIA_KEEPALIVE: Started monitoring spotify (hwnd=264538, pid=10432)
+2025-08-22 02:57:15    DEBUG MEDIA_KEEPALIVE: Started monitoring firefox (hwnd=197844, pid=17348)
+2025-08-22 02:57:15    DEBUG MEDIA_KEEPALIVE: Switched to slow polling (20000ms) - all apps healthy

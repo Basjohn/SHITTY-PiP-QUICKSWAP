@@ -1,0 +1,7 @@
+// .agentmeta.json
+{
+  "project_structure": "See Index.md",
+  "preferred_entry": "main.py",
+  "config_locations": ["Settings/", "core/settings/", "core/resources/"],
+  "notes": "Avoid pyproject.toml. This project uses centralized managers, see Index.md for full structure."
+}

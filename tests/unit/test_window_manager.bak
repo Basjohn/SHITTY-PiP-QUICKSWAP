@@ -1,0 +1,280 @@
+"""
+Unit tests for the window manager implementation.
+
+This module contains tests for the window manager and its components.
+
+Note: These tests spin up real Qt widgets and can be unstable in headless/CI
+environments. To keep the main suite stable, we skip this module by default
+unless explicitly enabled via environment variable SPQ_TEST_ALLOW_QT=1.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from unittest.mock import MagicMock, patch
+
+from PySide6.QtWidgets import QApplication, QWidget
+
+# Add the project root to the Python path for imports to work
+sys.path.insert(0, 'F:/Programming/Apps/SPQModular')
+
+if os.environ.get("SPQ_TEST_ALLOW_QT", "0") != "1":
+    raise unittest.SkipTest(
+        "Skipping Qt window manager tests by default. Set SPQ_TEST_ALLOW_QT=1 to enable."
+    )
+
+from core.window import (
+    WindowType,
+    WindowManagerImpl,
+    WindowManagerAdapter,
+)
+
+
+class TestWindowManager(unittest.TestCase):
+    """Test cases for the WindowManager implementation."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up the test environment once before all tests."""
+        # Initialize QApplication if it doesn't exist
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def setUp(self):
+        """Set up test fixtures before each test method."""
+        self.window_manager = WindowManagerImpl()
+        # Process events to ensure the window manager is initialized
+        QApplication.processEvents()
+        self.window_adapter = WindowManagerAdapter()
+        # Process events to ensure the adapter is initialized
+        QApplication.processEvents()
+
+    def test_create_window_manager_returns_adapter(self):
+        """Test that create_window_manager returns a WindowManagerAdapter instance."""
+        # Patch the WindowManagerAdapter in the module where create_window_manager imports it
+        with patch('core.window.adapter.WindowManagerAdapter') as mock_adapter_class:
+            # Create a mock instance that will be returned by the mock class
+            mock_instance = MagicMock()
+            mock_adapter_class.return_value = mock_instance
+            
+            # Import here to ensure we get the patched version
+            from core.window.adapter import create_window_manager
+            
+            # Call the function
+            manager = create_window_manager()
+            
+            # Verify the mock was called
+            mock_adapter_class.assert_called_once()
+            self.assertIs(manager, mock_instance)
+
+    def test_create_window_returns_window_id(self):
+        """Test that create_window returns a valid window ID."""
+        window_id = self.window_manager.create_window(WindowType.MAIN)
+        self.assertIsInstance(window_id, str)
+        self.assertTrue(len(window_id) > 0)
+
+    def test_get_window_returns_none_for_invalid_id(self):
+        """Test that get_window returns None for an invalid window ID."""
+        result = self.window_manager.get_window("invalid_id")
+        self.assertIsNone(result)
+
+    def test_show_window_returns_false_for_invalid_id(self):
+        """Test that show_window returns False for an invalid window ID."""
+        result = self.window_manager.show_window("invalid_id")
+        self.assertFalse(result)
+
+    def test_close_window_returns_false_for_invalid_id(self):
+        """Test that close_window returns False for an invalid window ID."""
+        result = self.window_manager.close_window("invalid_id")
+        self.assertFalse(result)
+
+    @patch('core.window.manager_impl.QTimer.singleShot')
+    def test_show_window_calls_qt_methods(self, mock_single_shot):
+        """Test that show_window calls the appropriate Qt methods."""
+        # Create a mock window
+        mock_window = MagicMock()
+        
+        # Create a window ID and store the mock window
+        window_id = "test_window_123"
+        
+        # Create a mock WindowInfo object
+        mock_window_info = MagicMock()
+        mock_window_info.window = mock_window
+        
+        # Patch the _windows dictionary directly
+        with patch.object(self.window_manager, '_windows', {window_id: mock_window_info}):
+            # Call the method
+            result = self.window_manager.show_window(window_id)
+            
+            # Verify the result
+            self.assertTrue(result)
+            
+            # Verify the window methods were called
+            mock_window.show.assert_called_once()
+            mock_window.raise_.assert_called_once()
+            mock_window.activateWindow.assert_called_once()
+
+    @patch('core.window.manager_impl.QTimer.singleShot')
+    def test_window_created_signal_emitted(self, mock_single_shot):
+        """Test that the window_created signal is emitted when a window is created."""
+        # Create a side effect function that will be called by singleShot
+        def execute_callback():
+            callback = mock_single_shot.call_args[0][1]
+            callback()
+        
+        mock_single_shot.side_effect = execute_callback
+        
+        # Connect to the signal
+        mock_callback = MagicMock()
+        self.window_manager.window_created.connect(mock_callback)
+        
+        # Create a window
+        window_id = self.window_manager.create_window(WindowType.MAIN)
+        
+        # Verify the signal was emitted with the correct window ID
+        mock_callback.assert_called_once()
+        self.assertEqual(mock_callback.call_args[0][0], window_id)
+
+    @patch('core.window.manager_impl.QTimer.singleShot')
+    @patch('core.window.manager_impl.WindowInfo')
+    @patch('core.window.manager_impl.QMainWindow')
+    def test_window_closed_signal_emitted(self, mock_window_cls, mock_window_info_cls, mock_single_shot):
+        """Test that the window_closed signal is emitted when a window is closed."""
+        # Create a side effect function that will be called by singleShot
+        callback_list = []
+        
+        def execute_callback(*args, **kwargs):
+            callback = args[1] if len(args) > 1 else kwargs.get('callback')
+            if callback:
+                callback_list.append(callback)
+                callback()
+        
+        mock_single_shot.side_effect = execute_callback
+        
+        # Create a mock window and window info
+        mock_window = MagicMock()
+        mock_window_info = MagicMock()
+        mock_window_info.window = mock_window
+        
+        # Configure the mocks
+        mock_window_cls.return_value = mock_window
+        mock_window_info_cls.return_value = mock_window_info
+        
+        # Create a window ID
+        window_id = "test_window_123"
+        
+        # Store the destroy callback to call it later
+        destroy_callback = None
+        
+        # Patch the _windows dictionary to include our mock window
+        with patch.object(self.window_manager, '_windows', {}):
+            # Connect to the signal
+            mock_callback = MagicMock()
+            self.window_manager.window_closed.connect(mock_callback)
+            
+            # Mock the close method to return True
+            mock_window.close.return_value = True
+            
+            # Create a list to store the destroy callback
+            destroy_callbacks = []
+            
+            # Mock the destroyed signal's connect method
+            def mock_connect(callback, *args, **kwargs):
+                destroy_callbacks.append(callback)
+                return MagicMock()  # Return a mock connection object
+                
+            mock_window.destroyed.connect = mock_connect
+            
+            # Create the window (this will connect our signal)
+            created_window_id = self.window_manager.create_window(WindowType.MAIN, window_id=window_id)
+            self.assertEqual(created_window_id, window_id)
+            
+            # Make sure we captured the destroy callback
+            self.assertEqual(len(destroy_callbacks), 1, "Destroy callback was not registered")
+            destroy_callback = destroy_callbacks[0]
+            
+            # Close the window
+            result = self.window_manager.close_window(window_id)
+            self.assertTrue(result)
+            
+            # Call the destroy callback to simulate window destruction
+            destroy_callback()
+            
+            # Execute any pending callbacks
+            for cb in callback_list:
+                cb()
+            
+            # The window should be removed from the manager by the signal handler
+            self.assertNotIn(window_id, self.window_manager._windows)
+            
+            # Verify the signal was emitted with the correct window ID
+            mock_callback.assert_called_once_with(window_id)
+
+
+class TestWindowManagerAdapter(unittest.TestCase):
+    """Test cases for the WindowManagerAdapter class."""
+
+    def setUp(self):
+        """Set up test fixtures before each test method."""
+        # Create a real adapter but patch its internals
+        self.adapter = WindowManagerAdapter()
+        self.mock_impl = MagicMock(spec=WindowManagerImpl)
+        self.adapter._WindowManagerAdapter__impl = self.mock_impl
+        self.adapter._WindowManagerAdapter__initialized = True
+        
+        # Set up the mock implementation to return a test window ID
+        self.test_window_id = "test_window_123"
+        self.mock_impl.create_window.return_value = self.test_window_id
+
+    def test_create_window_delegates_to_impl(self):
+        """Test that create_window delegates to the implementation."""
+        # Test with a window type and additional parameters
+        result = self.adapter.create_window(
+            WindowType.SETTINGS, 
+            title="Test Window", 
+            test_param="value"
+        )
+        
+        # Verify the result and that the implementation was called correctly
+        self.assertEqual(result, self.test_window_id)
+        self.mock_impl.create_window.assert_called_once_with(
+            WindowType.SETTINGS, 
+            title="Test Window", 
+            test_param="value"
+        )
+
+    def test_get_window_delegates_to_impl(self):
+        """Test that get_window delegates to the implementation."""
+        window_id = "test_window_123"
+        expected_window = QWidget()
+        self.mock_impl.get_window.return_value = expected_window
+        
+        result = self.adapter.get_window(window_id)
+        
+        self.assertEqual(result, expected_window)
+        self.mock_impl.get_window.assert_called_once_with(window_id)
+
+    def test_show_window_delegates_to_impl(self):
+        """Test that show_window delegates to the implementation."""
+        window_id = "test_window_123"
+        self.mock_impl.show_window.return_value = True
+        
+        result = self.adapter.show_window(window_id)
+        
+        self.assertTrue(result)
+        self.mock_impl.show_window.assert_called_once_with(window_id)
+
+    def test_close_window_delegates_to_impl(self):
+        """Test that close_window delegates to the implementation."""
+        window_id = "test_window_123"
+        self.mock_impl.close_window.return_value = True
+        
+        result = self.adapter.close_window(window_id)
+        
+        self.assertTrue(result)
+        self.mock_impl.close_window.assert_called_once_with(window_id)
+
+
+# Run tests with more detailed output
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
