@@ -6,23 +6,29 @@
 
 Shitty Picture In Picture QuickSwap is a multiple overlay application allowing smart swapping of captured content with your current window and also has a worse monitor overlay for the lulz. And is a genuine alternative to alt-tab that obeys MRU.
 
-<img width="600" alt="FullscreenExample" src="https://github.com/user-attachments/assets/7b833ff5-97d1-4a20-9504-119af4efb4ab" />
+<img width="600" alt="FullscreenExampl" src="https://github.com/user-attachments/assets/9f4a84f5-f95f-44a1-ab27-2af7c72d9ca0" />
 
 
 ## Features
 
+### NEWEST
+Rebuilt from the ground up with new deep knowledge like files shouldn't import each other, there isn't a fragment of the old code remaining but many more functional features at far greater performance.
+
+For a brief rundown without the details I don't understand myself: Faster, uses less of every resource, reliable aspect ratio control with constant corrections, safe media passthrough keys (you can still enable less safe basic bitch passthrough), smarter quick switching, smarter auto-switching, lock functionality (click the circle) for auto-switching, border customization, A FUCKING SCROLL WHEEL IN THE SUBSETTINGS HOLY SHI-, anyway, hardware accelerated monitor capture, global customizable opacity hotkeys on a gradual hold timer, editable blacklist to prevent your dumbass from using unsafe keypassthrough on known games with anti-cheat. Better media keep alive logic, though some apps will always require a nudge by the very nature of their creation and culling.
+
+Display Locked Switching when enabled will not let autoswitch or quickswitch get you all muddled if you have multiple displays. Ensuring if you start a Display 2 window on Display 1 it only switches with other Display 2 windows.
+
+Media key functionality is especially fun. Spacebar pause/play, left right for backwards and forwards, up and down for windows mixer volume control of the captured application with a snazzy OSD.
+
+Every feature (except old ass keypassthrough) built to standards that should be completely compatible with even the most anal anit-cheats by using legitimate windows api functions.
+
+## OLD SAUCE
 - * Live Window Overlay creation that tracks your most recent application and let's you seamlessly swap applications like Microsoft remembered what Alt-Tab was meant to do. Swapping can be done via double-click, right click or custom hotkey combo.
-
-- * Caveat 1 - Many applications are smart ass bitches and stop animation when you minimize them, DWM cannot avoid this. There are mitigators to try and lie to applications that they are still in focus but it isn't aggressive as basic function was more important. This is not an issue with games unless you use exclusive fullscreen which is a *you* thing. WANT VIDEO?! Only tested solution is something live mpv.net and then NOT minimizing it, just opening your other applications afterwards while it plays. (Maximize others)
-
-- * KINDA SORTA ACTUAL DESKTOP FUCKING CAPTURE. Sure that's a weird thing to be excited about but if you knew how bad pythons capture libraries were and the documentation on DWM saying this is "impossible" well, it ain't. Using the mystical art of reading the god damn window entries the application isolates and lies to you about the desktop using a feature Windows has been meaning to depreciate since W3.x but were too busy fucking up libraries. It could be removed at any time but it's been 30 years, you do the guessing.
 
 - * Overlay Passthrough. This was surprisingly less hellish than everything else to get working but you probably DON'T WANT TO TURN THIS ON if you game online. DEFAULTS TO OFF, gives a big fucking warning too. It's a benign feature but I don't want false positives on users. Neat for pure media though, when it works. You can't accidentally turn this on.
 
-- * Live MONITOR Overlay with seamless swap to and from the Window Overlay, custom fps speed option. (Match your other screen's refresh or just put big numbers and complain about a bsod - I'm kidding, 240 is the limit. People who want more than 240 can send me a motivational letter from their GP.)
-
-- * Caveat 2 - Microsoft have fucked the python ecosystem royally. WGC/WINRT/DXGI/D3DSHOT are all fucked for this task in different ways. So MSS had to be used. It is not particularly flawless or as smooth as I would like, but it is the only option and I made the UI with this feature in mind so fucking hell I'm putting it in there.
-
+- * Live MONITOR Overlay with seamless swap to other displays, multiple fps speed option. DXGI got unfucked so you've got decent monitor capture at long last! I have still have no bloody idea why you would want this, BUT NOW YOU HAVE IT!
+ 
 - * Super sexy settings menu. YES THIS IS A FEATURE. Designed to look like an app that never should have worked, you have a clean, themed, multiple route interface for whatever the hell you'll use this for. With full feature context menus built into every overlay and the system tray. Subsettings (The Settings *inside* SETTINGS!) give live opacity, hot key, fps control and sorting algorithm. 
 
 #There's also a fairly easy to find easter egg that makes me cling to the days I was not entirely a rotting bag of flesh.
