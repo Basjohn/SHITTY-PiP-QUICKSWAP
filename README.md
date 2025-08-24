@@ -6,7 +6,8 @@
 
 Shitty Picture In Picture QuickSwap is a multiple overlay application allowing smart swapping of captured content with your current window and also has a worse monitor overlay for the lulz. And is a genuine alternative to alt-tab that obeys MRU.
 
-<img width="600" alt="FullscreenExampl" src="https://github.com/user-attachments/assets/9f4a84f5-f95f-44a1-ab27-2af7c72d9ca0" />
+<img width="600" alt="All sections exposed" src="https://github.com/user-attachments/assets/94f2d03a-8054-49f6-918b-a120aa6d04a5" />
+
 
 
 ## Features
