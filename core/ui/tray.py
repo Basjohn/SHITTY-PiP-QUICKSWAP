@@ -11,6 +11,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QMenu, QStyle, QSystemTrayIcon
+from utils.paths import get_data_dir
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
@@ -90,8 +91,11 @@ class SystemTrayManager(QObject):
         self._tray_icon = QSystemTrayIcon(self.parent())
         self._tray_menu = QMenu()
         
-        # Set up the tray icon
-        tray_icon = QIcon("resources/ShittyPIP.ico")
+        # Set up the tray icon from embedded Qt resources
+        try:
+            tray_icon = QIcon(":/icons/ShittyPIP.ico")
+        except Exception:
+            tray_icon = QIcon()
         if not tray_icon.isNull():
             self._tray_icon.setIcon(tray_icon)
         else:

@@ -62,7 +62,7 @@ class FocusTracker(QObject):
         """Start focus tracking."""
         if not self._polling_active:
             self._polling_active = True
-            from core.threading.manager import ThreadManager
+            from core.threading import ThreadManager
             ThreadManager.single_shot(self.POLL_INTERVAL_MS, self._poll_tick)
             self._logger.debug(f"Started focus tracking (poll interval: {self.POLL_INTERVAL_MS}ms)")
 
@@ -84,7 +84,7 @@ class FocusTracker(QObject):
         finally:
             # Schedule next tick if still active
             if self._polling_active:
-                from core.threading.manager import ThreadManager
+                from core.threading import ThreadManager
                 ThreadManager.single_shot(self.POLL_INTERVAL_MS, self._poll_tick)
 
     def _poll_foreground(self) -> None:

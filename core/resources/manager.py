@@ -17,7 +17,6 @@ import atexit
 import logging
 import sys
 import threading
-import time
 import uuid
 import weakref
 import os
@@ -26,7 +25,8 @@ import ctypes
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 from .types import CleanupProtocol, ResourceInfo, ResourceType
-from utils.lockfree import SPSCQueue, TripleBuffer
+from utils.lockfree import TripleBuffer
+from PySide6.QtCore import QCoreApplication, QThread
 
 # Type variable for generic resource type
 T = TypeVar('T')
@@ -62,24 +62,20 @@ class ResourceManager:
         self._resources: Dict[str, ResourceInfo] = {}
         self._weak_refs: Dict[str, Any] = {}
         self._cleanup_handlers: Dict[str, Callable[[Any], None]] = {}
-        self._lock = threading.RLock()
         self._logger = _logger.getChild('ResourceManager')
         self._shutdown = False
         self._initialized = False
         # Thread/worker integration (set on attach)
         self._thread_manager: Any | None = None
         self._tm_ref: Any | None = None  # weakref to ThreadManager when available
-        self._mutation_queue: Optional[SPSCQueue] = None
         self._snapshot_tb: Optional[TripleBuffer] = None
-        self._worker_started: bool = False
-        self._shutdown_event = threading.Event()
-        self._worker_stop_event = threading.Event()
-        self._worker_alive: bool = False
-        
+        # Coalesced snapshot publisher: readers are lock-free
+        # No raw locks; all mutations must be executed on the UI thread.
+
         # Register cleanup on interpreter shutdown
         if not getattr(sys, 'is_finalizing', False):
             atexit.register(self.cleanup_all)
-        
+
         self._initialized = True
     
     def register(
@@ -128,52 +124,45 @@ class ResourceManager:
                 metadata=metadata or {}
             )
             # Store the resource using a weak reference
-            with self._lock:
-                self._resources[resource_id] = resource_info
+            self._resources[resource_id] = resource_info
 
-                # Create a weak reference with finalizer
-                def _finalize(rid: str) -> None:
-                    if not self._initialized or self._shutdown:
-                        return
-                    self._logger.debug(f"Finalizing resource {rid}")
-                    self._finalize_resource(rid)
+            # Create a weak reference with finalizer
+            def _finalize(rid: str) -> None:
+                if not self._initialized or self._shutdown:
+                    return
+                self._logger.debug(f"Finalizing resource {rid}")
+                self._finalize_resource(rid)
 
-                # Guard: resource must support weak references to be tracked safely
-                try:
-                    self._weak_refs[resource_id] = weakref.ref(resource, lambda ref, rid=resource_id: _finalize(rid))
-                except TypeError as e:
-                    # Remove partial state and fail explicitly per no-fallback policy
-                    self._resources.pop(resource_id, None)
-                    raise ValueError(
-                        f"Resource of type {type(resource).__name__} cannot be weak-referenced; "
-                        "register an object that supports weakref or implements CleanupProtocol."
-                    ) from e
+            # Guard: resource must support weak references to be tracked safely
+            try:
+                self._weak_refs[resource_id] = weakref.ref(resource, lambda ref, rid=resource_id: _finalize(rid))
+            except TypeError as e:
+                # Remove partial state and fail explicitly per no-fallback policy
+                self._resources.pop(resource_id, None)
+                raise ValueError(
+                    f"Resource of type {type(resource).__name__} cannot be weak-referenced; "
+                    "register an object that supports weakref or implements CleanupProtocol."
+                ) from e
 
-                # Determine the cleanup handler
-                if cleanup_handler is not None:
-                    self._cleanup_handlers[resource_id] = cleanup_handler
-                elif isinstance(resource, CleanupProtocol):
-                    self._cleanup_handlers[resource_id] = resource.cleanup
-                elif hasattr(resource, 'cleanup') and callable(resource.cleanup):
-                    self._logger.warning(
-                        f"Resource {resource_id} has a cleanup method but doesn't implement CleanupProtocol. "
-                        "Consider implementing the protocol for better type safety."
-                    )
-                    self._cleanup_handlers[resource_id] = resource.cleanup
+            # Determine the cleanup handler
+            if cleanup_handler is not None:
+                self._cleanup_handlers[resource_id] = cleanup_handler
+            elif isinstance(resource, CleanupProtocol):
+                self._cleanup_handlers[resource_id] = resource.cleanup
+            elif hasattr(resource, 'cleanup') and callable(resource.cleanup):
+                self._logger.warning(
+                    f"Resource {resource_id} has a cleanup method but doesn't implement CleanupProtocol. "
+                    "Consider implementing the protocol for better type safety."
+                )
+                self._cleanup_handlers[resource_id] = resource.cleanup
 
-                resource_info.increment_reference_count()
+            resource_info.increment_reference_count()
 
             self._logger.debug(f"Registered resource: {resource_info}")
             return resource_id
 
-        # Route through mutation worker if available for single-writer semantics
-        if self._worker_started and self._mutation_queue is not None and not self._worker_stop_event.is_set():
-            return self._enqueue_mutation_sync(_do_register)
-        # Fallback to direct path (pre-attach)
-        rid = _do_register()
-        # Publish a snapshot for readers
-        self._publish_snapshot()
-        return rid
+        # Route via UI-thread single-writer
+        return self._enqueue_mutation_sync(_do_register)
     
     def unregister(self, resource_id: str, force: bool = False) -> bool:
         """Unregister and clean up a resource.
@@ -191,44 +180,34 @@ class ResourceManager:
         def _do_unregister() -> bool:
             if not resource_id:
                 return False
-            with self._lock:
-                if resource_id not in self._resources:
-                    return False
+            # Check reference count
+            if resource_id in self._resources and self._resources[resource_id].reference_count > 1 and not force:
+                raise RuntimeError(
+                    f"Cannot unregister resource {resource_id} with active references. "
+                    f"Reference count: {self._resources[resource_id].reference_count}"
+                )
 
-                resource_info = self._resources[resource_id]
+            # Get the resource before removing it
+            resource = self._weak_refs.get(resource_id, lambda: None)()
+            cleanup_handler = self._cleanup_handlers.pop(resource_id, None)
 
-                # Check reference count
-                if resource_info.reference_count > 1 and not force:
-                    raise RuntimeError(
-                        f"Cannot unregister resource {resource_id} with active references. "
-                        f"Reference count: {resource_info.reference_count}"
+            # Remove from tracking
+            self._resources.pop(resource_id, None)
+            self._weak_refs.pop(resource_id, None)
+
+            # Perform cleanup if we have a handler and the resource still exists
+            if cleanup_handler is not None and resource is not None:
+                try:
+                    self._logger.debug(f"Cleaning up resource: {resource_id}")
+                    cleanup_handler(resource)
+                except Exception as e:
+                    self._logger.error(
+                        f"Error cleaning up resource {resource_id}: {e}",
+                        exc_info=True
                     )
-
-                # Get the resource before removing it
-                resource = self._weak_refs.get(resource_id, lambda: None)()
-                cleanup_handler = self._cleanup_handlers.pop(resource_id, None)
-
-                # Remove from tracking
-                self._resources.pop(resource_id, None)
-                self._weak_refs.pop(resource_id, None)
-
-                # Perform cleanup if we have a handler and the resource still exists
-                if cleanup_handler is not None and resource is not None:
-                    try:
-                        self._logger.debug(f"Cleaning up resource: {resource_id}")
-                        cleanup_handler(resource)
-                    except Exception as e:
-                        self._logger.error(
-                            f"Error cleaning up resource {resource_id}: {e}",
-                            exc_info=True
-                        )
             return True
 
-        if self._worker_started and self._mutation_queue is not None and not self._worker_stop_event.is_set():
-            return bool(self._enqueue_mutation_sync(_do_unregister))
-        ok = _do_unregister()
-        self._publish_snapshot()
-        return ok
+        return bool(self._enqueue_mutation_sync(_do_unregister))
 
     def get(self, resource_id: str, default: Any = None) -> Any:
         """Get a registered resource by ID.
@@ -243,21 +222,18 @@ class ResourceManager:
         if not resource_id:
             return default
             
-        with self._lock:
-            if resource_id not in self._resources:
-                return default
-                
-            resource_info = self._resources[resource_id]
-            resource = self._weak_refs[resource_id]()
-            
-            if resource is None:
-                # Resource was garbage collected, clean up
-                self._finalize_resource(resource_id)
-                return default
-                
-            # Update last accessed time and reference count
-            resource_info.touch()
-            return resource
+        if resource_id not in self._resources:
+            return default
+        resource = self._weak_refs.get(resource_id, lambda: None)()
+        if resource is None:
+            # Resource was GC'd; schedule cleanup on UI thread but return default
+            try:
+                self._enqueue_mutation_sync(lambda: self._finalize_resource(resource_id))
+            except Exception:
+                pass
+            return default
+        # Lock-free read; avoid mutating access stats on read path
+        return resource
             
     def get_typed(self, resource_id: str, resource_type: Type[T], default: T = None) -> T:
         """Get a registered resource by ID with type checking.
@@ -287,16 +263,13 @@ class ResourceManager:
         Returns:
             List of resource information objects
         """
-        with self._lock:
-            resources = list(self._resources.values())
-            
-            # Filter by type if specified
-            if resource_type is not None:
-                if isinstance(resource_type, str):
-                    resource_type = ResourceType.from_string(resource_type)
-                resources = [r for r in resources if r.resource_type == resource_type]
-                
-            return resources
+        resources = list(self._resources.values())
+        # Filter by type if specified
+        if resource_type is not None:
+            if isinstance(resource_type, str):
+                resource_type = ResourceType.from_string(resource_type)
+            resources = [r for r in resources if r.resource_type == resource_type]
+        return resources
             
     def get_resource_info(self, resource_id: str) -> Optional[ResourceInfo]:
         """Get information about a registered resource.
@@ -307,8 +280,7 @@ class ResourceManager:
         Returns:
             ResourceInfo object or None if not found
         """
-        with self._lock:
-            return self._resources.get(resource_id)
+        return self._resources.get(resource_id)
             
     def exists(self, resource_id: str) -> bool:
         """Check if a resource with the given ID exists.
@@ -319,10 +291,10 @@ class ResourceManager:
         Returns:
             bool: True if the resource exists and hasn't been garbage collected
         """
-        with self._lock:
-            if resource_id not in self._resources:
-                return False
-            return self._weak_refs[resource_id]() is not None
+        if resource_id not in self._resources:
+            return False
+        ref = self._weak_refs.get(resource_id)
+        return bool(ref and ref() is not None)
     
     def _finalize_resource(self, resource_id: str) -> None:
         """Called when a resource is garbage collected.
@@ -330,27 +302,25 @@ class ResourceManager:
         Args:
             resource_id: ID of the resource that was garbage collected
         """
-        with self._lock:
-            # Only clean up if we still have a record of this resource
-            if resource_id in self._resources:
-                self._logger.debug(f"Resource {resource_id} was garbage collected")
-                self._resources.pop(resource_id, None)
-                self._cleanup_handlers.pop(resource_id, None)
+        # Only clean up if we still have a record of this resource
+        if resource_id in self._resources:
+            self._logger.debug(f"Resource {resource_id} was garbage collected")
+            self._resources.pop(resource_id, None)
+            self._cleanup_handlers.pop(resource_id, None)
     
     def cleanup_all(self) -> None:
         """Clean up all registered resources.
 
         Note: This method intentionally allows execution during shutdown. When the
-        mutation worker is running, it routes via the single-writer; otherwise it
-        performs cleanup directly in the caller thread.
+        resource manager is attached to a ThreadManager, it routes via the single-writer;
+        otherwise it performs cleanup directly in the caller thread.
         """
 
         def _do_cleanup_all() -> None:
             self._logger.info("Cleaning up all resources...")
             # Snapshot current resources and compute deterministic ordering
-            with self._lock:
-                items = [(rid, ri) for rid, ri in self._resources.items()]
-            count = len(items)
+            resources = list(self._resources.values())
+            count = len(resources)
             if count == 0:
                 self._logger.debug("No resources to clean up")
                 return
@@ -386,32 +356,31 @@ class ResourceManager:
                     return 1_000_000
 
             # Sort by (group_rank, cleanup_priority, created_at)
-            items.sort(key=lambda x: (_group_rank(x[1]), _priority(x[1]), x[1].created_at))
+            resources.sort(key=lambda x: (_group_rank(x), _priority(x), x.created_at))
             self._logger.debug(
                 "Deterministic cleanup order computed: %s",
-                [rid for rid, _ in items]
+                [rid for rid, _ in resources]
             )
 
             self._logger.info(f"Cleaning up {count} resources in deterministic order...")
-            for rid, _ri in items:
+            for rid, _ri in resources:
                 # Inline unregister to avoid re-entrancy through the queue
-                with self._lock:
-                    resource = self._weak_refs.get(rid, lambda: None)()
-                    cleanup_handler = self._cleanup_handlers.pop(rid, None)
-                    self._resources.pop(rid, None)
-                    self._weak_refs.pop(rid, None)
+                resource = self._weak_refs.get(rid, lambda: None)()
+                cleanup_handler = self._cleanup_handlers.pop(rid, None)
+                self._resources.pop(rid, None)
+                self._weak_refs.pop(rid, None)
                 if cleanup_handler is not None and resource is not None:
                     try:
+                        self._logger.debug(f"Cleaning up resource: {rid}")
                         cleanup_handler(resource)
                     except Exception as e:
-                        self._logger.error(f"Error cleaning up resource {rid}: {e}", exc_info=True)
+                        self._logger.error(
+                            f"Error cleaning up resource {rid}: {e}",
+                            exc_info=True
+                        )
             self._logger.info(f"Successfully cleaned up {count} resources")
 
-        if self._worker_started and self._mutation_queue is not None and not self._worker_stop_event.is_set():
-            self._enqueue_mutation_sync(_do_cleanup_all)
-            return
-        _do_cleanup_all()
-        self._publish_snapshot()
+        self._enqueue_mutation_sync(_do_cleanup_all)
     
     def shutdown(self) -> None:
         """Shut down the resource manager and clean up all resources."""
@@ -419,21 +388,13 @@ class ResourceManager:
             return
 
         self._logger.info("Shutting down resource manager...")
-        # Stop worker first to avoid deadlocks with IO pool shutdown
-        try:
-            self.stop_mutation_worker(timeout=1.0)
-        except Exception:
-            self._logger.debug("stop_mutation_worker raised during shutdown", exc_info=True)
-
-        # Perform cleanup synchronously
+        # Perform cleanup synchronously on UI thread
         self.cleanup_all()
 
         self._shutdown = True
-
-        with self._lock:
-            self._resources.clear()
-            self._weak_refs.clear()
-            self._cleanup_handlers.clear()
+        self._resources.clear()
+        self._weak_refs.clear()
+        self._cleanup_handlers.clear()
     
     def get_icon(self, icon_name: str, default: Any = None):
         """Get an icon resource by name.
@@ -494,56 +455,27 @@ class ResourceManager:
             self._thread_manager = thread_manager
             self._logger.warning("ThreadManager is not weakref-able; stored strong reference")
 
-        # Initialize mutation queue and snapshot buffer and start worker (idempotent)
-        if not self._worker_started:
+        # Initialize snapshot buffer; no background worker
+        if self._snapshot_tb is None:
             try:
-                self._mutation_queue = SPSCQueue(512)
-                # Defer worker startup to explicit call to avoid touching ThreadManager
-                # executors before they are initialized.
-                self._logger.debug("attach_thread_manager: deferring mutation worker startup")
+                self._snapshot_tb = TripleBuffer()
             except Exception as e:
-                self._logger.error(f"Failed to start mutation worker: {e}", exc_info=True)
+                self._logger.error(f"Failed to initialize snapshot buffer: {e}", exc_info=True)
 
     def start_mutation_worker(self, thread_manager: Any | None = None) -> None:
-        """Start the mutation worker on the ThreadManager IO pool safely.
+        """Deprecated: no-op. Mutations run on UI thread via ThreadManager.
 
-        If a ThreadManager was previously attached via `attach_thread_manager`, the
-        argument can be omitted. This method is idempotent.
+        Left in place for compatibility with callers.
         """
-        if self._worker_started:
-            return
         try:
-            if self._mutation_queue is None:
-                self._mutation_queue = SPSCQueue(512)
             if self._snapshot_tb is None:
                 self._snapshot_tb = TripleBuffer()
-            tm = thread_manager or (self._thread_manager if self._tm_ref is None else (self._tm_ref() if self._tm_ref else None))
-            if tm is None:
-                self._logger.error("start_mutation_worker: ThreadManager not available")
-                return
-            # Submit the worker loop onto IO pool (requires executors to be initialized)
-            self._worker_stop_event.clear()
-            tm.submit_io_task(self._mutation_worker_loop)
-            self._worker_started = True
-            self._logger.info("ResourceManager mutation worker started on IO pool")
         except Exception as e:
-            self._logger.error(f"start_mutation_worker failed: {e}", exc_info=True)
+            self._logger.error(f"start_mutation_worker (compat) failed: {e}", exc_info=True)
 
     def stop_mutation_worker(self, timeout: float = 1.0) -> None:
-        """Signal the mutation worker to stop and wait briefly for exit.
-
-        Safe to call multiple times. If the worker is not running, this is a no-op.
-        """
-        try:
-            if not self._worker_started:
-                return
-            self._worker_stop_event.set()
-            t0 = time.time()
-            # Wait a short time for the worker loop to observe the stop event
-            while self._worker_alive and (time.time() - t0) < max(0.0, float(timeout)):
-                time.sleep(0.005)
-        except Exception as e:
-            self._logger.error(f"stop_mutation_worker failed: {e}", exc_info=True)
+        """Deprecated no-op for compatibility."""
+        return
 
     # --- Qt integration helpers --------------------------------------------
     def _run_on_ui(self, fn: Callable, *args, **kwargs) -> None:
@@ -1319,66 +1251,65 @@ class ResourceManager:
         if tb is None:
             return
         try:
-            with self._lock:
-                # Publish immutable container of current ResourceInfo objects
-                tb.publish(tuple(self._resources.values()))
+            # Publish immutable container of current ResourceInfo objects
+            tb.publish(tuple(self._resources.values()))
         except Exception as e:
             self._logger.error(f"Snapshot publication failed: {e}")
 
     def _enqueue_mutation_sync(self, func: Callable[[], Any], timeout: float = 5.0) -> Any:
-        if self._mutation_queue is None:
-            # Not initialized; execute directly
+        """Execute a mutation on the UI thread synchronously.
+
+        - If no Qt app exists, execute directly (test mode) and publish snapshot.
+        - If already on UI thread, execute directly.
+        - Otherwise, dispatch via ThreadManager.run_on_ui_thread and wait.
+        """
+        try:
+            app = QCoreApplication.instance()
+        except Exception:
+            app = None
+        if app is None:
+            # Test environment: no Qt
             result = func()
             self._publish_snapshot()
             return result
-        item = {"fn": func, "event": threading.Event(), "result": None, "exc": None}
-        # Never drop mutations; backoff until enqueued
-        while not self._mutation_queue.try_push(item):
-            time.sleep(0.001)
-        # Wait for completion
-        if not item["event"].wait(timeout):
-            raise TimeoutError("ResourceManager mutation did not complete within timeout")
-        if item["exc"] is not None:
-            raise item["exc"]
-        return item["result"]
-
-    def _mutation_worker_loop(self) -> None:
-        q = self._mutation_queue
-        if q is None:
-            self._logger.error("Mutation worker started without a queue")
-            return
-        self._logger.debug("ResourceManager mutation worker loop started")
-        try:
-            self._worker_alive = True
-            while not self._worker_stop_event.is_set():
-                ok, item = q.try_pop()
-                if not ok:
-                    time.sleep(0.001)
-                    continue
+        if QThread.currentThread() is app.thread():
+            result = func()
+            self._publish_snapshot()
+            return result
+        # Dispatch via ThreadManager if available; else use direct UI invoker
+        done = threading.Event()
+        out: Dict[str, Any] = {"res": None, "err": None}
+        def _call():
+            try:
+                out["res"] = func()
                 try:
-                    res = item["fn"]()
-                    item["result"] = res
-                    # Publish after each successful mutation
                     self._publish_snapshot()
-                except Exception as e:
-                    item["exc"] = e
-                    self._logger.error(f"Mutation execution failed: {e}", exc_info=True)
-                finally:
-                    try:
-                        item["event"].set()
-                    except Exception:
-                        pass
-        finally:
-            # Drain queue and signal remaining items as failed due to shutdown
-            while True:
-                ok, item = q.try_pop()
-                if not ok:
-                    break
-                item["exc"] = RuntimeError("ResourceManager shutting down")
+                except Exception:
+                    self._logger.debug("snapshot publish failed", exc_info=True)
+            except Exception as e:
+                out["err"] = e
+            finally:
                 try:
-                    item["event"].set()
+                    done.set()
                 except Exception:
                     pass
-            self._worker_alive = False
-            self._worker_started = False
-            self._logger.debug("ResourceManager mutation worker loop exited")
+        try:
+            tm = self._thread_manager if self._tm_ref is None else (self._tm_ref() if self._tm_ref else None)
+            if tm is not None and hasattr(tm, 'run_on_ui_thread'):
+                tm.run_on_ui_thread(_call)
+            else:
+                # Fallback to static dispatcher
+                from core.threading.manager import ThreadManager as _TM
+                _TM.run_on_ui_thread(_call)
+        except Exception:
+            # As a last resort, attempt direct call (should not happen)
+            _call()
+        if not done.wait(timeout):
+            raise TimeoutError("ResourceManager UI mutation timeout")
+        if out["err"] is not None:
+            raise out["err"]
+        return out["res"]
+
+    def _mutation_worker_loop(self) -> None:
+        """Deprecated: no-op."""
+        return

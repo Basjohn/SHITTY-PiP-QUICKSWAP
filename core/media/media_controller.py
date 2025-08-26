@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
-from core.threading.manager import ThreadManager
 from utils.win.winmsg import (
     is_window,
     key_press,
@@ -526,6 +523,31 @@ class MediaController:
             self._logger.debug(f"Browser media command failed: {e}")
             return False
     
+    def _send_browser_media_command_enhanced(self, hwnd: int, command: int, app_name: str) -> bool:
+        """Enhanced browser media dispatch with subtle activation & retry.
+
+        Steps:
+        - Try child-targeted WM_APPCOMMAND first (avoids global routing)
+        - If it fails, request a subtle activation via KeepAlive (no focus steal)
+        - Retry child-targeted command after activation
+        """
+        # First attempt using existing child routing
+        if self._send_browser_media_command(hwnd, command):
+            return True
+        # Try subtle activation via KeepAlive and retry
+        try:
+            from .keepalive import get_media_keepalive  # local import to avoid cycles
+            ka = get_media_keepalive()
+            if ka and hasattr(ka, 'request_subtle_activation'):
+                if ka.request_subtle_activation(hwnd, app_name):
+                    # brief delay not to block; rely on async where possible, but a tiny sleep helps
+                    time.sleep(0.03)
+                    if self._send_browser_media_command(hwnd, command):
+                        return True
+        except Exception:
+            pass
+        return False
+    
     def _send_hotkey(self, hwnd: int, vk: int) -> bool:
         """Send hotkey to window using PostMessage."""
         return key_press(hwnd, vk, delay_ms=10)
@@ -616,7 +638,17 @@ class MediaController:
         
         # Per-app session volume (preferred) — handle volume first regardless of crash-prone
         if command in (self.APPCOMMAND_VOLUME_UP, self.APPCOMMAND_VOLUME_DOWN):
-            step = 0.05 if command == self.APPCOMMAND_VOLUME_UP else -0.05
+            # Configurable per-step volume delta (default 5%)
+            try:
+                cfg_step = float(self._settings.get("media.volume_step", 0.05))
+            except Exception:
+                cfg_step = 0.05
+            # Clamp to safe range [0.01, 0.25]
+            if cfg_step < 0.01:
+                cfg_step = 0.01
+            elif cfg_step > 0.25:
+                cfg_step = 0.25
+            step = cfg_step if command == self.APPCOMMAND_VOLUME_UP else -cfg_step
             reason = 'up' if step > 0 else 'down'
             # Try per-app session volume via PyCAW (if available)
             try:
@@ -707,9 +739,17 @@ class MediaController:
             except Exception:
                 pass
 
-        # For browsers, as a last resort, try child-only WM_APPCOMMAND (avoids global routing)
+        # For browsers, use enhanced child-only routing + subtle activation on failure
         if app_name in ['chrome', 'firefox', 'edge', 'discord']:
-            if self._send_browser_media_command(hwnd, command):
+            if self._send_browser_media_command_enhanced(hwnd, command, app_name):
+                # Hint media activity to KeepAlive to keep background media responsive
+                try:
+                    from .keepalive import get_media_keepalive  # lazy import to avoid cycles
+                    ka = get_media_keepalive()
+                    if ka and hasattr(ka, 'hint_media_activity'):
+                        ka.hint_media_activity(hwnd)
+                except Exception:
+                    pass
                 return True, f"Browser media command sent to {app_name}"
         
         # WM_COMMAND support for MPC variants when IDs are provided via settings
@@ -766,6 +806,14 @@ class MediaController:
         if 'media_command' in safe_methods:
             if command not in (self.APPCOMMAND_VOLUME_UP, self.APPCOMMAND_VOLUME_DOWN):
                 if safe_send_appcommand(hwnd, command, timeout_ms=2000):
+                    # Hint media activity on successful command
+                    try:
+                        from .keepalive import get_media_keepalive
+                        ka = get_media_keepalive()
+                        if ka and hasattr(ka, 'hint_media_activity'):
+                            ka.hint_media_activity(hwnd)
+                    except Exception:
+                        pass
                     return True, f"Media command sent to {app_name}"
         
         # Spacebar fallback (non-browser apps) for play/pause only
@@ -774,6 +822,13 @@ class MediaController:
             # Send WM_CHAR-aware spacebar for better compatibility
             vk_space = win32con.VK_SPACE if WIN_AVAILABLE else 0x20
             if key_press_with_char(hwnd, vk_space, char_code=0x20, delay_ms=10):
+                try:
+                    from .keepalive import get_media_keepalive
+                    ka = get_media_keepalive()
+                    if ka and hasattr(ka, 'hint_media_activity'):
+                        ka.hint_media_activity(hwnd)
+                except Exception:
+                    pass
                 return True, f"Spacebar sent to {app_name}"
         
         return False, f"All methods failed for {app_name}"

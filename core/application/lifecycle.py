@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from typing import Callable, List
 
 from PySide6.QtCore import QObject, Signal, QCoreApplication
-from core.threading.manager import ThreadManager
+from core.threading import ThreadManager
 from core.logging import get_logger
 
 logger = get_logger(__name__)

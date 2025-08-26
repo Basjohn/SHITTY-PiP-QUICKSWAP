@@ -3,19 +3,22 @@ Implementation of the settings management system.
 
 This module contains the core implementation of the settings manager,
 handling loading, saving, and accessing application settings with
-thread safety and type checking.
+UI-thread-only mutations enforced via ThreadManager and lock-free reads.
 """
 
 import json
-import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar, Union
+import os
+import sys
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QCoreApplication, QThread
 
 from .. import logging as core_logging
+from utils.paths import get_runtime_root
 from core.interfaces import ISettingsManager
 from .types import SettingDefinition, SettingsCategory
+from core.threading import ThreadManager
 
 get_logger = core_logging.get_logger
 
@@ -33,7 +36,6 @@ class _SettingsManagerImpl(ISettingsManager):
     def __init__(self):
         """Initialize the settings manager with default values."""
         self._settings: Dict[str, Any] = {}
-        self._lock = threading.RLock()
         self._settings_definitions: Dict[str, SettingDefinition] = {}
         self._logger = get_logger(__name__)
         self._load_defaults()
@@ -48,8 +50,8 @@ class _SettingsManagerImpl(ISettingsManager):
         Returns:
             The setting value or default if not found
         """
-        with self._lock:
-            return self._settings.get(key, default)
+        # Lock-free read: mutations are UI-thread-only
+        return self._settings.get(key, default)
     
     def set(self, key: str, value: Any) -> None:
         """Set a setting value.
@@ -58,8 +60,8 @@ class _SettingsManagerImpl(ISettingsManager):
             key: Setting key in dot notation
             value: Value to set
         """
-        with self._lock:
-            self._settings[key] = value
+        # Called only from UI thread by outer SettingsManager
+        self._settings[key] = value
     
     def save(self, file_path: Optional[Union[str, Path]] = None) -> None:
         """Save settings to persistent storage.
@@ -78,7 +80,7 @@ class _SettingsManagerImpl(ISettingsManager):
             file_path = Path(file_path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        with self._lock, open(file_path, 'w') as f:
+        with open(file_path, 'w') as f:
             json.dump(self._settings, f, indent=4)
     
     def load(self, file_path: Optional[Union[str, Path]] = None) -> None:
@@ -98,20 +100,19 @@ class _SettingsManagerImpl(ISettingsManager):
         try:
             with open(file_path, 'r') as f:
                 loaded_settings = json.load(f)
-                
-            with self._lock:
-                # Only update existing keys to preserve defaults for missing settings
-                for key, value in loaded_settings.items():
-                    if key in self._settings_definitions:
-                        self._settings[key] = value
-                        
+
+            # Only update existing keys to preserve defaults for missing settings
+            for key, value in loaded_settings.items():
+                if key in self._settings_definitions:
+                    self._settings[key] = value
+
         except (json.JSONDecodeError, OSError) as e:
             get_logger(__name__).error(f"Failed to load settings: {e}")
     
     def reset_to_defaults(self) -> None:
         """Reset all settings to their default values."""
-        with self._lock:
-            self._load_defaults()
+        # Called only from UI thread by outer SettingsManager
+        self._load_defaults()
     
     def get_setting_definition(self, key: str) -> Optional[SettingDefinition]:
         """Get the definition for a setting.
@@ -134,6 +135,26 @@ class _SettingsManagerImpl(ISettingsManager):
                 options=['light', 'dark'],
                 description='Application color theme (canonical key)',
                 category=SettingsCategory.APPEARANCE
+            ),
+            # Media control
+            'media.volume_step': SettingDefinition(
+                default=0.05,
+                setting_type=float,
+                validator=lambda x: isinstance(x, float) and 0.01 <= x <= 0.25,
+                description='Per-step session volume delta (0.01-0.25)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'media.app_catalog': SettingDefinition(
+                default={},
+                setting_type=dict,
+                description='User overrides for media app catalog entries',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'media.wm_command_ids': SettingDefinition(
+                default={},
+                setting_type=dict,
+                description='Per-app WM_COMMAND action IDs for MPC variants',
+                category=SettingsCategory.BEHAVIOR
             ),
             'appearance.opacity': SettingDefinition(
                 default=100,
@@ -232,6 +253,12 @@ class _SettingsManagerImpl(ISettingsManager):
                 description='Enable opacity hotkeys',
                 category=SettingsCategory.HOTKEYS
             ),
+            'hotkeys.quickswitch_enabled': SettingDefinition(
+                default=False,
+                setting_type=bool,
+                description='Enable QuickSwitch hotkey',
+                category=SettingsCategory.HOTKEYS
+            ),
             'hotkeys.opacity_decrease': SettingDefinition(
                 default='-',
                 setting_type=str,
@@ -245,9 +272,9 @@ class _SettingsManagerImpl(ISettingsManager):
                 category=SettingsCategory.HOTKEYS
             ),
             'hotkeys.opacity_quickswitch': SettingDefinition(
-                default='`',
+                default='shift+x',
                 setting_type=str,
-                description='Quickswitch key (backtick by default)',
+                description='Quickswitch combo (default: shift+x)',
                 category=SettingsCategory.HOTKEYS
             ),
             # Graphics pipeline selection (feature flag)
@@ -342,15 +369,42 @@ class SettingsManager(QObject):
         super().__init__(parent)
         self._impl = _SettingsManagerImpl()
         self._logger = get_logger(__name__)
-        self._lock = threading.RLock()
         self._handlers = {}
-        self._settings_file = settings_file
+        # Coalesced save management (tag -> True when a save is pending)
+        self._save_coalesce: Dict[str, bool] = {}
+        # Resolve settings file path: honor explicit path, else prefer portable ./settings next to runtime root
+        try:
+            if settings_file is not None:
+                self._settings_file = Path(settings_file)
+            else:
+                resolved_dir = self._resolve_settings_dir()
+                self._settings_file = resolved_dir / 'settings.json'
+        except Exception:
+            # Best-effort fallback
+            self._settings_file = Path.home() / '.spqmodular' / 'settings.json'
+        # Ensure directory exists and log resolution
+        try:
+            self._settings_file.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self._logger.error(f"[SETTINGS] Failed to ensure settings directory {self._settings_file.parent}: {e}", exc_info=True)
+        self._logger.info(f"[SETTINGS] Using settings file: {self._settings_file}")
         
         # Load saved settings
-        self._impl.load(settings_file)
+        if Path(self._settings_file).exists():
+            self._logger.info(f"[SETTINGS] Loading settings from {self._settings_file}")
+        else:
+            self._logger.info(f"[SETTINGS] No existing settings at {self._settings_file}; defaults will be created")
+        self._impl.load(self._settings_file)
         # Apply explicit migrations, then validate
         self._apply_migrations()
         self._validate_loaded_settings()
+
+        # Ensure defaults are flushed to disk on first run
+        try:
+            self._ensure_settings_file_exists()
+        except Exception as e:
+            # Non-fatal: log and continue
+            self._logger.error(f"Failed to create default settings file: {e}", exc_info=True)
 
         # Ensure keypassthrough blocklist exists alongside the settings file
         try:
@@ -360,6 +414,27 @@ class SettingsManager(QObject):
             self._logger.error(f"[KEYPASS] Failed to ensure blocklist defaults: {e}", exc_info=True)
         
         SettingsManager._initialized = True
+
+    # --- UI-thread helpers -------------------------------------------------
+    @staticmethod
+    def _on_ui_thread() -> bool:
+        try:
+            app = QCoreApplication.instance()
+            return bool(app and (QThread.currentThread() is app.thread()))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _ensure_on_ui(func: Callable, *args, **kwargs) -> None:
+        # If no Qt application exists (e.g., unit tests), execute inline
+        app = QCoreApplication.instance()
+        if app is None:
+            func(*args, **(kwargs or {}))
+            return
+        if SettingsManager._on_ui_thread():
+            func(*args, **(kwargs or {}))
+        else:
+            ThreadManager.run_on_ui_thread(func, *args, **(kwargs or {}))
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a setting value with type conversion.
@@ -373,7 +448,7 @@ class SettingsManager(QObject):
         """
         return self._impl.get(key, default)
     
-    def set(self, key: str, value: Any, save_immediately: bool = True) -> bool:
+    def set(self, key: str, value: Any, save_immediately: bool = True, *, force: bool = False) -> bool:
         """Set a setting value.
         
         Args:
@@ -387,59 +462,124 @@ class SettingsManager(QObject):
         Raises:
             ValueError: If the value is not valid for the setting
         """
-        definition = self._impl.get_setting_definition(key)
-        if definition is not None:
-            # Validate the value
-            if not isinstance(value, definition.setting_type):
-                try:
-                    value = definition.setting_type(value)
-                except (ValueError, TypeError) as e:
+        def _apply() -> bool:
+            definition = self._impl.get_setting_definition(key)
+            if definition is not None:
+                # Validate the value
+                nonlocal value
+                if not isinstance(value, definition.setting_type):
+                    try:
+                        value = definition.setting_type(value)
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Invalid value for setting {key}: {value}. "
+                            f"Expected {definition.setting_type.__name__}"
+                        ) from e
+
+                if definition.validator and not definition.validator(value):
+                    raise ValueError(f"Invalid value for setting {key}: {value}")
+
+                if definition.options and value not in definition.options:
                     raise ValueError(
-                        f"Invalid value for setting {key}: {value}. "
-                        f"Expected {definition.setting_type.__name__}"
-                    ) from e
-            
-            if definition.validator and not definition.validator(value):
-                raise ValueError(f"Invalid value for setting {key}: {value}")
-            
-            if definition.options and value not in definition.options:
-                raise ValueError(
-                    f"Invalid value for setting {key}. "
-                    f"Must be one of: {', '.join(map(str, definition.options))}"
-                )
-        
-        # Update the setting without alias mirroring (canonical only)
-        with self._lock:
+                        f"Invalid value for setting {key}. "
+                        f"Must be one of: {', '.join(map(str, definition.options))}"
+                    )
+
+            # Update the setting without alias mirroring (canonical only)
             changed = False
             old_value = self._impl.get(key)
             if old_value != value:
                 self._impl.set(key, value)
                 changed = True
+
+            # Emit on change or when explicitly forced
+            if changed or force:
                 # Notify listeners for the changed key
-                self.setting_changed.emit(key, value)
+                try:
+                    self.setting_changed.emit(key, value)
+                except Exception:
+                    pass
 
                 # Call any registered handlers for the key
-                if key in self._handlers:
-                    for handler in self._handlers[key]:
-                        try:
-                            handler(key, value)
-                        except Exception as e:
-                            self._logger.error(
-                                f"Error in setting change handler for {key}: {e}",
-                                exc_info=True
-                            )
+                handlers = list(self._handlers.get(key, ()))
+                for handler in handlers:
+                    try:
+                        handler(key, value)
+                    except Exception as e:
+                        self._logger.error(
+                            f"Error in setting change handler for {key}: {e}",
+                            exc_info=True
+                        )
 
-            if changed and save_immediately:
-                self.save()
+                if changed and save_immediately:
+                    self.save()
 
-            return changed
+            return bool(changed or force)
+
+        # Ensure mutation occurs on UI thread
+        app = QCoreApplication.instance()
+        if app is None or SettingsManager._on_ui_thread():
+            # In tests (no Qt) or already on UI, execute synchronously
+            return _apply()
+        else:
+            # Execute on UI and return best-effort boolean via side-effect container
+            result_box = {'ok': False}
+            def _apply_and_store():
+                result_box['ok'] = _apply()
+            ThreadManager.run_on_ui_thread(_apply_and_store)
+            return bool(result_box['ok'])
     
     def save(self) -> None:
         """Save settings to persistent storage."""
         if hasattr(self, '_settings_file') and self._settings_file is not None:
+            self._logger.debug(f"[SETTINGS] Saving settings to {self._settings_file}")
             self._impl.save(self._settings_file)
         else:
             self._impl.save()
+
+    def request_save(self, tag: str, within_ms: int = 500) -> None:
+        """Request a settings save coalesced by tag within a time window.
+
+        Multiple calls with the same tag within the window result in a single save.
+
+        Args:
+            tag: Coalescing key for this save request (e.g., 'opacity', 'ui.geometry').
+            within_ms: Window in milliseconds to coalesce saves for this tag.
+        """
+        if not tag:
+            tag = "default"
+
+        def _schedule():
+            # Coalesce strictly on UI thread
+            if self._save_coalesce.get(tag, False):
+                return
+            self._save_coalesce[tag] = True
+
+            def _do_save():
+                try:
+                    self.save()
+                except Exception as e:
+                    try:
+                        self._logger.error(f"[SETTINGS] Coalesced save failed for tag '{tag}': {e}")
+                    except Exception:
+                        pass
+                finally:
+                    self._save_coalesce[tag] = False
+
+            ThreadManager.single_shot(max(0, int(within_ms)), _do_save)
+
+        try:
+            if SettingsManager._on_ui_thread():
+                _schedule()
+            else:
+                ThreadManager.run_on_ui_thread(_schedule)
+        except Exception as e:
+            # Fallback: perform immediate save to avoid losing state
+            try:
+                self._logger.debug(f"[SETTINGS] request_save fallback immediate save for tag '{tag}': {e}")
+            except Exception:
+                pass
+            self.save()
     
     def load(self) -> None:
         """Load settings from persistent storage."""
@@ -464,15 +604,14 @@ class SettingsManager(QObject):
     
     def reset_to_defaults(self) -> None:
         """Reset all settings to their default values."""
-        with self._lock:
+        def _apply():
             self._impl.reset_to_defaults()
-            
             # Notify listeners of all changes
             for key in self._impl._settings_definitions.keys():
                 value = self._impl.get(key)
                 self.setting_changed.emit(key, value)
-            
             self.save()
+        SettingsManager._ensure_on_ui(_apply)
     
     def register_change_handler(self, key: str, handler: Callable[[str, Any], None]) -> None:
         """Register a callback for when a setting changes.
@@ -481,10 +620,13 @@ class SettingsManager(QObject):
             key: Setting key to monitor
             handler: Callback function that takes (key, value) parameters
         """
-        with self._lock:
+        def _apply():
             if key not in self._handlers:
                 self._handlers[key] = []
-            self._handlers[key].append(handler)
+            # Deduplicate by identity
+            if handler not in self._handlers[key]:
+                self._handlers[key].append(handler)
+        SettingsManager._ensure_on_ui(_apply)
     
     def unregister_change_handler(self, key: str, handler: Callable[[str, Any], None]) -> None:
         """Unregister a previously registered change handler.
@@ -493,11 +635,12 @@ class SettingsManager(QObject):
             key: Setting key
             handler: Callback function to remove
         """
-        with self._lock:
+        def _apply():
             if key in self._handlers and handler in self._handlers[key]:
                 self._handlers[key].remove(handler)
                 if not self._handlers[key]:
                     del self._handlers[key]
+        SettingsManager._ensure_on_ui(_apply)
     
     def get_setting_definition(self, key: str) -> Optional[SettingDefinition]:
         """Get the definition for a setting.
@@ -540,59 +683,98 @@ class SettingsManager(QObject):
         - Map legacy theme value 'system' to 'dark' for canonical 'theme'.
         - Map legacy graphics.pipeline value 'wgc-d3d11' to 'dxgi'.
         """
-        with self._lock:
-            migrated = False
-            v = self._impl.get('theme')
-            if v == 'system':
-                self._logger.info("Migrating theme from 'system' to 'dark'")
-                self._impl.set('theme', 'dark')
-                migrated = True
-            gp = self._impl.get('graphics.pipeline')
-            if gp == 'wgc-d3d11':
-                self._logger.info("Migrating graphics.pipeline from 'wgc-d3d11' to 'dxgi'")
-                self._impl.set('graphics.pipeline', 'dxgi')
-                migrated = True
-            if migrated:
-                # Do not emit signals here; reconciliation and save will follow
-                pass
+        migrated = False
+        v = self._impl.get('theme')
+        if v == 'system':
+            self._logger.info("Migrating theme from 'system' to 'dark'")
+            self._impl.set('theme', 'dark')
+            migrated = True
+        gp = self._impl.get('graphics.pipeline')
+        if gp == 'wgc-d3d11':
+            self._logger.info("Migrating graphics.pipeline from 'wgc-d3d11' to 'dxgi'")
+            self._impl.set('graphics.pipeline', 'dxgi')
+            migrated = True
+        if migrated:
+            # Do not emit signals here; reconciliation and save will follow
+            pass
     def _validate_loaded_settings(self) -> None:
         """Validate persisted settings strictly against definitions.
 
         Raises:
             ValueError: If any persisted value violates type, validator, or options.
         """
-        with self._lock:
-            for k, v in list(self._impl._settings.items()):
-                defn = self._impl.get_setting_definition(k)
-                if not defn:
-                    continue
-                # Enforce exact type, no silent coercion
-                if not isinstance(v, defn.setting_type):
-                    raise ValueError(
-                        f"Invalid type for setting {k}: {type(v).__name__}, expected {defn.setting_type.__name__}"
-                    )
-                if defn.validator and not defn.validator(v):
-                    raise ValueError(f"Invalid value for setting {k}: {v}")
-                if defn.options and v not in defn.options:
-                    opts = ', '.join(map(str, defn.options))
-                    raise ValueError(f"Invalid value for setting {k}. Must be one of: {opts}")
+        for k, v in list(self._impl._settings.items()):
+            defn = self._impl.get_setting_definition(k)
+            if not defn:
+                continue
+            # Enforce exact type, no silent coercion
+            if not isinstance(v, defn.setting_type):
+                raise ValueError(
+                    f"Invalid type for setting {k}: {type(v).__name__}, expected {defn.setting_type.__name__}"
+                )
+            if defn.validator and not defn.validator(v):
+                raise ValueError(f"Invalid value for setting {k}: {v}")
+            if defn.options and v not in defn.options:
+                opts = ', '.join(map(str, defn.options))
+                raise ValueError(f"Invalid value for setting {k}. Must be one of: {opts}")
 
 
 
     # --- Blocklist defaults (KeyPassthrough) ---------------------------------
+    def _ensure_settings_file_exists(self) -> None:
+        """Create settings.json with defaults if it doesn't exist."""
+        try:
+            p = Path(self._settings_file) if hasattr(self, '_settings_file') else None
+        except Exception:
+            p = None
+        if p is None:
+            return
+        if not p.exists():
+            # Persist current in-memory defaults to disk
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            self._impl.save(p)
+            self._logger.info(f"Created default settings at {p}")
+
     def _resolve_settings_dir(self) -> Path:
         """Resolve the directory where settings and auxiliary files live.
 
-        If a specific settings file path was provided, use its parent directory.
-        Otherwise, fall back to the user configuration directory (~/.spqmodular).
+        Precedence:
+        1) If an explicit settings file path was provided, use its parent directory.
+        2) Portable mode: if SPQ_PORTABLE=1 or a './settings' directory exists next to the executable, use it.
+        3) Fallback to the user configuration directory (~/.spqmodular).
         """
+        # 1) Explicit settings file
         try:
             if hasattr(self, '_settings_file') and self._settings_file:
                 p = Path(self._settings_file)
                 return p.parent
         except Exception:
             pass
-        return Path.home() / '.spqmodular'
+
+        # 2) Portable mode detection
+        try:
+            runtime_root = get_runtime_root()
+            portable_dir = runtime_root / 'settings'
+            if os.environ.get('SPQ_PORTABLE', '0') == '1' or getattr(sys, 'frozen', False) or portable_dir.exists():
+                try:
+                    self._logger.debug(f"[SETTINGS] Portable settings dir resolved: {portable_dir}")
+                except Exception:
+                    pass
+                return portable_dir
+        except Exception:
+            # Ignore portable detection failures and continue to fallback
+            pass
+
+        # 3) Fallback
+        fallback = Path.home() / '.spqmodular'
+        try:
+            self._logger.debug(f"[SETTINGS] Using user config dir: {fallback}")
+        except Exception:
+            pass
+        return fallback
 
     def _ensure_keypassthrough_blocklist_defaults(self) -> None:
         """Create a default key passthrough blocklist file if it doesn't exist.

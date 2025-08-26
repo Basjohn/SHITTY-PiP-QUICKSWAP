@@ -9,7 +9,7 @@ from ...types import OverlayConfig
 from ...overlay_host import OverlayHost
 from utils import window_validation as winval
 from utils.window.thumbnail_manager import ThumbnailManager
-from core.threading.manager import ThreadManager
+from core.threading import ThreadManager
 from ...dwm_composition_manager import get_dwm_composition_manager
 from utils.resource_manager import get_resource_manager, ResourceType
 from utils.window.overlay_constants import (
@@ -87,6 +87,20 @@ class IntegratedDWMOverlay(OverlayBase):
         self._broken: bool = False
         self._needs_recreate: bool = False
 
+    def _normalize_source_hwnd(self, hwnd: int) -> int:
+        """Normalize to the top-level window (GA_ROOT) for reliable geometry.
+        
+        Some callers may pass child/owner HWNDs; querying client rect on those can
+        yield tiny sizes (e.g., menu/status bars). We map to the root window to
+        ensure GetClientRect reflects the actual content area.
+        """
+        try:
+            import ctypes
+            root = ctypes.windll.user32.GetAncestor(int(hwnd or 0), 2)  # GA_ROOT = 2
+            return int(root) if root else int(hwnd or 0)
+        except Exception:
+            return int(hwnd or 0)
+
     def _initialize_impl(self) -> None:
         """Initialize the DWM overlay with integrated border rendering (impl)."""
         try:
@@ -98,10 +112,15 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 source_hwnd = 0
 
-            if not source_hwnd or not winval.is_valid_window(source_hwnd):
-                raise RuntimeError(f"Invalid source window: {source_hwnd}")
+            # Normalize to top-level to avoid child/owner client-rect quirks
+            norm_hwnd = self._normalize_source_hwnd(source_hwnd)
+            if norm_hwnd and norm_hwnd != source_hwnd:
+                self._logger.debug(f"Normalized source HWND {source_hwnd} -> {norm_hwnd}")
 
-            self._source_hwnd = source_hwnd
+            if not norm_hwnd or not winval.is_valid_window(norm_hwnd):
+                raise RuntimeError(f"Invalid source window: {norm_hwnd}")
+
+            self._source_hwnd = norm_hwnd
             
             # Cache the initial aspect ratio for consistent scaling during resize
             self._cache_source_aspect()
@@ -299,15 +318,40 @@ class IntegratedDWMOverlay(OverlayBase):
                 import ctypes
                 import ctypes.wintypes
                 
+                # Log basic source info for diagnostics
+                try:
+                    title = winval.get_window_title(self._source_hwnd)
+                    wclass = winval.get_window_class(self._source_hwnd)
+                    wrect = winval.get_window_rect(self._source_hwnd)
+                    if wrect:
+                        wr_w = max(0, wrect[2] - wrect[0])
+                        wr_h = max(0, wrect[3] - wrect[1])
+                        self._logger.debug(
+                            f"ASPECT_CACHE: hwnd={self._source_hwnd}, title='{title}', class='{wclass}', win_rect={wr_w}x{wr_h}"
+                        )
+                except Exception:
+                    pass
+
                 # Get client rect which excludes window decorations
                 client_rect = ctypes.wintypes.RECT()
                 if ctypes.windll.user32.GetClientRect(self._source_hwnd, ctypes.byref(client_rect)):
-                    src_w = client_rect.right - client_rect.left
-                    src_h = client_rect.bottom - client_rect.top
+                    src_w = max(0, client_rect.right - client_rect.left)
+                    src_h = max(0, client_rect.bottom - client_rect.top)
                     if src_w > 0 and src_h > 0:
-                        self._source_aspect = src_w / src_h
-                        self._logger.debug(f"Cached source aspect ratio from client area: {self._source_aspect:.3f} ({src_w}x{src_h})")
-                        return
+                        aspect = src_w / src_h
+                        # Sanity thresholds to avoid tiny/invalid client areas
+                        too_small = src_w < 64 or src_h < 64 or (src_w * src_h) < 5000
+                        out_of_bounds = aspect < 0.2 or aspect > 5.0
+                        if not too_small and not out_of_bounds:
+                            self._source_aspect = aspect
+                            self._logger.debug(
+                                f"Cached source aspect ratio from client area: {self._source_aspect:.3f} ({src_w}x{src_h})"
+                            )
+                            return
+                        else:
+                            self._logger.debug(
+                                f"Client rect suspicious ({src_w}x{src_h}, ar={aspect:.3f}); falling back to window rect"
+                            )
             except Exception as e:
                 self._logger.debug(f"Failed to get client rect, falling back to window rect: {e}")
             
@@ -318,8 +362,18 @@ class IntegratedDWMOverlay(OverlayBase):
                 src_w = source_rect[2] - source_rect[0]
                 src_h = source_rect[3] - source_rect[1]
                 if src_w > 0 and src_h > 0:
-                    self._source_aspect = src_w / src_h
-                    self._logger.debug(f"Cached source aspect ratio from window rect: {self._source_aspect:.3f} ({src_w}x{src_h})")
+                    aspect = src_w / src_h
+                    # Clamp to reasonable bounds to avoid wild distortion
+                    clamped = max(0.2, min(5.0, aspect))
+                    self._source_aspect = clamped
+                    if clamped != aspect:
+                        self._logger.debug(
+                            f"Cached source aspect ratio from window rect (clamped): {self._source_aspect:.3f} (raw={aspect:.3f}, {src_w}x{src_h})"
+                        )
+                    else:
+                        self._logger.debug(
+                            f"Cached source aspect ratio from window rect: {self._source_aspect:.3f} ({src_w}x{src_h})"
+                        )
                     return
             
             self._source_aspect = None
@@ -346,6 +400,10 @@ class IntegratedDWMOverlay(OverlayBase):
             
             # Use cached aspect ratio for consistent scaling during manual resize
             source_aspect = self._source_aspect
+            # Sanity clamp to avoid extreme distortions
+            if source_aspect is not None and not (0.2 <= source_aspect <= 5.0):
+                self._logger.debug(f"Clamping source aspect {source_aspect:.3f} to bounds [0.2, 5.0]")
+                source_aspect = max(0.2, min(5.0, source_aspect))
             
             # Calculate aspect-ratio preserving destination rect (pillarbox OR letterbox, never both)
             dest_rect = content_rect
@@ -704,6 +762,12 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 self._target_hwnd = 0
 
+            # Refresh source aspect after show (in case source window state changed)
+            try:
+                self._cache_source_aspect()
+            except Exception:
+                pass
+
             # Attempt immediate registration; if it fails, schedule background retries without failing show
             if not self._register_thumbnail():
                 self._logger.warning(
@@ -852,12 +916,24 @@ class IntegratedDWMOverlay(OverlayBase):
     def set_opacity(self, opacity: float) -> bool:
         """Set overlay opacity with unified canvas and thumbnail handling."""
         try:
-            opacity = max(0.0, min(1.0, float(opacity)))
-            self._opacity = opacity
+            raw = float(opacity)
+            clamped = max(0.1, min(1.0, raw))
+            if clamped != raw:
+                try:
+                    self._logger.debug(f"[OPACITY] DWM clamp -> {clamped:.2f} (from {raw:.3f})")
+                except Exception:
+                    pass
+            # Log at bounds for validation
+            if clamped in (0.1, 1.0):
+                try:
+                    self._logger.debug(f"[OPACITY] DWM set -> {int(clamped*100)}%")
+                except Exception:
+                    pass
+            self._opacity = clamped
 
             # Update canvas backdrop opacity (borders stay at full opacity)
             if self._canvas:
-                self._canvas.set_opacity(opacity)
+                self._canvas.set_opacity(self._opacity)
 
             # Update thumbnail opacity to match canvas for unified fade
             self._update_thumbnail_properties()

@@ -347,7 +347,7 @@ class OverlayManager:
                     return None
                 
                 # Defer registration to ensure window handle is stable
-                from core.threading.manager import ThreadManager
+                from core.threading import ThreadManager
                 
                 def _register_after_stable():
                     if main_widget.isVisible() and main_widget.winId():
@@ -577,7 +577,7 @@ class OverlayManager:
             delay_ms: Delay in milliseconds before enforcement
         """
         try:
-            from core.threading.manager import ThreadManager
+            from core.threading import ThreadManager
             from utils.resource_manager import get_resource_manager
             rm = get_resource_manager()
             # Use ThreadManager for scheduling (centralized timer policy)

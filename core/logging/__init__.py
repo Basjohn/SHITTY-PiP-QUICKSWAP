@@ -8,7 +8,7 @@ This module provides centralized logging functionality including:
 - Exception handling integration
 """
 
-from .logger_impl import AppLogger, get_logger, configure_logging, get_app_logger
+from .logger_impl import AppLogger, get_logger, configure_logging, get_app_logger, throttled, log_dedupe
 
 # Public API
-__all__ = ['AppLogger', 'get_logger', 'configure_logging', 'get_app_logger']
+__all__ = ['AppLogger', 'get_logger', 'configure_logging', 'get_app_logger', 'throttled', 'log_dedupe']

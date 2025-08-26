@@ -44,22 +44,14 @@ class WindowEnumerator(QObject):
     def _init_blank_icon(cls) -> None:
         """Initialize the blank fallback icon."""
         cls._blank_icon = QIcon()
-        # Check both resource paths and filesystem paths
-        icon_paths = [
-            ":/Blank.ico",  # Resource path
-            "resources/Blank.ico",  # Filesystem path
-            "Blank.ico"  # Current directory fallback
-        ]
-        
-        for path in icon_paths:
-            if os.path.exists(path) or path.startswith(':'):
-                pixmap = QPixmap(path)
-                if not pixmap.isNull():
-                    cls._blank_icon = QIcon(pixmap)
-                    logger.debug("Loaded fallback icon from: %s", path)
-                    return
-        
-        logger.warning("Failed to load Blank.ico from any path. Tried: %s", ", ".join(icon_paths))
+        # Resource-only to avoid filesystem fallbacks and warnings
+        path = ":/icons/Blank.ico"
+        pixmap = QPixmap(path)
+        if not pixmap.isNull():
+            cls._blank_icon = QIcon(pixmap)
+            logger.debug("Loaded fallback icon from: %s", path)
+        else:
+            logger.warning("Failed to load Blank.ico from Qt resources at %s", path)
     
     def _is_valid_window(self, hwnd: int, check_visible: bool = True) -> bool:
         """Check if a window is valid for inclusion in the window list."""

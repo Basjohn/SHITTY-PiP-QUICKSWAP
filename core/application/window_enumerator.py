@@ -48,11 +48,11 @@ class WindowEnumerator:
     
     @classmethod
     def _init_blank_icon(cls) -> None:
-        """Initialize a blank icon using resources/Blank.ico when possible.
+        """Initialize the blank fallback icon using Qt resources only.
 
         Requires a QApplication instance for reliable QIcon/QPixmap usage. If the
-        application is not yet initialized, defer by setting an empty QIcon and
-        let the caller re-attempt after QApplication exists.
+        application is not yet initialized, set an empty QIcon and let the caller
+        re-attempt after QApplication exists.
         """
         try:
             if QApplication.instance() is None:
@@ -60,29 +60,18 @@ class WindowEnumerator:
                 cls._blank_icon = QIcon()
                 return
 
-            # Attempt to load explicit Blank.ico from the resources folder
-            # Project structure: <root>/resources/Blank.ico
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ico_path = os.path.join(base_dir, 'resources', 'Blank.ico')
-
-            icon_loaded = False
-            try:
-                if os.path.exists(ico_path):
-                    icon_candidate = QIcon(ico_path)
-                    # Ensure we have a non-null icon
-                    if not icon_candidate.isNull():
-                        cls._blank_icon = icon_candidate
-                        icon_loaded = True
-                        logger.debug(f"Loaded Blank.ico from resources: {ico_path}")
-            except Exception as e:
-                logger.debug(f"Attempt to load Blank.ico failed: {e}")
-
-            if not icon_loaded:
-                # Fallback: generate a small transparent pixmap to avoid null
-                pixmap = QPixmap(16, 16)
-                pixmap.fill(Qt.transparent)
+            # Load from Qt resources only to avoid filesystem fallbacks/warnings
+            path = ":/icons/Blank.ico"
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
                 cls._blank_icon = QIcon(pixmap)
-                logger.warning("Blank.ico not found or invalid; using generated transparent icon")
+                logger.debug("Loaded fallback icon from: %s", path)
+            else:
+                # Fallback: generate a small transparent pixmap to avoid null
+                pm = QPixmap(16, 16)
+                pm.fill(Qt.transparent)
+                cls._blank_icon = QIcon(pm)
+                logger.warning("Failed to load Blank.ico from Qt resources at %s; using generated transparent icon", path)
         except Exception as e:
             logger.error(f"Failed to initialize blank icon: {e}")
             cls._blank_icon = QIcon()

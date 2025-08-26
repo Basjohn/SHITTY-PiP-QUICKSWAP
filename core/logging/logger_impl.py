@@ -12,6 +12,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
+import threading
+import time
 
 from core.interfaces import ILogger
 
@@ -363,6 +365,9 @@ class AppLogger(ILogger):
         
         file_handler.setLevel(level)
         
+        # Apply repeat suppression for file output as well (prevents flooding)
+        file_handler.addFilter(RepeatSuppressFilter(window_seconds=2.0))
+
         # Use a more detailed formatter for file output
         file_formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
@@ -526,3 +531,75 @@ class AppLogger(ILogger):
         
         # Log the message
         self._logger.log(level, message)
+
+
+# --- Throttling & Dedup Helpers -------------------------------------------------
+
+# Per-process simple throttle state
+_throttle_state_lock = threading.Lock()
+_throttle_last_emit: dict[str, float] = {}
+
+# Per-process dedupe state: key -> (last_message, suppressed_count, last_time)
+_dedupe_state_lock = threading.Lock()
+_dedupe_state: dict[str, tuple[str, int, float]] = {}
+
+def throttled(logger_fn, key: str, interval_ms: int):
+    """
+    Return a callable that logs messages using logger_fn at most once per interval_ms for the given key.
+
+    Example:
+        tdebug = throttled(logger.debug, "hotkeys:repeat", 500)
+        tdebug("Repeat ignored for opacity_decrease")
+    """
+    interval_s = max(0.0, float(interval_ms) / 1000.0)
+    k = str(key)
+
+    def _emit(message: str) -> None:
+        now = time.monotonic()
+        with _throttle_state_lock:
+            last = _throttle_last_emit.get(k, 0.0)
+            if now - last < interval_s:
+                return
+            _throttle_last_emit[k] = now
+        try:
+            logger_fn(message)
+        except Exception:
+            # Never raise from logging helpers
+            pass
+
+    return _emit
+
+
+def log_dedupe(logger_fn, key: str, window_ms: int):
+    """
+    Return a callable that suppresses identical consecutive messages within window_ms for the given key.
+    When the window elapses or the message changes, emits a summary of suppressed repeats.
+
+    Example:
+        ddebug = log_dedupe(logger.debug, "qswitch:none", 2000)
+        ddebug("No candidates for quickswitch")
+    """
+    window_s = max(0.0, float(window_ms) / 1000.0)
+    k = str(key)
+
+    def _emit(message: str) -> None:
+        now = time.monotonic()
+        with _dedupe_state_lock:
+            last_msg, count, last_time = _dedupe_state.get(k, ("", 0, 0.0))
+            if message == last_msg and (now - last_time) < window_s:
+                _dedupe_state[k] = (last_msg, count + 1, last_time)
+                return
+            # If we had suppressed repeats for the previous message, emit a summary line first
+            if count > 0 and last_msg:
+                try:
+                    logger_fn(f"{last_msg} [dedup suppressed {count} repeats]")
+                except Exception:
+                    pass
+            # Emit current message and reset state
+            _dedupe_state[k] = (message, 0, now)
+        try:
+            logger_fn(message)
+        except Exception:
+            pass
+
+    return _emit

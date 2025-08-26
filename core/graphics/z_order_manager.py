@@ -7,8 +7,7 @@ ensuring consistent stacking order and eliminating redundant z-order calls.
 from __future__ import annotations
 
 import threading
-import ctypes
-from ctypes import windll, c_int, byref, sizeof
+from ctypes import windll
 from typing import Dict, Optional, Any
 from weakref import WeakValueDictionary
 
@@ -16,7 +15,8 @@ from PySide6.QtWidgets import QWidget
  
 
 from core.logging import get_logger
-from core.threading.manager import ThreadManager
+from core.logging.logger_impl import throttled  # call-site helper for hot paths
+from core.threading import ThreadManager
 
 logger = get_logger(__name__)
 
@@ -49,6 +49,9 @@ class ZOrderManager:
     def __init__(self):
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
+        # Throttled emitters for high-frequency messages
+        self._tdebug_scheduled = throttled(self._logger.debug, "zorder:scheduled", 200)
+        self._tdebug_batch = throttled(self._logger.debug, "zorder:batch", 500)
         
         # Track overlay relationships
         self._main_overlays: WeakValueDictionary[str, QWidget] = WeakValueDictionary()
@@ -215,7 +218,7 @@ class ZOrderManager:
             
             # Add to pending set for debounced enforcement
             self._pending_overlays.add(overlay_id)
-            self._logger.debug(f"Scheduled z-order enforcement for {overlay_id} (debounced)")
+            self._tdebug_scheduled(f"Scheduled z-order enforcement for {overlay_id} (debounced)")
             
             # Start or restart debounce using ThreadManager.single_shot with token coalescing
             self._enforcement_token += 1
@@ -278,7 +281,7 @@ class ZOrderManager:
             pending_copy = self._pending_overlays.copy()
             self._pending_overlays.clear()
             
-            self._logger.debug(f"Executing batched z-order enforcement for {len(pending_copy)} overlays: {pending_copy}")
+            self._tdebug_batch(f"Executing batched z-order enforcement for {len(pending_copy)} overlays: {pending_copy}")
             
             success_count = 0
             for overlay_id in pending_copy:
@@ -308,7 +311,7 @@ class ZOrderManager:
                 except Exception as e:
                     self._logger.exception(f"Error during batched z-order enforcement for {overlay_id}: {e}")
             
-            self._logger.debug(f"Batched z-order enforcement completed: {success_count}/{len(pending_copy)} successful")
+            self._tdebug_batch(f"Batched z-order enforcement completed: {success_count}/{len(pending_copy)} successful")
             
             # No timer cleanup necessary when using tokenized single_shot scheduling
     

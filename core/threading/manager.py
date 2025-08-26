@@ -140,6 +140,15 @@ class ThreadManager:
         self._active_tasks: Dict[str, Task] = {}
         self._stats = {pool_type: {'submitted': 0, 'completed': 0, 'failed': 0} 
                       for pool_type in ThreadPoolType}
+        # Stage 2 scaffold: single-writer mutation queue (SPSC) and shadow stats
+        # Producer: any thread enqueues tiny mutation events; Consumer: UI-thread drain
+        self._mut_q: SPSCQueue[tuple] = self.create_spsc_queue(256)
+        self._mut_shadow_stats = {pool_type: {'submitted': 0, 'completed': 0, 'failed': 0}
+                                  for pool_type in ThreadPoolType}
+        self._mut_drain_scheduled = False
+        # Lock-free stats publisher (SPSC) - producer: TM internal; consumer: observers/UI
+        self._stats_tb: TripleBuffer[Dict[str, Dict[str, Any]]] = TripleBuffer()
+        self._stats_pub_interval_ms: int = 250  # light cadence
         # Initialize or use provided centralized resource manager
         self._resource_manager = resource_manager or get_resource_manager()
         # Attach this ThreadManager to ResourceManager to avoid circular imports
@@ -158,6 +167,17 @@ class ThreadManager:
             tags={"thread_manager"}
         )
         self._initialize_pools()
+        # Start periodic stats publisher after pools initialized
+        try:
+            self._schedule_stats_publish()
+        except Exception as e:
+            logger.debug("Stats publisher scheduling failed: %s", e)
+        # Start initial mutation drain tick (coalesced on UI thread)
+        try:
+            self._schedule_mutation_drain()
+        except Exception:
+            # Non-fatal; scaffold only
+            pass
         # Now that executors are initialized, start ResourceManager worker
         try:
             start_worker = getattr(self._resource_manager, "start_mutation_worker", None)
@@ -214,10 +234,11 @@ class ThreadManager:
         if self._shutdown:
             raise RuntimeError("Thread manager is shut down")
         task = Task(func, *args, task_id=task_id, priority=priority, **kwargs)
+        # Minimal lock scope only to safely read executor reference
         with self._lock:
             executor = self._executors[pool_type]
-            # Wrap the function to handle result processing
-            def wrapped_func():
+        # Wrap the function to handle result processing
+        def wrapped_func():
                 start_time = time.time()
                 try:
                     result = task.func(*task.args, **task.kwargs)
@@ -228,8 +249,8 @@ class ThreadManager:
                         execution_time=execution_time,
                         task_id=task.task_id
                     )
-                    with self._lock:
-                        self._stats[pool_type]['completed'] += 1
+                    # Route stats mutation via single-writer queue (authoritative)
+                    self._enqueue_mutation(('completed', pool_type.value))
                 except Exception as e:
                     execution_time = time.time() - start_time
                     task_result = TaskResult(
@@ -238,13 +259,12 @@ class ThreadManager:
                         execution_time=execution_time,
                         task_id=task.task_id
                     )
-                    with self._lock:
-                        self._stats[pool_type]['failed'] += 1
                     logger.error(f"Task {task.task_id} failed: {e}")
+                    # Route stats mutation via single-writer queue (authoritative)
+                    self._enqueue_mutation(('failed', pool_type.value))
                 finally:
-                    # Clean up active task tracking
-                    with self._lock:
-                        self._active_tasks.pop(task.task_id, None)
+                    # Route active-task unregister via single-writer queue
+                    self._enqueue_mutation(('unregister_active', task.task_id))
                 # Execute callback if provided
                 if callback:
                     try:
@@ -252,30 +272,31 @@ class ThreadManager:
                     except Exception as e:
                         logger.error(f"Callback for task {task.task_id} failed: {e}")
                 return task_result
-            # Submit to executor
-            future = executor.submit(wrapped_func)
-            task.future = future
-            # Register the future as a resource if resource manager is available
-            if self._resource_manager:
-                try:
-                    self._resource_manager.register(
-                        future,
-                        ResourceType.CUSTOM,
-                        f"Task future for {task.task_id} in pool {pool_type.value}",
-                        cleanup_handler=lambda f: f.cancel() if not f.done() else None,
-                        pool=pool_type.value,
-                        task_id=task.task_id,
-                        function=getattr(func, "__name__", str(func)),
-                        created_by="ThreadManager.submit_task",
-                        tags=list({"task", f"pool:{pool_type.value}", *(resource_tags or set() or set())})
-                    )
-                except TypeError as e:
-                    # Skip registration if object is not weakref-able
-                    logger.debug(f"Skipping resource registration for task {task.task_id}: {e}")
-            self._active_tasks[task.task_id] = task
-            self._stats[pool_type]['submitted'] += 1
-            logger.debug(f"Submitted task {task.task_id} to {pool_type.value} pool")
-            return task.task_id
+        # Submit to executor
+        future = executor.submit(wrapped_func)
+        task.future = future
+        # Register the future as a resource if resource manager is available
+        if self._resource_manager:
+            try:
+                self._resource_manager.register(
+                    future,
+                    ResourceType.CUSTOM,
+                    f"Task future for {task.task_id} in pool {pool_type.value}",
+                    cleanup_handler=lambda f: f.cancel() if not f.done() else None,
+                    pool=pool_type.value,
+                    task_id=task.task_id,
+                    function=getattr(func, "__name__", str(func)),
+                    created_by="ThreadManager.submit_task",
+                    tags=list({"task", f"pool:{pool_type.value}", *(resource_tags or set() or set())})
+                )
+            except TypeError as e:
+                # Skip registration if object is not weakref-able
+                logger.debug(f"Skipping resource registration for task {task.task_id}: {e}")
+        # Route active-task register and stats submitted via single-writer queue
+        self._enqueue_mutation(('register_active', task))
+        self._enqueue_mutation(('submitted', pool_type.value))
+        logger.debug(f"Submitted task {task.task_id} to {pool_type.value} pool")
+        return task.task_id
 
     def submit_io_task(self, func: Callable, *args, **kwargs) -> str:
         """Convenience API for IO pool submissions used by ResourceManager.
@@ -446,6 +467,134 @@ class ThreadManager:
             except Exception:
                 # Best-effort cleanup; do not mask shutdown path
                 pass
+
+    # Internal: stats publisher ------------------------------------------------
+    def _gather_stats(self) -> Dict[str, Dict[str, Any]]:
+        info: Dict[str, Dict[str, Any]] = {}
+        # Use existing get_pool_info which already handles locking
+        try:
+            info = self.get_pool_info()
+        except Exception as e:
+            logger.debug("get_pool_info failed for stats publish: %s", e)
+            # Fallback minimal stats
+            with self._lock:
+                info = {pool.value: self._stats[pool].copy() for pool in ThreadPoolType}
+        return info
+
+    def _publish_stats_once(self) -> None:
+        if self._shutdown:
+            return
+        try:
+            snapshot = self._gather_stats()
+            self._stats_tb.publish(snapshot)
+        except Exception as e:
+            logger.debug("Stats publish failed: %s", e)
+        finally:
+            # Reschedule if still active
+            if not self._shutdown:
+                self._schedule_stats_publish()
+
+    # Stage 2 scaffold: mutation queue drain ----------------------------------
+    def _enqueue_mutation(self, ev: tuple) -> None:
+        """Best-effort enqueue of a tiny mutation event.
+
+        Event formats:
+          - ("register_active", Task)
+          - ("unregister_active", task_id)
+          - ("submitted"|"completed"|"failed", pool_value)
+        """
+        if self._shutdown:
+            return
+        try:
+            self._mut_q.push_drop_oldest(ev)
+        except Exception:
+            # Drop on failure; best-effort
+            return
+        # For registration, schedule immediate drain to preserve submit semantics
+        if isinstance(ev, tuple) and ev and ev[0] == 'register_active':
+            self._schedule_mutation_drain(0)
+        else:
+            self._schedule_mutation_drain()
+
+    def _schedule_mutation_drain(self, delay_ms: int = 10) -> None:
+        if self._shutdown:
+            return
+        # Coalesce drains onto UI thread using existing timer infra
+        if not self._mut_drain_scheduled:
+            self._mut_drain_scheduled = True
+            # Small window to batch bursts
+            self.single_shot(max(0, int(delay_ms)), self._drain_mutations_on_ui)
+
+    def _drain_mutations_on_ui(self) -> None:
+        self._mut_drain_scheduled = False
+        drained = 0
+        try:
+            while True:
+                ok, ev = self._mut_q.try_pop()
+                if not ok:
+                    break
+                drained += 1
+                try:
+                    kind = ev[0]
+                except Exception:
+                    continue
+                # Active task registration/unregistration
+                if kind == 'register_active':
+                    # ev[1] is Task object
+                    try:
+                        task_obj = ev[1]
+                        if task_obj is not None:
+                            with self._lock:
+                                self._active_tasks[task_obj.task_id] = task_obj
+                    except Exception:
+                        pass
+                    continue
+                if kind == 'unregister_active':
+                    try:
+                        task_id = ev[1]
+                        with self._lock:
+                            self._active_tasks.pop(task_id, None)
+                    except Exception:
+                        pass
+                    continue
+                # Stats mutations: ('submitted'|'completed'|'failed', pool_value)
+                try:
+                    pool_value = ev[1]
+                    pt = next((p for p in ThreadPoolType if p.value == pool_value), None)
+                    if pt is None:
+                        continue
+                    with self._lock:
+                        stats = self._stats[pt]
+                        if kind in stats:
+                            stats[kind] += 1
+                        sh = self._mut_shadow_stats[pt]
+                        if kind in sh:
+                            sh[kind] += 1
+                except Exception:
+                    continue
+        finally:
+            # If queue not empty, schedule another tick
+            if not self._shutdown and not self._mut_q.is_empty():
+                self._schedule_mutation_drain()
+
+    def _schedule_stats_publish(self) -> None:
+        # Use single_shot to avoid raw timers here and keep cadence light
+        self.single_shot(self._stats_pub_interval_ms, self._publish_stats_once)
+
+    def get_stats_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Return latest thread pool stats without taking locks if available.
+
+        Falls back to a locked copy if no published snapshot yet.
+        """
+        latest = None
+        try:
+            latest = self._stats_tb.consume_latest()
+        except Exception:
+            latest = None
+        if latest is not None:
+            return latest
+        # Fallback
+        return self._gather_stats()
 
     # UI dispatch utilities ---------------------------------------------------
     @staticmethod

@@ -17,7 +17,7 @@ import winerror
 
 # Local imports
 from core.logging import get_logger
-from core.threading.manager import ThreadManager
+from core.threading import ThreadManager
 from core.threading.priority import TaskPriority
 from core.threading import get_thread_manager
 

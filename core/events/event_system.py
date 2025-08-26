@@ -6,13 +6,18 @@ interface for managing events and callbacks in the application.
 """
 
 import threading
+import time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 from core.interfaces import IEventSystem
 from core.logging import get_logger
 from .event_types import Event, EventType, Subscription
-from core.threading.manager import ThreadManager
+from core.threading import ThreadManager
+try:
+    from core.settings.settings_manager import SettingsManager  # optional
+except Exception:  # pragma: no cover - settings not critical for tracing
+    SettingsManager = None  # type: ignore
 
 # Type variables
 T = TypeVar('T', bound=Event)
@@ -35,6 +40,15 @@ class EventSystem(IEventSystem):
         self._logger = get_logger('EventSystem')
         self._event_history: List[Event] = []
         self._max_history = 1000  # Maximum number of events to keep in history
+        # Tracing: lightweight, settings-gated dispatch tracing for diagnostics
+        self._trace_enabled: bool = False
+        try:
+            if SettingsManager is not None:
+                sm = SettingsManager()
+                self._trace_enabled = bool(sm.get("debug.events_trace", False))
+        except Exception:
+            # Non-fatal; default remains False
+            pass
     
     def subscribe(
         self, 
@@ -194,8 +208,21 @@ class EventSystem(IEventSystem):
         for subscription in matching_subs:
             if event.is_handled:
                 break
-                
+            
+            # Optional per-handler tracing
+            start_ts = time.perf_counter() if self._trace_enabled else 0.0
             try:
+                if self._trace_enabled:
+                    try:
+                        self._logger.debug(
+                            "dispatch.begin id=%s type=%s sub=%s prio=%d",
+                            event.id,
+                            event_type,
+                            self._format_callback(subscription.callback),
+                            getattr(subscription, 'priority', 0),
+                        )
+                    except Exception:
+                        pass
                 subscription(event)
             except Exception as e:
                 self._logger.error(
@@ -204,6 +231,21 @@ class EventSystem(IEventSystem):
                     str(e),
                     exc_info=True
                 )
+            finally:
+                if self._trace_enabled:
+                    try:
+                        dur_ms = (time.perf_counter() - start_ts) * 1000.0 if start_ts else 0.0
+                        self._logger.debug(
+                            "dispatch.end id=%s type=%s sub=%s prio=%d dur_ms=%.3f handled=%s",
+                            event.id,
+                            event_type,
+                            self._format_callback(subscription.callback),
+                            getattr(subscription, 'priority', 0),
+                            dur_ms,
+                            event.is_handled,
+                        )
+                    except Exception:
+                        pass
         
         # Add to history
         self._add_to_history(event)

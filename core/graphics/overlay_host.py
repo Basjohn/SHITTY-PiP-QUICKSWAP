@@ -14,7 +14,7 @@ from utils.cursor_manager import get_cursor_manager, CursorPriority
 from core.input.key_passthrough_controller import get_key_passthrough_controller
 from core.graphics import get_overlay_manager
 from .types import OverlayConfig
-from ui.components.volume_osd import VolumeOSDWindow
+from ui.components.volume_osd import VolumeOSDWidget, VolumeOSDWindow
 
 
 class OverlayHost(QWidget):
@@ -74,9 +74,10 @@ class OverlayHost(QWidget):
         # Enforce minimum size via canvas
         self.canvas.setMinimumSize(IntegratedBorderCanvas.MIN_WIDTH, IntegratedBorderCanvas.MIN_HEIGHT)
 
-        # Volume OSD window (top-level). Hidden by default; shows itself on events.
-        self._volume_osd: Optional[VolumeOSDWindow] = None
+        # Volume OSD as a top-level tool window placed above the host. Hidden by default; shows itself on events.
+        self._volume_osd: Optional[VolumeOSDWidget] = None
         try:
+            # Use top-level OSD window to avoid DWM/native child compositing and z-order issues
             self._volume_osd = VolumeOSDWindow(self)
             # Ensure initial position and theming
             try:
@@ -89,7 +90,7 @@ class OverlayHost(QWidget):
                 pass
         except Exception as e:
             logger = get_logger("OverlayHost")
-            logger.debug(f"Failed to create VolumeOSDWindow: {e}")
+            logger.debug(f"Failed to create VolumeOSDWidget: {e}")
 
         # Centralized window behavior for drag/resize/snap on the host window
         # IntegratedBorderCanvas forwards mouse events to this manager to keep border and background coupled
@@ -146,11 +147,11 @@ class OverlayHost(QWidget):
             self._focus_indicator.lock_toggled.connect(_on_lock_toggle)
             
             # Force initial focus check after a short delay to ensure proper initialization
-            from core.threading.manager import ThreadManager
+            from core.threading import ThreadManager
             ThreadManager.single_shot(100, lambda: self._check_initial_focus())
             
             # Also check passthrough state after initialization to ensure correct color
-            from core.threading.manager import ThreadManager
+            from core.threading import ThreadManager
             ThreadManager.single_shot(150, lambda: self._sync_passthrough_state())
         except Exception as e:
             logger = get_logger("OverlayHost")
@@ -795,7 +796,7 @@ class OverlayHost(QWidget):
         Safe to call from any thread. Uses ThreadManager to route work to the UI thread.
         """
         try:
-            from core.threading.manager import ThreadManager
+            from core.threading import ThreadManager
 
             def _do_flash():
                 try:

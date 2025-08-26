@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-import threading
 from typing import Optional
 
 from PySide6.QtCore import QObject, QPoint, QSize
@@ -17,6 +16,7 @@ from utils.window_validation import is_valid_window, get_window_rect, get_window
 from core.switching.mru_manager import get_mru_manager
 from core.switching.selection import compute_next_selection
 from utils.window.monitors import find_monitor_for_window
+from utils.resource_manager import get_resource_manager, ResourceType
 
 
 class AutoswitchController(QObject):
@@ -35,23 +35,13 @@ class AutoswitchController(QObject):
     POLL_INTERVAL_MS = 250
     STABLE_DEBOUNCE_MS = 300
 
-    _instance: Optional["AutoswitchController"] = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self) -> None:
-        if getattr(self, "_initialized", False):
-            return
         super().__init__()
         self._logger = get_logger("AUTOSWITCH")
         self._settings = SettingsManager()
         self._overlay_manager = OverlayManager()
+        self._rm = get_resource_manager()
+        self._rm_id = None
 
         self._enabled: bool = False
         self._polling_active: bool = False
@@ -67,10 +57,71 @@ class AutoswitchController(QObject):
         self._suppress_until_ms: float = 0.0
         self._suppress_last_seen: Optional[int] = None
 
+        # Register settings change handler for live enable/disable
+        self._settings_key_enable = "features.autoswitch_enabled"
+        self._settings_handler = self._on_setting_changed
+        try:
+            self._settings.register_change_handler(self._settings_key_enable, self._settings_handler)
+        except Exception as e:
+            self._logger.error(f"Failed to register settings handler for {self._settings_key_enable}: {e}")
+
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            self._rm_id = self._rm.register(
+                self,
+                resource_type=ResourceType.CUSTOM,
+                description="AutoswitchController",
+                cleanup_handler=lambda r: r.shutdown(),
+                cleanup_priority=20,
+            )
+        except Exception as e:
+            self._logger.debug(f"ResourceManager register failed for AutoswitchController: {e}")
+
         self.apply_settings()
 
-        self._initialized = True
         self._logger.debug("Initialized AutoswitchController")
+
+    def shutdown(self) -> None:
+        """Deterministically stop polling, unregister handlers, and cleanup resources."""
+        try:
+            # Stop observation and reset state
+            self._enabled = False
+            self._polling_active = False
+            self._last_seen_hwnd = None
+            self._candidate_hwnd = None
+            self._candidate_since = None
+            self._last_applied_src = None
+            self._suppress_until_ms = 0.0
+            self._suppress_last_seen = None
+        except Exception:
+            pass
+        # Unregister settings handler
+        try:
+            if hasattr(self, "_settings_handler") and self._settings_handler is not None:
+                self._settings.unregister_change_handler(self._settings_key_enable, self._settings_handler)
+        except Exception as e:
+            self._logger.debug(f"Failed to unregister settings handler: {e}")
+        # Unregister from ResourceManager (idempotent)
+        try:
+            if self._rm_id is not None:
+                rid = self._rm_id
+                self._rm_id = None
+                try:
+                    self._rm.unregister(rid)
+                except Exception as ue:
+                    self._logger.debug(f"ResourceManager unregister failed for AutoswitchController: {ue}")
+        except Exception:
+            pass
+
+    def _on_setting_changed(self, key: str, value) -> None:
+        """React to live changes for autoswitch enable flag, serialized on UI thread."""
+        try:
+            if key != self._settings_key_enable:
+                return
+            # Ensure apply_settings runs on UI thread
+            ThreadManager.run_on_ui_thread(self.apply_settings)
+        except Exception as e:
+            self._logger.debug(f"Failed to process settings change for {key}: {e}")
 
     def _pick_from_zorder(self, exclude_a: Optional[int], exclude_b: Optional[int]) -> Optional[int]:
         """Return a reasonable next window from Z-order excluding up to two handles, honoring validity checks.

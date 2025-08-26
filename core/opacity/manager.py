@@ -8,9 +8,10 @@ and overlays, independent of any specific UI instance.
 from core.logging import get_logger
 from core.settings.settings_manager import SettingsManager
 from core.threading import ThreadManager
+from core.hotkeys.manager import HotkeyManager
+from utils.resource_manager import get_resource_manager, ResourceType
 from PySide6.QtCore import QObject, Signal
 import threading
-import keyboard
 
 class OpacityManager(QObject):
     """Centralized opacity manager for the application.
@@ -22,7 +23,8 @@ class OpacityManager(QObject):
     """
     
     # Timer adjustment interval in milliseconds
-    ADJUSTMENT_INTERVAL = 30  # Adjust every 30ms for smoother animation
+    # Reduced further for ~30% faster adjustment vs previous 24ms (now ~17ms)
+    ADJUSTMENT_INTERVAL = 17
     
     # Opacity adjustment amount per timer tick
     ADJUSTMENT_AMOUNT = 1  # Adjust by 1% per tick for fine control
@@ -55,6 +57,30 @@ class OpacityManager(QObject):
         super().__init__()
         self._logger = get_logger(__name__)
         self._settings_manager = SettingsManager()
+        # Resource registration for lifecycle management
+        self._resource_id = None
+        try:
+            rm = get_resource_manager()
+            self._resource_id = rm.register(
+                self,
+                ResourceType.CUSTOM,
+                "OpacityManager singleton",
+                cleanup_handler=lambda obj: obj.shutdown(),
+                tags={"opacity", "manager"},
+            )
+        except Exception:
+            # Best-effort registration
+            self._resource_id = None
+        # Normalize stored opacity to minimum 10% for self-healing of legacy values
+        try:
+            stored = self._settings_manager.get("appearance.opacity", 100)
+            if isinstance(stored, (int, float)) and stored < 10:
+                self._logger.debug(f"[OPACITY] Normalizing stored value from {stored}% to 10%")
+                self._settings_manager.set("appearance.opacity", 10)
+                # Save immediately to persist correction
+                self._settings_manager.save()
+        except Exception:
+            pass
         # No per-instance ThreadManager; use centralized static API
         
         # Active flags for self-rescheduling ticks
@@ -67,11 +93,14 @@ class OpacityManager(QObject):
         self._decrease_key = None
         self._increase_key = None
         
-        # Hotkey handlers (to allow unregistering)
-        self._decrease_press_handler = None
-        self._increase_press_handler = None
-        self._decrease_release_handler = None
-        self._increase_release_handler = None
+        # Hotkey IDs for centralized HotkeyManager
+        self._hk_id_decrease = "opacity_decrease"
+        self._hk_id_increase = "opacity_increase"
+
+        # Tick indices for ~25% faster adjustment using a 1-1-1-2 schedule
+        # Separate counters per direction to avoid cross-interference
+        self._inc_tick_index = 0
+        self._dec_tick_index = 0
         
         # Load hotkey settings and register global hotkeys
         self._load_hotkey_settings()
@@ -81,85 +110,93 @@ class OpacityManager(QObject):
         self._logger.debug("OpacityManager initialized")
     
     def _register_hotkeys(self) -> None:
-        """Register global hotkeys for opacity adjustment using keyboard module."""
+        """Register opacity hotkeys via centralized HotkeyManager (no LL hooks)."""
         try:
             # Unregister existing hotkeys if any
             self._unregister_hotkeys()
-            
+
             # Check if opacity hotkeys are enabled
             hotkeys_enabled = self._settings_manager.get('hotkeys.opacity_enabled', True)
             if not hotkeys_enabled:
                 self._logger.debug("Opacity hotkeys are disabled, not registering hotkeys")
                 return
-            
-            self._logger.debug(f"Registering global hotkeys for opacity adjustment: decrease='{self._decrease_key}', increase='{self._increase_key}'")
-            
-            # Validate hotkey values before registration
+
+            self._logger.debug(
+                f"Registering hotkeys for opacity adjustment via HotkeyManager: decrease='{self._decrease_key}', increase='{self._increase_key}'"
+            )
+
+            # Validate tokens
             if not self._decrease_key or not isinstance(self._decrease_key, str):
                 self._logger.warning("Invalid decrease hotkey value, skipping registration")
                 return
             if not self._increase_key or not isinstance(self._increase_key, str):
                 self._logger.warning("Invalid increase hotkey value, skipping registration")
                 return
-            
-            # Register hotkey press events
-            if self._decrease_key:
-                self._decrease_press_handler = keyboard.on_press_key(self._decrease_key, self._on_decrease_key_press, suppress=True)
-            if self._increase_key:
-                self._increase_press_handler = keyboard.on_press_key(self._increase_key, self._on_increase_key_press, suppress=True)
-            
-            # Register hotkey release events
-            if self._decrease_key:
-                self._decrease_release_handler = keyboard.on_release_key(self._decrease_key, self._on_decrease_key_release, suppress=True)
-            if self._increase_key:
-                self._increase_release_handler = keyboard.on_release_key(self._increase_key, self._on_increase_key_release, suppress=True)
-            
-            self._logger.debug("Registered global hotkeys for opacity adjustment using keyboard module")
-            
+
+            hm = HotkeyManager()
+            # Keyboard-backend safe single-key registrations with suppression
+            hm.register_hotkey(
+                self._hk_id_decrease,
+                self._hk_on_decrease_press,
+                sequence=self._decrease_key,
+                suppress=True,
+                global_hotkey=False,
+                on_release=self._hk_on_decrease_release,
+            )
+            hm.register_hotkey(
+                self._hk_id_increase,
+                self._hk_on_increase_press,
+                sequence=self._increase_key,
+                suppress=True,
+                global_hotkey=False,
+                on_release=self._hk_on_increase_release,
+            )
+
+            self._logger.debug("Registered opacity hotkeys via HotkeyManager")
+
         except Exception as e:
             self._logger.error(f"Failed to register opacity hotkeys: {e}", exc_info=True)
     
-    def _on_decrease_key_press(self, event) -> None:
-        """Handle decrease opacity key press event."""
-        # Only start the timer if this is the first press event (not a repeat)
-        if not self._decrease_key_pressed and not event.is_keypad:
+    def _hk_on_decrease_press(self) -> None:
+        """HotkeyManager press callback for decrease key."""
+        if not self._decrease_key_pressed:
             self._logger.debug("Decrease opacity key pressed")
             self._decrease_key_pressed = True
-            # Suppress the key event to prevent it from affecting other applications
-            event.suppress = True
-            # Dispatch to UI thread
             ThreadManager.run_on_ui_thread(self._start_decrease_opacity)
         
-    def _on_increase_key_press(self, event) -> None:
-        """Handle increase opacity key press event."""
-        # Only start the timer if this is the first press event (not a repeat)
-        if not self._increase_key_pressed and not event.is_keypad:
+    def _hk_on_increase_press(self) -> None:
+        """HotkeyManager press callback for increase key."""
+        if not self._increase_key_pressed:
             self._logger.debug("Increase opacity key pressed")
             self._increase_key_pressed = True
-            # Suppress the key event to prevent it from affecting other applications
-            event.suppress = True
-            # Dispatch to UI thread
             ThreadManager.run_on_ui_thread(self._start_increase_opacity)
             
-    def _on_decrease_key_release(self, event) -> None:
-        """Handle decrease opacity key release event."""
+    def _hk_on_decrease_release(self) -> None:
+        """HotkeyManager release callback for decrease key."""
         if self._decrease_key_pressed:
             self._logger.debug("Decrease opacity key released")
             self._decrease_key_pressed = False
-            # Dispatch to UI thread
             ThreadManager.run_on_ui_thread(self._stop_decrease_opacity)
         
-    def _on_increase_key_release(self, event) -> None:
-        """Handle increase opacity key release event."""
+    def _hk_on_increase_release(self) -> None:
+        """HotkeyManager release callback for increase key."""
         if self._increase_key_pressed:
             self._logger.debug("Increase opacity key released")
             self._increase_key_pressed = False
-            # Dispatch to UI thread
             ThreadManager.run_on_ui_thread(self._stop_increase_opacity)
             
     def _start_decrease_opacity(self) -> None:
         """Start decreasing opacity via self-rescheduling tick."""
         self._logger.debug("_start_decrease_opacity called")
+        # Reset tick index for consistent 1-1-1-2 cadence
+        self._dec_tick_index = 0
+        # If already at lower bound, stop immediately
+        try:
+            if self.get_opacity() <= 10:
+                self._decrease_key_pressed = False
+                return
+        except Exception:
+            pass
         # Kick off the periodic tick if newly pressed
         if self._decrease_key_pressed:
             ThreadManager.single_shot(self.ADJUSTMENT_INTERVAL, self._decrease_tick)
@@ -169,12 +206,34 @@ class OpacityManager(QObject):
         if not self._decrease_key_pressed:
             return
         self._decrease_opacity()
+        # Stop at lower bound without looping
+        try:
+            if self.get_opacity() <= 10:
+                self._decrease_key_pressed = False
+                self._logger.debug("[OPACITY] Hit lower bound 10%; stopping decrease ticks")
+                # Persist final value once when reaching bound
+                try:
+                    self._settings_manager.save()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         if self._decrease_key_pressed:
             ThreadManager.single_shot(self.ADJUSTMENT_INTERVAL, self._decrease_tick)
             
     def _start_increase_opacity(self) -> None:
         """Start increasing opacity via self-rescheduling tick."""
         self._logger.debug("_start_increase_opacity called")
+        # Reset tick index for consistent 1-1-1-2 cadence
+        self._inc_tick_index = 0
+        # If already at upper bound, stop immediately
+        try:
+            if self.get_opacity() >= 100:
+                self._increase_key_pressed = False
+                return
+        except Exception:
+            pass
         if self._increase_key_pressed:
             ThreadManager.single_shot(self.ADJUSTMENT_INTERVAL, self._increase_tick)
             
@@ -183,33 +242,58 @@ class OpacityManager(QObject):
         if not self._increase_key_pressed:
             return
         self._increase_opacity()
+        # Stop at upper bound without looping
+        try:
+            if self.get_opacity() >= 100:
+                self._increase_key_pressed = False
+                self._logger.debug("[OPACITY] Hit upper bound 100%; stopping increase ticks")
+                # Persist final value once when reaching bound
+                try:
+                    self._settings_manager.save()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         if self._increase_key_pressed:
             ThreadManager.single_shot(self.ADJUSTMENT_INTERVAL, self._increase_tick)
             
     def _stop_decrease_opacity(self) -> None:
         """Stop decreasing opacity."""
-        # Simply stop rescheduling by relying on key flag
-        pass
+        # Persist the final opacity once on key release
+        try:
+            self._settings_manager.save()
+        except Exception:
+            pass
         
     # Internal timer stop methods removed (QTimer eliminated)
         
     def _stop_increase_opacity(self) -> None:
         """Stop increasing opacity."""
-        # Simply stop rescheduling by relying on key flag
-        pass
+        # Persist the final opacity once on key release
+        try:
+            self._settings_manager.save()
+        except Exception:
+            pass
         
     # Internal timer stop methods removed (QTimer eliminated)
     
     def _increase_opacity(self) -> None:
         """Increase the opacity by a small amount for smooth adjustment."""
         current_opacity = self._settings_manager.get("appearance.opacity", 100)
-        new_opacity = min(100, current_opacity + self.ADJUSTMENT_AMOUNT)
+        # 1-1-1-2 cadence -> average +25% speed over base step=1
+        step = 2 if (self._inc_tick_index % 4 == 3) else 1
+        self._inc_tick_index += 1
+        new_opacity = min(100, current_opacity + step)
         self.set_opacity(new_opacity)
         
     def _decrease_opacity(self) -> None:
         """Decrease the opacity by a small amount for smooth adjustment."""
         current_opacity = self._settings_manager.get("appearance.opacity", 100)
-        new_opacity = max(0, current_opacity - self.ADJUSTMENT_AMOUNT)
+        # 1-1-1-2 cadence -> average +25% speed over base step=1
+        step = 2 if (self._dec_tick_index % 4 == 3) else 1
+        self._dec_tick_index += 1
+        new_opacity = max(10, current_opacity - step)
         self.set_opacity(new_opacity)
     
     def increase_opacity(self, amount: int = 5) -> None:
@@ -221,19 +305,23 @@ class OpacityManager(QObject):
     def decrease_opacity(self, amount: int = 1) -> None:
         """Decrease the opacity by the specified amount."""
         current_opacity = self._settings_manager.get("appearance.opacity", 100)
-        new_opacity = max(0, current_opacity - amount)
+        new_opacity = max(10, current_opacity - amount)
         self.set_opacity(new_opacity)
     
     def set_opacity(self, percent: int) -> None:
-        """Set the opacity to the given percentage (0-100)."""
-        percent = max(0, min(100, percent))
+        """Set the opacity to the given percentage (10-100)."""
+        percent = max(10, min(100, percent))
         # Read current to avoid redundant updates/logging
         current = self._settings_manager.get("appearance.opacity", 100)
         if current == percent:
             # No change; avoid emitting signals or logging to reduce noise
             return
         # Save and emit only when changed
-        self._settings_manager.set("appearance.opacity", percent)
+        # Do NOT save immediately on each tick; batch-save on key release or bounds
+        self._settings_manager.set("appearance.opacity", percent, save_immediately=False)
+        # Log at bounds for validation
+        if percent in (10, 100):
+            self._logger.debug(f"[OPACITY] set -> {percent}%")
         self.opacityChanged.emit(percent)
     
     def get_opacity(self) -> int:
@@ -241,84 +329,57 @@ class OpacityManager(QObject):
         return self._settings_manager.get("appearance.opacity", 100)
 
     def _unregister_hotkeys(self) -> None:
+        """Unregister opacity hotkeys via HotkeyManager."""
         try:
-            if self._decrease_press_handler:
-                try:
-                    keyboard.unregister_hotkey(self._decrease_press_handler)
-                except KeyError:
-                    pass  # Already unregistered
-                except Exception as e:
-                    self._logger.error(f"Failed to unregister decrease_press_handler: {e}", exc_info=True)
-                else:
-                    self._decrease_press_handler = None
-            if self._increase_press_handler:
-                try:
-                    keyboard.unregister_hotkey(self._increase_press_handler)
-                except KeyError:
-                    pass
-                except Exception as e:
-                    self._logger.error(f"Failed to unregister increase_press_handler: {e}", exc_info=True)
-                else:
-                    self._increase_press_handler = None
-            if self._decrease_release_handler:
-                try:
-                    keyboard.unregister_hotkey(self._decrease_release_handler)
-                except KeyError:
-                    pass
-                except Exception as e:
-                    self._logger.error(f"Failed to unregister decrease_release_handler: {e}", exc_info=True)
-                else:
-                    self._decrease_release_handler = None
-            if self._increase_release_handler:
-                try:
-                    keyboard.unregister_hotkey(self._increase_release_handler)
-                except KeyError:
-                    pass
-                except Exception as e:
-                    self._logger.error(f"Failed to unregister increase_release_handler: {e}", exc_info=True)
-                else:
-                    self._increase_release_handler = None
-            self._logger.debug("Unregistered global hotkeys for opacity adjustment")
+            hm = HotkeyManager()
+            try:
+                hm.unregister_hotkey(self._hk_id_decrease)
+            except Exception:
+                pass
+            try:
+                hm.unregister_hotkey(self._hk_id_increase)
+            except Exception:
+                pass
+            self._logger.debug("Unregistered opacity hotkeys via HotkeyManager")
         except Exception as e:
             self._logger.error(f"Failed to unregister opacity hotkeys: {e}", exc_info=True)
     def _load_hotkey_settings(self) -> None:
+        """Load opacity hotkey settings without clobbering user choices.
+
+        Only set defaults when keys are missing/empty. Do not overwrite
+        user selections programmatically.
+        """
         try:
-            # Use only valid defaults
             valid_decrease = '-'
             valid_increase = '='
-            valid_quickswitch = '`'
-            # Load from settings or use valid defaults
-            self._decrease_key = self._settings_manager.get('hotkeys.opacity_decrease', valid_decrease)
-            self._increase_key = self._settings_manager.get('hotkeys.opacity_increase', valid_increase)
-            self._quickswitch_key = self._settings_manager.get('hotkeys.opacity_quickswitch', valid_quickswitch)
-            # Overwrite settings if missing or invalid
-            if not self._decrease_key or not isinstance(self._decrease_key, str) or self._decrease_key.lower() in ("", "ctrl+alt+down", "ctrl+shift+down"):
-                self._decrease_key = valid_decrease
-                self._settings_manager.set('hotkeys.opacity_decrease', valid_decrease)
-            if not self._increase_key or not isinstance(self._increase_key, str) or self._increase_key.lower() in ("", "ctrl+alt+up", "ctrl+shift+up"):
-                self._increase_key = valid_increase
-                self._settings_manager.set('hotkeys.opacity_increase', valid_increase)
-            if not self._quickswitch_key or not isinstance(self._quickswitch_key, str) or self._quickswitch_key.lower() in ("", ):
-                self._quickswitch_key = valid_quickswitch
-                self._settings_manager.set('hotkeys.opacity_quickswitch', valid_quickswitch)
-            self._logger.debug(f"Loaded hotkey settings: decrease='{self._decrease_key}', increase='{self._increase_key}', quickswitch='{self._quickswitch_key}'")
+
+            # Load from settings or default
+            dec = self._settings_manager.get('hotkeys.opacity_decrease', valid_decrease)
+            inc = self._settings_manager.get('hotkeys.opacity_increase', valid_increase)
+
+            # Backfill defaults if missing/empty
+            if not isinstance(dec, str) or not dec.strip():
+                dec = valid_decrease
+                try:
+                    self._settings_manager.set('hotkeys.opacity_decrease', valid_decrease)
+                except Exception:
+                    pass
+            if not isinstance(inc, str) or not inc.strip():
+                inc = valid_increase
+                try:
+                    self._settings_manager.set('hotkeys.opacity_increase', valid_increase)
+                except Exception:
+                    pass
+
+            self._decrease_key = dec
+            self._increase_key = inc
+            self._logger.debug(
+                f"Loaded opacity hotkeys: decrease='{self._decrease_key}', increase='{self._increase_key}'"
+            )
         except Exception as e:
-            self._logger.error(f"Failed to load hotkey settings: {e}", exc_info=True)
-            # Use valid defaults if loading fails
+            self._logger.error(f"Failed to load opacity hotkey settings: {e}", exc_info=True)
             self._decrease_key = '-'
             self._increase_key = '='
-            self._quickswitch_key = '`'
-            self._settings_manager.set('hotkeys.opacity_decrease', '-')
-            self._settings_manager.set('hotkeys.opacity_increase', '=')
-            self._settings_manager.set('hotkeys.opacity_quickswitch', '`')
-            self._logger.debug("Using valid default hotkey settings after error")
-        self._decrease_key = valid_decrease
-        self._increase_key = valid_increase
-        self._quickswitch_key = valid_quickswitch
-        self._settings_manager.set('hotkeys.opacity_decrease', valid_decrease)
-        self._settings_manager.set('hotkeys.opacity_increase', valid_increase)
-        self._settings_manager.set('hotkeys.opacity_quickswitch', valid_quickswitch)
-        self._logger.debug("Using valid default hotkey settings after error")
 
     def update_hotkeys(self) -> None:
         """Update hotkeys based on current settings."""
@@ -331,6 +392,26 @@ class OpacityManager(QObject):
             self._logger.debug("Hotkeys updated successfully")
         except Exception as e:
             self._logger.error(f"Failed to update hotkeys: {e}", exc_info=True)
+
+    def shutdown(self) -> None:
+        """Shutdown lifecycle: unregister hotkeys and best-effort resource cleanup."""
+        try:
+            self._decrease_key_pressed = False
+            self._increase_key_pressed = False
+        except Exception:
+            pass
+        try:
+            self._unregister_hotkeys()
+        except Exception:
+            pass
+        # Best-effort unregister from ResourceManager
+        try:
+            if getattr(self, "_resource_id", None) is not None:
+                rm = get_resource_manager()
+                rm.unregister(self._resource_id, force=True)
+                self._resource_id = None
+        except Exception:
+            pass
 
 # Convenience function to get the singleton instance
 def get_opacity_manager() -> OpacityManager:

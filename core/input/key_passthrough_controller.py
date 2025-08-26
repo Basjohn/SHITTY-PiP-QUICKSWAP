@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.logging import get_logger
 from core.settings.settings_manager import SettingsManager
-from core.threading.manager import ThreadManager
+from core.threading import ThreadManager
 from core.media import get_media_controller
 from utils.state.focus_state import get_focus_state
 from .keypassthrough_blocklist import get_blocklist
@@ -61,6 +61,8 @@ class KeyPassthroughController(QObject):
     - Rate limiting (min interval) using ThreadManager.single_shot.
     - Qt signals for state changes; EventSystem publishing for observability.
     - Media key routing to MediaController when enabled.
+    - Browser child hotkey path is ONLY used when media control is disabled; otherwise media
+      commands are routed via MediaController (no global media commands when no target).
 
     Public API:
     - set_target_hwnd(hwnd: Optional[int])
@@ -96,6 +98,15 @@ class KeyPassthroughController(QObject):
         self._verbose: bool = bool(self._settings.get("debug.keypassthrough_verbose", False))
         # Verbose logging specifically for volume hold timers
         self._vol_verbose: bool = bool(self._settings.get("debug.volume_hold_verbose", False))
+
+        # Block feedback throttling/deduping state
+        self._block_lock = threading.Lock()
+        self._last_block_reason: Optional[str] = None
+        self._last_block_flash_ms: float = 0.0
+        try:
+            self._block_flash_interval_ms: int = int(self._settings.get("ui.block_flash_min_interval_ms", 250))
+        except Exception:
+            self._block_flash_interval_ms = 250
 
         # Rate limiting
         self._min_interval_ms: int = 18  # ~55Hz cap
@@ -188,25 +199,36 @@ class KeyPassthroughController(QObject):
         except Exception:
             return False
         
-        # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down
-        if self._media_routing_enabled and vk_int in (_VK_UP, _VK_DOWN):
-            vk_int = _VK_VOLUME_UP if vk_int == _VK_UP else _VK_VOLUME_DOWN
-        
         # Route media keys to MediaController if enabled
         if self._media_routing_enabled and vk_int in _MEDIA_KEYS:
+            # Suppress global media keys while overlay is focused to avoid duplicates
+            try:
+                if get_focus_state().is_overlay_focused():
+                    return self._block("media-key-overlay-focused", extra={"vk": int(vk_int)})
+            except Exception:
+                # Be conservative on failure and block to prevent duplicate handling
+                return self._block("media-key-focus-check-failed", extra={"vk": int(vk_int)})
             return self._route_media_key(vk_int)
 
-        # Route system volume keys (correct mapping) when focused and enabled
+        # Route system volume keys (hardware VKs) when enabled
+        # IMPORTANT: perform overlay-focus gating BEFORE mapping arrows to volume
+        if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN, _VK_VOLUME_MUTE):
+            # If overlay is focused, ignore hardware volume keys to avoid duplicate changes
+            try:
+                if get_focus_state().is_overlay_focused():
+                    return self._block("volume-key-overlay-focused", extra={"vk": int(vk_int)})
+            except Exception:
+                # Be conservative on failure and block to prevent duplicate handling
+                return self._block("volume-key-focus-check-failed", extra={"vk": int(vk_int)})
+        
+        # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down (local mapping)
+        if self._media_routing_enabled and vk_int in (_VK_UP, _VK_DOWN):
+            vk_int = _VK_VOLUME_UP if vk_int == _VK_UP else _VK_VOLUME_DOWN
+
+        # Route system volume keys (correct mapping) when enabled
         if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN, _VK_VOLUME_MUTE):
             try:
                 # Media Control path: do not depend on passthrough being enabled
-                # Only apply local media routing when overlay is focused
-                try:
-                    if not get_focus_state().is_overlay_focused():
-                        return self._block("volume-no-overlay-focus")
-                except Exception:
-                    # If focus state unavailable, fail closed (no handling)
-                    return self._block("volume-focus-check-failed")
                 media_controller = get_media_controller()
                 target_hwnd = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
                 if not target_hwnd:
@@ -250,7 +272,8 @@ class KeyPassthroughController(QObject):
                     "note": note
                 })
                 if success:
-                    self._logger.debug(f"Volume key routed: {note}: {msg}")
+                    if self._verbose:
+                        self._logger.debug(f"Volume key routed: {note}: {msg}")
                 else:
                     self._logger.warning(f"Volume key routing failed ({note}): {msg}")
                 return success
@@ -297,7 +320,8 @@ class KeyPassthroughController(QObject):
                     "note": "spacebar-local"
                 })
                 if success:
-                    self._logger.debug(f"Spacebar routed as play/pause: {msg}")
+                    if self._verbose:
+                        self._logger.debug(f"Spacebar routed as play/pause: {msg}")
                 else:
                     self._logger.warning(f"Spacebar routing failed: {msg}")
                 return success
@@ -347,7 +371,8 @@ class KeyPassthroughController(QObject):
                     "note": note
                 })
                 if success:
-                    self._logger.debug(f"Arrow key routed: {note}: {msg}")
+                    if self._verbose:
+                        self._logger.debug(f"Arrow key routed: {note}: {msg}")
                 else:
                     self._logger.warning(f"Arrow key routing failed ({note}): {msg}")
                 return success
@@ -371,6 +396,9 @@ class KeyPassthroughController(QObject):
         if not (hwnd and _is_window(hwnd)):
             if self._verbose:
                 self._logger.debug("No valid target hwnd; ignoring key")
+            # Distinguish between missing and invalid target for clearer telemetry
+            if hwnd:
+                return self._block("invalid-target", extra={"hwnd": int(hwnd)})
             return self._block("no-target-hwnd")
 
         # Blocklist pre-check: consult centralized loader before forwarding
@@ -421,18 +449,20 @@ class KeyPassthroughController(QObject):
         except Exception:
             return False
         
-        # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down
+        # If this is a hardware volume key and overlay is focused, ignore to avoid duplicate changes
+        if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN):
+            try:
+                if get_focus_state().is_overlay_focused():
+                    return self._block("volume-press-overlay-focused", extra={"vk": int(vk_int)})
+            except Exception:
+                return self._block("volume-press-focus-check-failed", extra={"vk": int(vk_int)})
+
+        # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down (local mapping)
         if self._media_routing_enabled and vk_int in (_VK_UP, _VK_DOWN):
             vk_int = _VK_VOLUME_UP if vk_int == _VK_UP else _VK_VOLUME_DOWN
         # Volume keys when media routing is enabled
         if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN):
-            # Gate by overlay focus and valid target hwnd
-            try:
-                if not get_focus_state().is_overlay_focused():
-                    return self._block("volume-press-no-overlay-focus")
-            except Exception:
-                return self._block("volume-press-focus-check-failed")
-
+            # Gate by valid target hwnd
             target_hwnd = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
             if not target_hwnd:
                 return self._block("volume-press-no-target")
@@ -596,20 +626,12 @@ class KeyPassthroughController(QObject):
                 # If scheduling fails, attempt one more immediate tick to avoid stall
                 self._volume_hold_tick(is_up, token)
 
-        # Validate environment: overlay focused, media routing enabled, valid target hwnd
+        # Validate environment: media routing enabled and valid target hwnd
         try:
             if not self._media_routing_enabled:
                 try:
                     if self._vol_verbose:
                         self._logger.debug("VOL_HOLD: tick gated (media routing disabled) — rescheduling")
-                except Exception:
-                    pass
-                _reschedule_if_active()
-                return
-            if not get_focus_state().is_overlay_focused():
-                try:
-                    if self._vol_verbose:
-                        self._logger.debug("VOL_HOLD: tick gated (overlay not focused) — rescheduling")
                 except Exception:
                     pass
                 _reschedule_if_active()
@@ -756,22 +778,38 @@ class KeyPassthroughController(QObject):
         except Exception:
             pass
 
-        # Attempt to trigger the focus indicator flash on the active overlay
+        # Optional debug log for blocked decisions
         try:
-            # Local import to avoid import-time cycles
-            from core.graphics.overlay_manager import OverlayManager
-            overlay = OverlayManager().get_active_overlay()
-            if overlay is not None:
-                host = getattr(overlay, "_host", None)
-                if host is not None and hasattr(host, "flash_focus_indicator"):
-                    try:
-                        ThreadManager.run_on_ui_thread(lambda: host.flash_focus_indicator(300))
-                    except Exception:
-                        # Last-resort direct call; host should be a QWidget-owned object
+            if self._verbose:
+                self._logger.debug(f"KEYPASS BLOCK: reason={reason} extra={extra if extra is not None else {}}")
+        except Exception:
+            pass
+
+        # Attempt to trigger the focus indicator flash on the active overlay, throttled/deduped
+        try:
+            now_ms = time.monotonic() * 1000.0
+            should_flash = False
+            with self._block_lock:
+                # Dedupe: if same reason within interval, suppress
+                if (now_ms - self._last_block_flash_ms) >= float(self._block_flash_interval_ms) or (self._last_block_reason != reason):
+                    self._last_block_flash_ms = now_ms
+                    self._last_block_reason = str(reason)
+                    should_flash = True
+            if should_flash:
+                # Local import to avoid import-time cycles
+                from core.graphics.overlay_manager import OverlayManager
+                overlay = OverlayManager().get_active_overlay()
+                if overlay is not None:
+                    host = getattr(overlay, "_host", None)
+                    if host is not None and hasattr(host, "flash_focus_indicator"):
                         try:
-                            host.flash_focus_indicator(300)
+                            ThreadManager.run_on_ui_thread(lambda: host.flash_focus_indicator(300))
                         except Exception:
-                            pass
+                            # Last-resort direct call; host should be a QWidget-owned object
+                            try:
+                                host.flash_focus_indicator(300)
+                            except Exception:
+                                pass
         except Exception:
             # Non-critical; ignore failures in UI feedback path
             pass
@@ -802,7 +840,13 @@ class KeyPassthroughController(QObject):
 
             # Validate window responsiveness before routing
             if not self._ensure_window_responsive(target_hwnd):
-                self._logger.debug(f"Target window {target_hwnd} unresponsive, using fallback passthrough")
+                if self._verbose:
+                    self._logger.debug(f"Target window {target_hwnd} unresponsive, using fallback passthrough")
+                # Emit explicit telemetry for unresponsive target without UI flash
+                try:
+                    self._publish("key.passthrough.blocked", {"reason": "unresponsive-target", "extra": {"hwnd": int(target_hwnd)}})
+                except Exception:
+                    pass
                 return self._fallback_passthrough_media_key(vk)
 
             # Map VK codes to MediaController actions (local-only)
@@ -824,10 +868,12 @@ class KeyPassthroughController(QObject):
             })
             
             if success:
-                self._logger.debug(f"Media key VK_{vk:02X} routed successfully: {msg}")
+                if self._verbose:
+                    self._logger.debug(f"Media key VK_{vk:02X} routed successfully: {msg}")
                 return True
             else:
-                self._logger.debug(f"Media key VK_{vk:02X} routing failed, trying passthrough: {msg}")
+                if self._verbose:
+                    self._logger.debug(f"Media key VK_{vk:02X} routing failed, trying passthrough: {msg}")
                 # Fallback to passthrough for apps like Firefox that handle media keys directly
                 return self._fallback_passthrough_media_key(vk)
                 
@@ -851,7 +897,8 @@ class KeyPassthroughController(QObject):
             
         handled = self._enqueue_passthrough(vk)
         if handled:
-            self._logger.debug(f"Media key VK_{vk:02X} fallback to passthrough")
+            if self._verbose:
+                self._logger.debug(f"Media key VK_{vk:02X} fallback to passthrough")
         return handled
 
     def _try_browser_child_hotkey(self, vk: int) -> bool:
@@ -947,12 +994,15 @@ class KeyPassthroughController(QObject):
             # Use a short timeout to avoid blocking
             success = safe_send_message(hwnd, wm_null, 0, 0, timeout_ms=100)
             if success:
-                self._logger.debug(f"Prepared window {hwnd} for media commands")
+                if self._verbose:
+                    self._logger.debug(f"Prepared window {hwnd} for media commands")
             else:
-                self._logger.debug(f"Window preparation failed for {hwnd} (non-critical)")
+                if self._verbose:
+                    self._logger.debug(f"Window preparation failed for {hwnd} (non-critical)")
         except Exception as e:
             # Non-critical failure - log at debug level
-            self._logger.debug(f"Window preparation error for {hwnd}: {e}")
+            if self._verbose:
+                self._logger.debug(f"Window preparation error for {hwnd}: {e}")
 
     def _ensure_window_responsive(self, hwnd: int) -> bool:
         """Check if window is responsive before sending media commands.
