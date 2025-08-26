@@ -67,5 +67,5 @@ bfv.exe
 BF2042.exe
 {"title_contains": "Battlefield"}
 # HoYoverse titles (exact exe may vary by install; use title fallback in addition to existing lines)
-{"title_contains": "Honkai: Star Rail"}
-{"title_contains": "Zenless Zone Zero"}
+{"title_exact": "Honkai: Star Rail"}
+{"title_exact": "ZenlessZoneZero"}

@@ -1,36 +1,37 @@
-<!DOCTYPE RCC>
-<RCC version="1.0">
-<qresource prefix="/">
-    <!-- Theme files -->
-    <file>themes/dark.qss</file>
-    <file>themes/light.qss</file>
-    <file>themes/combo_styles.qss</file>
-    
-    <!-- Icon files -->
-    <file>Resources/Blank.ico</file>
-    <file>Resources/ShittyPIP.ico</file>
-    
-    <!-- Badge files -->
-    <file>Resources/Badge0.png</file>
-    <file>Resources/Badge1.png</file>
-    <file>Resources/Badge2.png</file>
-    <file>Resources/Badge3.png</file>
-    <file>Resources/Badge4.png</file>
-    <file>Resources/Badge5.png</file>
-    <file>Resources/Badge6.png</file>
-    <file>Resources/Badge7.png</file>
-    <file>Resources/Badge8.png</file>
-    <file>Resources/Badge9.png</file>
-    <file>Resources/Badge10.png</file>
-    <file>Resources/Badge11.png</file>
-    <file>Resources/Badge12.png</file>
-    <file>Resources/Badge13.png</file>
-    <file>Resources/Badge14.png</file>
-    <file>Resources/Badge15.png</file>
-    <file>Resources/Badge16.png</file>
-    <file>Resources/Badge17.png</file>
-    <file>Resources/Badge18.png</file>
-    <file>Resources/Badge19.png</file>
-    <file>Resources/Badge20.png</file>
-</qresource>
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="Blank.ico">resources/Blank.ico</file>
+    <file alias="lock.png">resources/lock.png</file>
+    <file alias="lockred.png">resources/lockred.png</file>
+    <file alias="lockw.png">resources/lockw.png</file>
+    <file alias="ShittyPIP.ico">resources/ShittyPIP.ico</file>
+    <file alias="speculartopleft.png">resources/speculartopleft.png</file>
+  </qresource>
+  <qresource prefix="/badges">
+    <file alias="Badge0.png">resources/Badge0.png</file>
+    <file alias="Badge1.png">resources/Badge1.png</file>
+    <file alias="Badge10.png">resources/Badge10.png</file>
+    <file alias="Badge11.png">resources/Badge11.png</file>
+    <file alias="Badge12.png">resources/Badge12.png</file>
+    <file alias="Badge13.png">resources/Badge13.png</file>
+    <file alias="Badge14.png">resources/Badge14.png</file>
+    <file alias="Badge15.png">resources/Badge15.png</file>
+    <file alias="Badge16.png">resources/Badge16.png</file>
+    <file alias="Badge17.png">resources/Badge17.png</file>
+    <file alias="Badge18.png">resources/Badge18.png</file>
+    <file alias="Badge19.png">resources/Badge19.png</file>
+    <file alias="Badge2.png">resources/Badge2.png</file>
+    <file alias="Badge20.png">resources/Badge20.png</file>
+    <file alias="Badge3.png">resources/Badge3.png</file>
+    <file alias="Badge4.png">resources/Badge4.png</file>
+    <file alias="Badge5.png">resources/Badge5.png</file>
+    <file alias="Badge6.png">resources/Badge6.png</file>
+    <file alias="Badge7.png">resources/Badge7.png</file>
+    <file alias="Badge8.png">resources/Badge8.png</file>
+    <file alias="Badge9.png">resources/Badge9.png</file>
+  </qresource>
+  <qresource prefix="/themes">
+    <file alias="dark.qss">themes/dark.qss</file>
+    <file alias="light.qss">themes/light.qss</file>
+  </qresource>
 </RCC>
