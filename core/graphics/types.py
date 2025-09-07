@@ -46,10 +46,8 @@ class OverlayConfig:
     vsync: bool = True
     fps_limit: int = 60
     
-    # Window style
-    frameless: bool = True
+    # Behavior settings
     always_on_top: bool = True
-    click_through: bool = False
     
     # Custom properties
     properties: Dict[str, Any] = field(default_factory=dict)

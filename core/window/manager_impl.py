@@ -6,7 +6,6 @@ that handles window creation, management, and layout.
 """
 from __future__ import annotations
 
-import threading
 from typing import Any, Dict, Optional, TypeVar, Union
 import uuid
 
@@ -42,7 +41,7 @@ class WindowManagerImpl(QObject):
         super().__init__(parent)
         self._logger = get_logger(__name__)
         self._windows: Dict[str, WindowInfo] = {}
-        self._lock = threading.RLock()
+        # Lock-free: All mutations dispatched to UI thread via ThreadManager
         self._initialized = False
         
         # Initialize after the event loop starts
@@ -50,19 +49,19 @@ class WindowManagerImpl(QObject):
     
     def _initialize(self) -> None:
         """Initialize the window manager after the event loop starts."""
-        with self._lock:
-            if self._initialized:
-                return
-                
-            self._logger.info("Initializing window manager...")
+        # Lock-free: UI thread only access
+        if self._initialized:
+            return
             
-            # Install event filter to track window events
-            app = QApplication.instance()
-            if app:
-                app.installEventFilter(self)
-            
-            self._initialized = True
-            self._logger.info("Window manager initialized")
+        self._logger.info("Initializing window manager...")
+        
+        # Install event filter to track window events
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+        
+        self._initialized = True
+        self._logger.info("Window manager initialized")
     
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         """Handle application events."""
@@ -115,10 +114,10 @@ class WindowManagerImpl(QObject):
         # Generate window ID if not provided
         window_id = kwargs.get('window_id', f"window_{uuid.uuid4().hex[:8]}")
         
-        with self._lock:
-            if window_id in self._windows:
-                self._logger.warning(f"Window with ID {window_id} already exists")
-                return ""
+        # Lock-free: UI thread only access
+        if window_id in self._windows:
+            self._logger.warning(f"Window with ID {window_id} already exists")
+            return ""
             
             # Create the window
             parent = kwargs.get('parent')
@@ -162,10 +161,10 @@ class WindowManagerImpl(QObject):
     
     def _on_window_destroyed(self, window_id: str) -> None:
         """Handle window destruction."""
-        with self._lock:
-            if window_id in self._windows:
-                del self._windows[window_id]
-                self.window_closed.emit(window_id)
+        # Lock-free: UI thread only access
+        if window_id in self._windows:
+            del self._windows[window_id]
+            self.window_closed.emit(window_id)
     
     def close_window(self, window_id: str) -> bool:
         """Close the specified window.
@@ -176,10 +175,10 @@ class WindowManagerImpl(QObject):
         Returns:
             bool: True if window was found and closed, False otherwise
         """
-        with self._lock:
-            if window_id not in self._windows:
-                self._logger.warning("Window %s not found", window_id)
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            self._logger.warning("Window %s not found", window_id)
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -196,15 +195,15 @@ class WindowManagerImpl(QObject):
         Returns:
             Optional[QWidget]: The window widget if found, None otherwise
         """
-        with self._lock:
-            if window_id in self._windows:
-                return self._windows[window_id].window
-            return None
+        # Lock-free: UI thread only access
+        if window_id in self._windows:
+            return self._windows[window_id].window
+        return None
     
     def get_window_info(self, window_id: str) -> Optional[WindowInfo]:
         """Get window information by ID."""
-        with self._lock:
-            return self._windows.get(window_id)
+        # Lock-free: UI thread only access
+        return self._windows.get(window_id)
     
     def show_window(self, window_id: str) -> bool:
         """Show the specified window.
@@ -215,9 +214,9 @@ class WindowManagerImpl(QObject):
         Returns:
             bool: True if window was shown, False otherwise
         """
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -232,9 +231,9 @@ class WindowManagerImpl(QObject):
     
     def hide_window(self, window_id: str) -> bool:
         """Hide the specified window."""
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -250,9 +249,9 @@ class WindowManagerImpl(QObject):
     
     def minimize_window(self, window_id: str) -> bool:
         """Minimize the specified window."""
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -263,9 +262,9 @@ class WindowManagerImpl(QObject):
     
     def maximize_window(self, window_id: str) -> bool:
         """Maximize the specified window."""
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -276,9 +275,9 @@ class WindowManagerImpl(QObject):
     
     def restore_window(self, window_id: str) -> bool:
         """Restore the specified window to normal state."""
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -289,9 +288,9 @@ class WindowManagerImpl(QObject):
     
     def set_fullscreen(self, window_id: str, fullscreen: bool = True) -> bool:
         """Set fullscreen state for the specified window."""
-        with self._lock:
-            if window_id not in self._windows:
-                return False
+        # Lock-free: UI thread only access
+        if window_id not in self._windows:
+            return False
             
             window_info = self._windows[window_id]
             if window_info.window:
@@ -305,10 +304,10 @@ class WindowManagerImpl(QObject):
     
     def cleanup(self) -> None:
         """Clean up resources."""
-        with self._lock:
-            # Close all windows
-            for window_id in list(self._windows.keys()):
-                self.close_window(window_id)
+        # Lock-free: UI thread only access
+        # Close all windows
+        for window_id in list(self._windows.keys()):
+            self.close_window(window_id)
             
             # Remove event filter
             app = QApplication.instance()

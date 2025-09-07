@@ -41,6 +41,10 @@ class IntegratedDWMOverlay(OverlayBase):
         """Get the backend type of this overlay."""
         from ...backend_manager import BackendType
         return BackendType.DWM
+    
+    def get_source_hwnd(self) -> Optional[int]:
+        """Get the current source window handle."""
+        return self._source_hwnd
 
     def __init__(self, config: OverlayConfig):
         super().__init__(config)
@@ -339,10 +343,13 @@ class IntegratedDWMOverlay(OverlayBase):
                     src_h = max(0, client_rect.bottom - client_rect.top)
                     if src_w > 0 and src_h > 0:
                         aspect = src_w / src_h
-                        # Sanity thresholds to avoid tiny/invalid client areas
-                        too_small = src_w < 64 or src_h < 64 or (src_w * src_h) < 5000
-                        out_of_bounds = aspect < 0.2 or aspect > 5.0
-                        if not too_small and not out_of_bounds:
+                        # More restrictive thresholds - many apps have problematic client rects
+                        too_small = src_w < 200 or src_h < 150 or (src_w * src_h) < 30000
+                        out_of_bounds = aspect < 0.5 or aspect > 3.0  # Tighter bounds
+                        # Additional check for suspiciously thin windows (like minimized or collapsed)
+                        suspicious_dimensions = src_h < 100 or src_w < 300
+                        
+                        if not too_small and not out_of_bounds and not suspicious_dimensions:
                             self._source_aspect = aspect
                             self._logger.debug(
                                 f"Cached source aspect ratio from client area: {self._source_aspect:.3f} ({src_w}x{src_h})"
@@ -350,7 +357,7 @@ class IntegratedDWMOverlay(OverlayBase):
                             return
                         else:
                             self._logger.debug(
-                                f"Client rect suspicious ({src_w}x{src_h}, ar={aspect:.3f}); falling back to window rect"
+                                f"Client rect suspicious ({src_w}x{src_h}, ar={aspect:.3f}); falling back to window rect (too_small={too_small}, out_of_bounds={out_of_bounds}, suspicious_dims={suspicious_dimensions})"
                             )
             except Exception as e:
                 self._logger.debug(f"Failed to get client rect, falling back to window rect: {e}")
@@ -1056,6 +1063,9 @@ class IntegratedDWMOverlay(OverlayBase):
             success = self._swap_source_hwnd(target_hwnd, record_mru=record_mru)
             if not success:
                 self._logger.error(f"Failed to swap to hwnd {target_hwnd}")
+            else:
+                # Notify overlay manager of window change for auto-switch tracking
+                self._notify_window_change(target_hwnd)
         except Exception as e:
             self._logger.error(f"Window swap handler failed: {e}", exc_info=True)
             self._swap_in_flight = False
@@ -1230,6 +1240,21 @@ class IntegratedDWMOverlay(OverlayBase):
             
         except Exception as e:
             self._logger.error(f"Position reset failed: {e}")
+
+    def _notify_window_change(self, new_hwnd: int) -> None:
+        """Notify overlay manager of window change for auto-switch tracking."""
+        try:
+            # Get overlay ID from config if available
+            overlay_id = getattr(self._config, 'id', None)
+            if overlay_id:
+                # Get overlay manager and update window registration
+                from core.graphics import get_overlay_manager
+                overlay_manager = get_overlay_manager()
+                if overlay_manager:
+                    overlay_manager._register_overlay_window(overlay_id, new_hwnd)
+                    self._logger.debug(f"Updated auto-switch tracking: overlay {overlay_id} -> window {new_hwnd}")
+        except Exception as e:
+            self._logger.debug(f"Failed to notify window change: {e}")
 
     def _handle_quit_application(self) -> None:
         """Handle quit application request."""

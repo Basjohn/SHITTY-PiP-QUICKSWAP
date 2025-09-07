@@ -8,8 +8,7 @@ crash detection, and automatic app catalog updates.
 from __future__ import annotations
 
 import time
-import threading
-from typing import Optional, Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 from core.logging import get_logger
@@ -56,13 +55,16 @@ class MediaPlayerKeepAlive:
     """
     
     _instance: Optional["MediaPlayerKeepAlive"] = None
-    _lock = threading.Lock()
     
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+        # Lock-free: Singleton creation confined to UI thread via ThreadManager
+        if cls._instance is None:
+            from core.threading import ThreadManager
+            def create_instance():
+                if cls._instance is None:
+                    cls._instance = super(MediaPlayerKeepAlive, cls).__new__(cls)
+                    cls._instance._initialized = False
+            ThreadManager().run_on_ui_thread(create_instance)
         return cls._instance
     
     def __init__(self) -> None:

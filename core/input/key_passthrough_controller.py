@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import time
 from typing import Optional
 
@@ -74,13 +73,12 @@ class KeyPassthroughController(QObject):
     target_changed = Signal(int)
 
     _instance: Optional["KeyPassthroughController"] = None
-    _lock = threading.Lock()
 
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+        # Lock-free: Singleton creation confined to UI thread via ThreadManager
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
     def __init__(self) -> None:
@@ -99,8 +97,7 @@ class KeyPassthroughController(QObject):
         # Verbose logging specifically for volume hold timers
         self._vol_verbose: bool = bool(self._settings.get("debug.volume_hold_verbose", False))
 
-        # Block feedback throttling/deduping state
-        self._block_lock = threading.Lock()
+        # Lock-free: Block feedback state confined to UI thread
         self._last_block_reason: Optional[str] = None
         self._last_block_flash_ms: float = 0.0
         try:
@@ -119,10 +116,9 @@ class KeyPassthroughController(QObject):
         self._vol_suppress_ms: int = 35
         self._last_vol_up_ts: float = 0.0
         self._last_vol_down_ts: float = 0.0
-        self._rate_lock = threading.Lock()
+        # Lock-free: Rate limiting state confined to UI thread
 
-        # Volume hold (press-and-hold) state
-        self._hold_lock = threading.RLock()
+        # Lock-free: Volume hold state confined to UI thread
         self._hold_active_up: bool = False
         self._hold_active_down: bool = False
         self._hold_token_up: int = 0
@@ -179,12 +175,47 @@ class KeyPassthroughController(QObject):
                 ThreadManager.run_on_ui_thread(lambda: self._emit_target_changed(new_hwnd))
             except Exception:
                 self._emit_target_changed(new_hwnd)
+            # Always publish target changes for media control functionality
             self._publish("key.passthrough.target", {"hwnd": int(new_hwnd) if new_hwnd else 0})
             self._logger.debug(f"Target hwnd set to {new_hwnd}")
             
             # Prepare window for media commands if media routing is enabled
             if new_hwnd and self._media_routing_enabled:
                 self._prepare_window_for_media(new_hwnd)
+
+    def handle_volume_key_release(self, vk: int) -> bool:
+        """Handle volume key release to stop continuous adjustment.
+        
+        Args:
+            vk: Virtual key code
+            
+        Returns:
+            True if handled successfully
+        """
+        if not self._enabled or not self._media_routing_enabled:
+            return False
+            
+        vk_int = int(vk)
+        
+        # Only handle volume keys
+        if vk_int not in (_VK_VOLUME_UP, _VK_VOLUME_DOWN, _VK_UP, _VK_DOWN):
+            return False
+            
+        # Map arrow keys to volume keys when media control is enabled
+        if vk_int in (_VK_UP, _VK_DOWN):
+            vk_int = _VK_VOLUME_UP if vk_int == _VK_UP else _VK_VOLUME_DOWN
+            
+        if vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN):
+            try:
+                media_controller = get_media_controller()
+                target_hwnd = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
+                if target_hwnd:
+                    media_controller.handle_volume_key_release(int(target_hwnd))
+                    return True
+            except Exception as e:
+                self._logger.debug(f"Failed to handle volume key release: {e}")
+                
+        return False
 
     def passthrough_key(self, vk: int) -> bool:
         """Request forwarding of a virtual-key to the target window.
@@ -244,10 +275,10 @@ class KeyPassthroughController(QObject):
                 # Tiny suppression window for rapid holds on Volume Up/Down
                 if vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN):
                     now_ms = time.monotonic() * 1000.0
-                    with self._rate_lock:
-                        if vk_int == _VK_VOLUME_UP:
-                            if now_ms - self._last_vol_up_ts < float(self._vol_suppress_ms):
-                                return True
+                    # Lock-free: UI thread only access
+                    if vk_int == _VK_VOLUME_UP:
+                        if now_ms - self._last_vol_up_ts < float(self._vol_suppress_ms):
+                            return True
                             self._last_vol_up_ts = now_ms
                         else:  # _VK_VOLUME_DOWN
                             if now_ms - self._last_vol_down_ts < float(self._vol_suppress_ms):
@@ -255,11 +286,17 @@ class KeyPassthroughController(QObject):
                             self._last_vol_down_ts = now_ms
 
                 if vk_int == _VK_VOLUME_UP:
-                    success, msg = media_controller.volume_up_for_hwnd(int(target_hwnd))
-                    note = "volume-up-local"
+                    # Use new continuous volume adjustment for key hold support
+                    direction = 'up'
+                    success = media_controller.handle_volume_key_press(int(target_hwnd), direction)
+                    msg = f"Volume {direction} with continuous adjustment"
+                    note = "volume-up-continuous"
                 elif vk_int == _VK_VOLUME_DOWN:
-                    success, msg = media_controller.volume_down_for_hwnd(int(target_hwnd))
-                    note = "volume-down-local"
+                    # Use new continuous volume adjustment for key hold support
+                    direction = 'down'
+                    success = media_controller.handle_volume_key_press(int(target_hwnd), direction)
+                    msg = f"Volume {direction} with continuous adjustment"
+                    note = "volume-down-continuous"
                 else:  # _VK_VOLUME_MUTE
                     # Map to APPCOMMAND mute through send_media_command path
                     success, msg = media_controller._send_command_for_hwnd(int(target_hwnd), media_controller.APPCOMMAND_VOLUME_MUTE)
@@ -499,47 +536,47 @@ class KeyPassthroughController(QObject):
 
     # Volume hold helpers -------------------------------------------------
     def _start_volume_hold(self, is_up: bool) -> None:
-        with self._hold_lock:
-            # Ensure mutual exclusivity: cancel opposite direction if active
-            if is_up and self._hold_active_down:
-                self._hold_active_down = False
-                self._hold_token_down += 1  # invalidate any pending DOWN ticks
-                try:
-                    if self._vol_verbose:
-                        self._logger.debug("VOL_HOLD: cancelling opposite (down) before starting up")
-                except Exception:
-                    pass
-            elif (not is_up) and self._hold_active_up:
-                self._hold_active_up = False
-                self._hold_token_up += 1  # invalidate any pending UP ticks
-                try:
-                    if self._vol_verbose:
-                        self._logger.debug("VOL_HOLD: cancelling opposite (up) before starting down")
-                except Exception:
-                    pass
+        # Lock-free: UI thread only access
+        # Ensure mutual exclusivity: cancel opposite direction if active
+        if is_up and self._hold_active_down:
+            self._hold_active_down = False
+            self._hold_token_down += 1  # invalidate any pending DOWN ticks
+            try:
+                if self._vol_verbose:
+                    self._logger.debug("VOL_HOLD: cancelling opposite (down) before starting up")
+            except Exception:
+                pass
+        elif (not is_up) and self._hold_active_up:
+            self._hold_active_up = False
+            self._hold_token_up += 1  # invalidate any pending UP ticks
+            try:
+                if self._vol_verbose:
+                    self._logger.debug("VOL_HOLD: cancelling opposite (up) before starting down")
+            except Exception:
+                pass
 
-            if is_up:
-                if self._hold_active_up:
-                    try:
-                        if self._vol_verbose:
-                            self._logger.debug("VOL_HOLD: start ignored (already active up)")
-                    except Exception:
-                        pass
-                    return
-                self._hold_active_up = True
-                self._hold_token_up += 1
-                tok = int(self._hold_token_up)
-            else:
-                if self._hold_active_down:
-                    try:
-                        if self._vol_verbose:
-                            self._logger.debug("VOL_HOLD: start ignored (already active down)")
-                    except Exception:
-                        pass
-                    return
-                self._hold_active_down = True
-                self._hold_token_down += 1
-                tok = int(self._hold_token_down)
+        if is_up:
+            if self._hold_active_up:
+                try:
+                    if self._vol_verbose:
+                        self._logger.debug("VOL_HOLD: start ignored (already active up)")
+                except Exception:
+                    pass
+                return
+            self._hold_active_up = True
+            self._hold_token_up += 1
+            tok = int(self._hold_token_up)
+        else:
+            if self._hold_active_down:
+                try:
+                    if self._vol_verbose:
+                        self._logger.debug("VOL_HOLD: start ignored (already active down)")
+                except Exception:
+                    pass
+                return
+            self._hold_active_down = True
+            self._hold_token_down += 1
+            tok = int(self._hold_token_down)
         # Schedule first repeat after initial delay
         delay = max(0, int(self._hold_initial_delay_ms))
         try:
@@ -555,27 +592,30 @@ class KeyPassthroughController(QObject):
             self._volume_hold_tick(is_up, tok)
 
     def _stop_volume_hold(self, is_up: bool) -> None:
-        with self._hold_lock:
-            if is_up:
-                self._hold_active_up = False
-                self._hold_token_up += 1  # invalidate pending ticks
-            else:
-                self._hold_active_down = False
-                self._hold_token_down += 1
+        # Lock-free: UI thread only access
+        if is_up:
+            self._hold_active_up = False
+            self._hold_token_up += 1  # invalidate pending ticks
+        else:
+            self._hold_active_down = False
+            self._hold_token_down += 1
         try:
+            # Always publish volume hold stop events for media control functionality
             self._publish("key.passthrough.volume.hold_stop", {"direction": "up" if is_up else "down"})
-            if self._vol_verbose:
-                self._logger.debug(f"VOL_HOLD: stop direction={'up' if is_up else 'down'}")
         except Exception:
             pass
 
     def _volume_hold_tick(self, is_up: bool, token: int) -> None:
         # Validate still active and token matches
-        with self._hold_lock:
-            active = self._hold_active_up if is_up else self._hold_active_down
-            cur_tok = self._hold_token_up if is_up else self._hold_token_down
-        # Diagnostic snapshot of gating state for this tick
-        try:
+        # Lock-free: UI thread only access
+        active = self._hold_active_up if is_up else self._hold_active_down
+        cur_tok = self._hold_token_up if is_up else self._hold_token_down
+        
+        if not active or token != cur_tok:
+            return
+
+        # Optimized: Skip diagnostic logging unless verbose mode is enabled
+        if self._vol_verbose:
             try:
                 overlay_focused = get_focus_state().is_overlay_focused()
             except Exception:
@@ -584,43 +624,25 @@ class KeyPassthroughController(QObject):
                 tgt = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
             except Exception:
                 tgt = None
-            if self._vol_verbose:
-                self._logger.debug(
-                    f"VOL_HOLD: tick snapshot is_up={is_up} token={token} cur_tok={cur_tok} active={active} "
-                    f"media_enabled={self._media_routing_enabled} overlay_focused={overlay_focused} "
-                    f"target_valid={bool(tgt)} target_hwnd={int(tgt) if tgt else 0}"
-                )
-        except Exception:
-            pass
-        if not active or token != cur_tok:
-            try:
-                if self._vol_verbose:
-                    self._logger.debug(
-                        f"VOL_HOLD: tick ignored token_mismatch_or_inactive is_up={is_up} token={token} cur_tok={cur_tok} active={active}"
-                    )
-            except Exception:
-                pass
-            return
+            self._logger.debug(
+                f"VOL_HOLD: tick is_up={is_up} token={token} active={active} "
+                f"media_enabled={self._media_routing_enabled} overlay_focused={overlay_focused} "
+                f"target_valid={bool(tgt)} target_hwnd={int(tgt) if tgt else 0}"
+            )
 
         # Helper: reschedule next repeat if still active and token matches
         def _reschedule_if_active() -> None:
-            with self._hold_lock:
-                a2 = self._hold_active_up if is_up else self._hold_active_down
-                t2 = self._hold_token_up if is_up else self._hold_token_down
+            # Lock-free: UI thread only access
+            a2 = self._hold_active_up if is_up else self._hold_active_down
+            t2 = self._hold_token_up if is_up else self._hold_token_down
             if not a2 or token != t2:
-                try:
-                    if self._vol_verbose:
-                        self._logger.debug("VOL_HOLD: not rescheduling (inactive or token changed)")
-                except Exception:
-                    pass
+                if self._vol_verbose:
+                    self._logger.debug("VOL_HOLD: not rescheduling (inactive or token changed)")
                 return
             try:
                 interval = max(0, int(self._hold_interval_ms))
-                try:
-                    if self._vol_verbose:
-                        self._logger.debug(f"VOL_HOLD: reschedule token={token} interval={interval}ms")
-                except Exception:
-                    pass
+                if self._vol_verbose:
+                    self._logger.debug(f"VOL_HOLD: reschedule token={token} interval={interval}ms")
                 ThreadManager.single_shot(interval, lambda: self._volume_hold_tick(is_up, token))
             except Exception:
                 # If scheduling fails, attempt one more immediate tick to avoid stall
@@ -789,12 +811,12 @@ class KeyPassthroughController(QObject):
         try:
             now_ms = time.monotonic() * 1000.0
             should_flash = False
-            with self._block_lock:
-                # Dedupe: if same reason within interval, suppress
-                if (now_ms - self._last_block_flash_ms) >= float(self._block_flash_interval_ms) or (self._last_block_reason != reason):
-                    self._last_block_flash_ms = now_ms
-                    self._last_block_reason = str(reason)
-                    should_flash = True
+            # Lock-free: UI thread only access
+            # Dedupe: if same reason within interval, suppress
+            if (now_ms - self._last_block_flash_ms) >= float(self._block_flash_interval_ms) or (self._last_block_reason != reason):
+                self._last_block_flash_ms = now_ms
+                self._last_block_reason = str(reason)
+                should_flash = True
             if should_flash:
                 # Local import to avoid import-time cycles
                 from core.graphics.overlay_manager import OverlayManager

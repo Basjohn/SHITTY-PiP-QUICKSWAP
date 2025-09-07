@@ -162,6 +162,12 @@ class AutoswitchController(QObject):
             self._logger.error(f"Failed to arm suppression: {e}")
 
     def _get_active_overlay(self):
+        """
+        Get the currently active overlay from the OverlayManager.
+        
+        Returns:
+            Optional[Overlay]: The active overlay instance, or None if no overlay is active.
+        """
         try:
             active_id = getattr(self._overlay_manager, "_active_overlay_id", None)
             if not active_id:

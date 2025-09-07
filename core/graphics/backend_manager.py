@@ -57,6 +57,23 @@ class BackendManager:
             backend_type: BackendInfo(backend_type, supported=False, reason="Not checked yet")
             for backend_type in BackendType
         }
+        
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            from utils.resource_manager import get_resource_manager, ResourceType
+            self._resource_manager = get_resource_manager()
+            self._resource_id = self._resource_manager.register(
+                self,
+                ResourceType.CUSTOM,
+                "BackendManager singleton",
+                cleanup_handler=lambda obj: obj._cleanup()
+            )
+            logger.debug("Registered BackendManager with ResourceManager")
+        except Exception as e:
+            logger.warning(f"Failed to register with ResourceManager: {e}")
+            self._resource_manager = None
+            self._resource_id = None
+        
         self._detect_available_backends()
     
     def _detect_available_backends(self) -> None:
@@ -135,9 +152,12 @@ class BackendManager:
             )
         
         # Log backend availability
-        for backend_type, info in self._backends.items():
-            status = "available" if info.supported else f"unavailable: {info.reason}"
-            logger.debug("Backend %s is %s", backend_type.name, status)
+        available = [
+            backend_type 
+            for backend_type, info in self._backends.items() 
+            if info.supported
+        ]
+        logger.info(f"Backend manager initialized with {len(available)} available backends")
     
     def get_available_backends(self) -> List[BackendType]:
         """Get a list of available backends.
@@ -179,6 +199,10 @@ class BackendManager:
         Returns:
             The selected backend class, or None if no suitable backend is available
         """
+        # Handle None backend parameter (defensive fix for overlay recreation)
+        if preferred is None:
+            preferred = BackendType.AUTO
+            
         # If a specific backend is requested, try to use it
         if preferred != BackendType.AUTO:
             info = self._backends[preferred]
@@ -232,3 +256,24 @@ class BackendManager:
         except Exception as e:
             logger.exception("Error creating overlay: %s", str(e))
             return None
+    
+    def _cleanup(self) -> None:
+        """Cleanup method called by ResourceManager during shutdown."""
+        try:
+            # Clear backend registry
+            self._backends.clear()
+            logger.debug("BackendManager cleanup completed")
+        except Exception as e:
+            logger.debug(f"BackendManager cleanup failed: {e}")
+    
+    def shutdown(self) -> None:
+        """Explicit shutdown method for deterministic cleanup."""
+        self._cleanup()
+        # Unregister from ResourceManager if registered
+        if self._resource_manager and self._resource_id:
+            try:
+                self._resource_manager.unregister(self._resource_id)
+                self._resource_id = None
+            except Exception as e:
+                logger.debug(f"BackendManager ResourceManager unregistration failed: {e}")
+        logger.info("BackendManager shutdown complete")

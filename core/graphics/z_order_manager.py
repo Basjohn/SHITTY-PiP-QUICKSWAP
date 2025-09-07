@@ -6,7 +6,6 @@ ensuring consistent stacking order and eliminating redundant z-order calls.
 """
 from __future__ import annotations
 
-import threading
 from ctypes import windll
 from typing import Dict, Optional, Any
 from weakref import WeakValueDictionary
@@ -47,7 +46,7 @@ class ZOrderManager:
     """Centralized z-order management for overlays and border overlays."""
     
     def __init__(self):
-        self._lock = threading.RLock()
+        # Lock-free: All z-order operations confined to UI thread
         self._logger = get_logger(__name__)
         # Throttled emitters for high-frequency messages
         self._tdebug_scheduled = throttled(self._logger.debug, "zorder:scheduled", 200)
@@ -81,9 +80,9 @@ class ZOrderManager:
             overlay_id: Unique identifier for the overlay
             overlay_widget: The overlay widget instance
         """
-        with self._lock:
-            self._main_overlays[overlay_id] = overlay_widget
-            self._logger.debug(f"Registered main overlay: {overlay_id} (handle tracking deferred)")
+        # Lock-free: UI thread only access
+        self._main_overlays[overlay_id] = overlay_widget
+        self._logger.debug(f"Registered main overlay: {overlay_id} (handle tracking deferred)")
     
     def register_border_overlay(self, border_id: str, border_widget: QWidget, main_overlay_id: str) -> None:
         """Register a border overlay for z-order management.
@@ -93,10 +92,10 @@ class ZOrderManager:
             border_widget: The border overlay widget instance
             main_overlay_id: ID of the associated main overlay
         """
-        with self._lock:
-            self._border_overlays[border_id] = border_widget
-            self._overlay_relationships[border_id] = main_overlay_id
-            self._logger.debug(f"Registered border overlay: {border_id} for main overlay: {main_overlay_id} (handle tracking deferred)")
+        # Lock-free: UI thread only access
+        self._border_overlays[border_id] = border_widget
+        self._overlay_relationships[border_id] = main_overlay_id
+        self._logger.debug(f"Registered border overlay: {border_id} for main overlay: {main_overlay_id} (handle tracking deferred)")
     
     def unregister_main_overlay(self, overlay_id: str) -> None:
         """Unregister a main overlay from z-order management.
@@ -104,25 +103,25 @@ class ZOrderManager:
         Args:
             overlay_id: Unique identifier for the overlay
         """
-        with self._lock:
-            if overlay_id in self._main_overlays:
-                overlay_widget = self._main_overlays[overlay_id]
-                
-                # Mark window handle as destroyed
-                try:
-                    hwnd = int(overlay_widget.winId())
-                    self._destroyed_handles.add(hwnd)
-                    if hwnd in self._valid_handles:
-                        del self._valid_handles[hwnd]
-                except Exception:
-                    pass
-                
-                del self._main_overlays[overlay_id]
-                
-                # Remove from pending enforcement
-                self._pending_overlays.discard(overlay_id)
-                
-                self._logger.debug(f"Unregistered main overlay: {overlay_id}")
+        # Lock-free: UI thread only access
+        if overlay_id in self._main_overlays:
+            overlay_widget = self._main_overlays[overlay_id]
+            
+            # Mark window handle as destroyed
+            try:
+                hwnd = int(overlay_widget.winId())
+                self._destroyed_handles.add(hwnd)
+                if hwnd in self._valid_handles:
+                    del self._valid_handles[hwnd]
+            except Exception:
+                pass
+            
+            del self._main_overlays[overlay_id]
+            
+            # Remove from pending enforcement
+            self._pending_overlays.discard(overlay_id)
+            
+            self._logger.debug(f"Unregistered main overlay: {overlay_id}")
     
     def unregister_border_overlay(self, border_id: str) -> None:
         """Unregister a border overlay from z-order management.
@@ -130,27 +129,27 @@ class ZOrderManager:
         Args:
             border_id: Unique identifier for the border overlay
         """
-        with self._lock:
-            if border_id in self._border_overlays:
-                # Clean up border overlay
-                border_widget = self._border_overlays[border_id]
-                
-                # Mark window handle as destroyed
-                try:
-                    hwnd = int(border_widget.winId())
-                    self._destroyed_handles.add(hwnd)
-                    if hwnd in self._valid_handles:
-                        del self._valid_handles[hwnd]
-                except Exception:
-                    pass
-                
-                try:
-                    border_widget.hide()
-                    border_widget.close()
-                except Exception as e:
-                    self._logger.warning(f"Error closing border overlay {border_id}: {e}")
-                
-                del self._border_overlays[border_id]
+        # Lock-free: UI thread only access
+        if border_id in self._border_overlays:
+            # Clean up border overlay
+            border_widget = self._border_overlays[border_id]
+            
+            # Mark window handle as destroyed
+            try:
+                hwnd = int(border_widget.winId())
+                self._destroyed_handles.add(hwnd)
+                if hwnd in self._valid_handles:
+                    del self._valid_handles[hwnd]
+            except Exception:
+                pass
+            
+            try:
+                border_widget.hide()
+                border_widget.close()
+            except Exception as e:
+                self._logger.warning(f"Error closing border overlay {border_id}: {e}")
+            
+            del self._border_overlays[border_id]
                 
             if border_id in self._overlay_relationships:
                 del self._overlay_relationships[border_id]
@@ -169,8 +168,8 @@ class ZOrderManager:
         Returns:
             Border overlay widget or None if not found
         """
-        with self._lock:
-            return self._border_overlays.get(border_id)
+        # Lock-free: UI thread only access
+        return self._border_overlays.get(border_id)
     
     def cleanup_destroyed_handles(self) -> None:
         """Clean up tracking for destroyed window handles.
@@ -178,13 +177,13 @@ class ZOrderManager:
         This method should be called periodically to prevent memory leaks
         from accumulating destroyed handle references.
         """
-        with self._lock:
-            # Limit the size of destroyed handles set to prevent memory leaks
-            if len(self._destroyed_handles) > 100:
-                # Keep only the most recent 50 destroyed handles
-                recent_handles = list(self._destroyed_handles)[-50:]
-                self._destroyed_handles = set(recent_handles)
-                self._logger.debug(f"Cleaned up destroyed handles, keeping {len(recent_handles)} recent entries")
+        # Lock-free: UI thread only access
+        # Limit the size of destroyed handles set to prevent memory leaks
+        if len(self._destroyed_handles) > 100:
+            # Keep only the most recent 50 destroyed handles
+            recent_handles = list(self._destroyed_handles)[-50:]
+            self._destroyed_handles = set(recent_handles)
+            self._logger.debug(f"Cleaned up destroyed handles, keeping {len(recent_handles)} recent entries")
     
     def is_handle_destroyed(self, hwnd: int) -> bool:
         """Check if a window handle has been marked as destroyed.
@@ -195,8 +194,8 @@ class ZOrderManager:
         Returns:
             True if handle is known to be destroyed
         """
-        with self._lock:
-            return hwnd in self._destroyed_handles
+        # Lock-free: UI thread only access
+        return hwnd in self._destroyed_handles
     
     def enforce_z_order(self, overlay_id: str) -> bool:
         """Enforce z-order for the specified overlay and its border.
@@ -209,31 +208,31 @@ class ZOrderManager:
         Returns:
             True if enforcement was scheduled/executed, False if overlay not found
         """
-        with self._lock:
-            # Check if overlay exists
-            main_overlay = self._main_overlays.get(overlay_id)
-            if not main_overlay:
-                self._logger.warning(f"Main overlay {overlay_id} not found for z-order enforcement")
-                return False
-            
-            # Add to pending set for debounced enforcement
-            self._pending_overlays.add(overlay_id)
-            self._tdebug_scheduled(f"Scheduled z-order enforcement for {overlay_id} (debounced)")
-            
-            # Start or restart debounce using ThreadManager.single_shot with token coalescing
-            self._enforcement_token += 1
-            current_token = self._enforcement_token
+        # Lock-free: UI thread only access
+        # Check if overlay exists
+        main_overlay = self._main_overlays.get(overlay_id)
+        if not main_overlay:
+            self._logger.warning(f"Main overlay {overlay_id} not found for z-order enforcement")
+            return False
+        
+        # Add to pending set for debounced enforcement
+        self._pending_overlays.add(overlay_id)
+        self._tdebug_scheduled(f"Scheduled z-order enforcement for {overlay_id} (debounced)")
+        
+        # Start or restart debounce using ThreadManager.single_shot with token coalescing
+        self._enforcement_token += 1
+        current_token = self._enforcement_token
 
-            def _run():
-                # Only execute if this invocation is the latest scheduled
-                with self._lock:
-                    if current_token != self._enforcement_token:
-                        return
-                self._execute_pending_enforcement()
+        def _run():
+            # Only execute if this invocation is the latest scheduled
+            # Lock-free: UI thread only access
+            if current_token != self._enforcement_token:
+                return
+            self._execute_pending_enforcement()
 
-            ThreadManager.single_shot(self._debounce_delay_ms, _run)
-            
-            return True
+        ThreadManager.single_shot(self._debounce_delay_ms, _run)
+        
+        return True
     
     def enforce_z_order_immediate(self, overlay_id: str) -> bool:
         """Enforce z-order immediately without debouncing.
@@ -246,13 +245,51 @@ class ZOrderManager:
         Returns:
             True if successful, False otherwise
         """
-        with self._lock:
+        # Lock-free: UI thread only access
+        try:
+            # Get the main overlay
+            main_overlay = self._main_overlays.get(overlay_id)
+            if not main_overlay:
+                self._logger.warning(f"Main overlay {overlay_id} not found for immediate z-order enforcement")
+                return False
+            
+            # Find associated border overlay
+            border_overlay = None
+            for bid, mid in self._overlay_relationships.items():
+                if mid == overlay_id:
+                    border_overlay = self._border_overlays.get(bid)
+                    break
+            
+            result = self._enforce_z_order_native(main_overlay, border_overlay)
+            self._logger.debug(f"Immediate z-order enforcement for {overlay_id}: {'success' if result else 'failed'}")
+            return result
+            
+        except Exception as e:
+            self._logger.exception(f"Failed immediate z-order enforcement for {overlay_id}: {e}")
+            return False
+    
+    def _execute_pending_enforcement(self) -> None:
+        """Execute z-order enforcement for all pending overlays.
+        
+        This is called by the debounce timer to batch process all pending enforcement requests.
+        """
+        # Lock-free: UI thread only access
+        if not self._pending_overlays:
+            return
+        
+        pending_copy = self._pending_overlays.copy()
+        self._pending_overlays.clear()
+        
+        self._tdebug_batch(f"Executing batched z-order enforcement for {len(pending_copy)} overlays: {pending_copy}")
+        
+        success_count = 0
+        for overlay_id in pending_copy:
             try:
                 # Get the main overlay
                 main_overlay = self._main_overlays.get(overlay_id)
                 if not main_overlay:
-                    self._logger.warning(f"Main overlay {overlay_id} not found for immediate z-order enforcement")
-                    return False
+                    self._logger.warning(f"Main overlay {overlay_id} no longer exists during batched enforcement")
+                    continue
                 
                 # Find associated border overlay
                 border_overlay = None
@@ -261,59 +298,21 @@ class ZOrderManager:
                         border_overlay = self._border_overlays.get(bid)
                         break
                 
-                result = self._enforce_z_order_native(main_overlay, border_overlay)
-                self._logger.debug(f"Immediate z-order enforcement for {overlay_id}: {'success' if result else 'failed'}")
-                return result
-                
+                # Execute native enforcement
+                if self._enforce_z_order_native(main_overlay, border_overlay):
+                    success_count += 1
+                    self._logger.debug(f"Batched z-order enforcement successful for {overlay_id}")
+                else:
+                    self._logger.warning(f"Batched z-order enforcement failed for {overlay_id}")
+                    # Clean up destroyed handles periodically on failures
+                    self.cleanup_destroyed_handles()
+                    
             except Exception as e:
-                self._logger.exception(f"Failed immediate z-order enforcement for {overlay_id}: {e}")
-                return False
-    
-    def _execute_pending_enforcement(self) -> None:
-        """Execute z-order enforcement for all pending overlays.
+                self._logger.exception(f"Error during batched z-order enforcement for {overlay_id}: {e}")
         
-        This is called by the debounce timer to batch process all pending enforcement requests.
-        """
-        with self._lock:
-            if not self._pending_overlays:
-                return
-            
-            pending_copy = self._pending_overlays.copy()
-            self._pending_overlays.clear()
-            
-            self._tdebug_batch(f"Executing batched z-order enforcement for {len(pending_copy)} overlays: {pending_copy}")
-            
-            success_count = 0
-            for overlay_id in pending_copy:
-                try:
-                    # Get the main overlay
-                    main_overlay = self._main_overlays.get(overlay_id)
-                    if not main_overlay:
-                        self._logger.warning(f"Main overlay {overlay_id} no longer exists during batched enforcement")
-                        continue
-                    
-                    # Find associated border overlay
-                    border_overlay = None
-                    for bid, mid in self._overlay_relationships.items():
-                        if mid == overlay_id:
-                            border_overlay = self._border_overlays.get(bid)
-                            break
-                    
-                    # Execute native enforcement
-                    if self._enforce_z_order_native(main_overlay, border_overlay):
-                        success_count += 1
-                        self._logger.debug(f"Batched z-order enforcement successful for {overlay_id}")
-                    else:
-                        self._logger.warning(f"Batched z-order enforcement failed for {overlay_id}")
-                        # Clean up destroyed handles periodically on failures
-                        self.cleanup_destroyed_handles()
-                        
-                except Exception as e:
-                    self._logger.exception(f"Error during batched z-order enforcement for {overlay_id}: {e}")
-            
-            self._tdebug_batch(f"Batched z-order enforcement completed: {success_count}/{len(pending_copy)} successful")
-            
-            # No timer cleanup necessary when using tokenized single_shot scheduling
+        self._tdebug_batch(f"Batched z-order enforcement completed: {success_count}/{len(pending_copy)} successful")
+        
+        # No timer cleanup necessary when using tokenized single_shot scheduling
     
     def _enforce_z_order_native(self, main_overlay: QWidget, border_overlay: Optional[QWidget] = None) -> bool:
         """Perform native z-order enforcement using Win32 APIs.
@@ -453,12 +452,12 @@ class ZOrderManager:
         Returns:
             True if all enforcements succeeded, False otherwise
         """
-        with self._lock:
-            success = True
-            for overlay_id in list(self._main_overlays.keys()):
-                if not self.enforce_z_order(overlay_id):
-                    success = False
-            return success
+        # Lock-free: UI thread only access
+        success = True
+        for overlay_id in list(self._main_overlays.keys()):
+            if not self.enforce_z_order(overlay_id):
+                success = False
+        return success
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get z-order management statistics.
@@ -466,10 +465,10 @@ class ZOrderManager:
         Returns:
             Dictionary containing statistics
         """
-        with self._lock:
-            return {
-                'main_overlays_count': len(self._main_overlays),
-                'border_overlays_count': len(self._border_overlays),
-                'enforcement_count': self._enforcement_count,
-                'relationships_count': len(self._overlay_relationships)
-            }
+        # Lock-free: UI thread only access
+        return {
+            'main_overlays_count': len(self._main_overlays),
+            'border_overlays_count': len(self._border_overlays),
+            'enforcement_count': self._enforcement_count,
+            'relationships_count': len(self._overlay_relationships)
+        }

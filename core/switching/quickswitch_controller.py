@@ -298,6 +298,18 @@ class QuickSwitchController(QObject):
                         oid = getattr(overlay, "id", None) or getattr(overlay, "identifier", None)
                     except Exception:
                         oid = None
+                    
+                    # Focus the captured window instead of switching when locked
+                    try:
+                        captured_hwnd = getattr(overlay, '_captured_hwnd', None) or getattr(overlay, '_source_hwnd', None)
+                        if captured_hwnd:
+                            win32gui.SetForegroundWindow(captured_hwnd)
+                            self._logger.info(f"Focused locked overlay's captured window: {captured_hwnd}")
+                        else:
+                            self._logger.debug("No captured window found to focus on locked overlay")
+                    except Exception as focus_err:
+                        self._logger.error(f"Failed to focus captured window on locked overlay: {focus_err}")
+                    
                     try:
                         from core.application.core import get_app_core
                         lock_type = "global" if is_globally_locked else "individual"
@@ -308,7 +320,7 @@ class QuickSwitchController(QObject):
                         )
                     except Exception as e:
                         self._logger.debug(f"Event publish failed (lock_suppressed): {e}")
-                    self._t_debug_lock("Quickswitch suppressed due to overlay lock")
+                    self._t_debug_lock("Quickswitch suppressed due to overlay lock - focused captured window instead")
                     return
             except Exception:
                 pass
@@ -501,67 +513,43 @@ class QuickSwitchController(QObject):
                 self._d_debug_fail("All MRU candidates failed; QuickSwitch aborted")
                 return
 
+            # Always attempt to swap - either to foreground or to chosen candidate
             try:
-                if cur_hwnd and cur_hwnd != current_src:
-                    forbidden: set[int] = set(forbidden_for_focus)
-                    if cur_hwnd in forbidden:
-                        try:
-                            if chosen and chosen not in forbidden and chosen != current_src and is_valid_window(int(chosen)):
-                                overlay._handle_swap_window(int(chosen))
-                                did_swap = True
-                                swap_target = int(chosen)
-                                self._logger.debug(
-                                    f"Requested source swap to chosen hwnd={chosen} (overlay foreground)"
-                                )
-                            else:
-                                self._logger.debug(
-                                    f"Skipping overlay swap: foreground hwnd={cur_hwnd} is overlay window and chosen is same as current_src/forbidden/invalid"
-                                )
-                        except Exception:
-                            self._logger.debug(
-                                f"Skipping overlay swap: validation error for chosen hwnd={chosen} while overlay in foreground"
-                            )
+                swap_hwnd = None
+                
+                # Determine swap target: prefer foreground if valid, otherwise use chosen
+                if cur_hwnd and cur_hwnd != current_src and is_valid_window(cur_hwnd):
+                    # Check if foreground is forbidden (overlay window)
+                    if cur_hwnd not in forbidden_for_focus:
+                        # Check display lock if enabled
+                        if on_same_monitor(cur_hwnd):
+                            swap_hwnd = cur_hwnd
+                            self._logger.debug(f"Swapping to foreground hwnd={cur_hwnd}")
+                        else:
+                            self._logger.debug(f"Foreground hwnd={cur_hwnd} off-monitor, trying chosen")
                     else:
-                        try:
-                            if not is_valid_window(cur_hwnd):
-                                self._logger.debug(
-                                    f"Skipping overlay swap: foreground hwnd={cur_hwnd} is invalid or belongs to our process"
-                                )
-                            else:
-                                # Respect display-locked switching: only swap to foreground if on same monitor
-                                try:
-                                    if not on_same_monitor(cur_hwnd):
-                                        # Foreground is off-monitor; prefer chosen (already filtered by display lock) if valid
-                                        if (
-                                            'chosen' in locals() and chosen and chosen != current_src
-                                            and is_valid_window(int(chosen)) and (int(chosen) not in forbidden)
-                                        ):
-                                            overlay._handle_swap_window(int(chosen))
-                                            did_swap = True
-                                            swap_target = int(chosen)
-                                            self._logger.debug(
-                                                f"Display lock: swapped to chosen hwnd={chosen} (foreground off-monitor)"
-                                            )
-                                        else:
-                                            self._logger.debug(
-                                                f"Display lock: skipping swap to foreground hwnd={cur_hwnd} (off-monitor) and no viable chosen"
-                                            )
-                                    else:
-                                        overlay._handle_swap_window(cur_hwnd)
-                                        did_swap = True
-                                        swap_target = int(cur_hwnd)
-                                        self._logger.debug(f"Requested source swap to foreground hwnd={cur_hwnd}")
-                                except Exception:
-                                    # If monitor check fails unexpectedly, fall back to conservative skip
-                                    self._logger.debug(
-                                        f"Skipping overlay swap: monitor validation error for foreground hwnd={cur_hwnd}"
-                                    )
-                        except Exception:
-                            self._logger.debug(
-                                f"Skipping overlay swap: validation error for foreground hwnd={cur_hwnd}"
-                            )
+                        self._logger.debug(f"Foreground hwnd={cur_hwnd} is overlay window, trying chosen")
+                
+                # If foreground not suitable, try chosen candidate
+                if not swap_hwnd and chosen and chosen != current_src:
+                    if is_valid_window(int(chosen)) and int(chosen) not in forbidden_for_focus:
+                        if on_same_monitor(int(chosen)):
+                            swap_hwnd = int(chosen)
+                            self._logger.debug(f"Swapping to chosen hwnd={chosen}")
+                        else:
+                            self._logger.debug(f"Chosen hwnd={chosen} off-monitor")
+                
+                # Perform the swap
+                if swap_hwnd:
+                    overlay._handle_swap_window(swap_hwnd)
+                    did_swap = True
+                    swap_target = swap_hwnd
+                    self._logger.debug(f"Requested source swap to hwnd={swap_hwnd}")
+                else:
+                    self._logger.debug(f"No valid swap target found: cur_hwnd={cur_hwnd}, chosen={chosen}, current_src={current_src}")
+                    
             except Exception as e:
-                self._logger.error(f"Swap overlay to foreground hwnd={cur_hwnd} failed: {e}")
+                self._logger.error(f"Swap overlay failed: {e}", exc_info=True)
 
             if did_swap and pre_swap_src:
                 focus_target = int(pre_swap_src)
@@ -723,8 +711,15 @@ class QuickSwitchController(QObject):
         return None
 
     def _get_active_overlay(self):
-        # Access the active overlay via OverlayManager internals in a controlled way
-        # If OverlayManager exposes a public getter, prefer it; otherwise retrieve by internal id
+        """
+        Get the currently active overlay from the OverlayManager.
+        
+        Accesses the active overlay via OverlayManager internals in a controlled way.
+        If OverlayManager exposes a public getter, prefer it; otherwise retrieve by internal id.
+        
+        Returns:
+            Optional[Overlay]: The active overlay instance, or None if no overlay is active.
+        """
         try:
             # Best-effort: try known private attribute; log if not present
             active_id = getattr(self._overlay_manager, "_active_overlay_id", None)

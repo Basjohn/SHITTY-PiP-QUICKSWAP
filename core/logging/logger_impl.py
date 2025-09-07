@@ -10,9 +10,8 @@ import logging.handlers
 import os
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Union
-import threading
+from pathlib import Path
 import time
 
 from core.interfaces import ILogger
@@ -36,6 +35,10 @@ _app_logger: Optional["AppLogger"] = None
 # Dynamic task highlighting: selected logger names can be emphasized in output.
 # Use provided helper functions to add/remove names at runtime.
 _highlighted_loggers: set[str] = set()
+
+# Lock-free deduplication tracking (UI thread confinement)
+_last_messages: dict[str, tuple[str, float]] = {}
+_message_counts: dict[str, int] = {}
 
 def set_highlighted_topics(names: "list[str] | tuple[str, ...]") -> None:
     """Replace the set of highlighted logger names."""
@@ -62,16 +65,17 @@ def clear_highlighted_topics() -> None:
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
     
-    # ANSI color codes
+    # ANSI color codes - more vibrant palette
     BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = range(8)
+    BRIGHT_RED, BRIGHT_GREEN, BRIGHT_YELLOW, BRIGHT_BLUE, BRIGHT_MAGENTA, BRIGHT_CYAN = range(91, 97)
     
-    # Color sequences for different log levels
+    # Enhanced color sequences for different log levels - more vibrant and distinct
     COLORS = {
-        'DEBUG': BLUE,
-        'INFO': GREEN,
-        'WARNING': YELLOW,
-        'ERROR': RED,
-        'CRITICAL': MAGENTA,
+        'DEBUG': BRIGHT_CYAN,     # Bright cyan for debug - stands out more
+        'INFO': BRIGHT_GREEN,     # Bright green for info - more vibrant
+        'WARNING': BRIGHT_YELLOW, # Bright yellow for warnings - more attention-grabbing
+        'ERROR': BRIGHT_RED,      # Bright red for errors - high visibility
+        'CRITICAL': BRIGHT_MAGENTA, # Bright magenta for critical - maximum visibility
     }
     
     # Reset sequence
@@ -97,18 +101,21 @@ class ColoredFormatter(logging.Formatter):
         asctime = self.formatTime(record, self.datefmt)
         message = record.getMessage()
 
-        # Level coloring
+        # Level coloring with enhanced vibrant colors
         levelname = record.levelname
-        color_code = 30 + self.COLORS.get(levelname, self.WHITE)
-        colored_level = f"{self.COLOR_SEQ % color_code}{levelname:>8}{self.RESET_SEQ}"
-
-        # Highlighting: if this logger is marked for emphasis, color its name and message in yellow (orange-ish)
-        if record.name in _highlighted_loggers:
-            hl_color = 30 + self.YELLOW
-            name_part = f"{self.COLOR_SEQ % hl_color}{record.name}{self.RESET_SEQ}"
-            message = f"{self.COLOR_SEQ % hl_color}{message}{self.RESET_SEQ}"
+        color_code = self.COLORS.get(levelname, self.WHITE)
+        if color_code >= 91:  # Bright colors use different escape sequence
+            colored_level = f"\033[{color_code}m{levelname:>8}{self.RESET_SEQ}"
         else:
-            # Dim logger name
+            colored_level = f"{self.COLOR_SEQ % (30 + color_code)}{levelname:>8}{self.RESET_SEQ}"
+
+        # Enhanced highlighting: vibrant orange for emphasized loggers
+        if record.name in _highlighted_loggers:
+            # Use bright yellow/orange for highlighted loggers - more vibrant
+            name_part = f"\033[{self.BRIGHT_YELLOW}m{record.name}{self.RESET_SEQ}"
+            message = f"\033[{self.BRIGHT_YELLOW}m{message}{self.RESET_SEQ}"
+        else:
+            # Dim logger name for non-highlighted
             name_part = f"{self.DIM_SEQ}{record.name}{self.RESET_SEQ}"
 
         line = f"{asctime} {colored_level} {name_part}: {message}"
@@ -152,7 +159,7 @@ class RepeatSuppressFilter(logging.Filter):
             if self._suppressed > 0:
                 # Clear args to avoid string formatting conflicts
                 record.args = ()
-                record.msg = f"{record.getMessage()} [suppressed {self._suppressed} repeats]"
+                record.msg = f"{record.getMessage()} \033[2m[+{self._suppressed} repeats]\033[0m"
                 self._suppressed = 0
             self._last_time = now
             return True
@@ -535,12 +542,10 @@ class AppLogger(ILogger):
 
 # --- Throttling & Dedup Helpers -------------------------------------------------
 
-# Per-process simple throttle state
-_throttle_state_lock = threading.Lock()
+# Per-process simple throttle state - Lock-free: UI thread confinement
 _throttle_last_emit: dict[str, float] = {}
 
-# Per-process dedupe state: key -> (last_message, suppressed_count, last_time)
-_dedupe_state_lock = threading.Lock()
+# Per-process dedupe state: key -> (last_message, suppressed_count, last_time) - Lock-free: UI thread confinement
 _dedupe_state: dict[str, tuple[str, int, float]] = {}
 
 def throttled(logger_fn, key: str, interval_ms: int):
@@ -551,23 +556,15 @@ def throttled(logger_fn, key: str, interval_ms: int):
         tdebug = throttled(logger.debug, "hotkeys:repeat", 500)
         tdebug("Repeat ignored for opacity_decrease")
     """
-    interval_s = max(0.0, float(interval_ms) / 1000.0)
-    k = str(key)
+    def wrapper(*args, **kwargs):
+        # Lock-free: UI thread confinement for throttle state
+        current_time = time.time()
+        last_emit = _throttle_last_emit.get(key, 0)
+        if current_time - last_emit >= interval_ms / 1000.0:
+            _throttle_last_emit[key] = current_time
+            logger_fn(*args, **kwargs)
 
-    def _emit(message: str) -> None:
-        now = time.monotonic()
-        with _throttle_state_lock:
-            last = _throttle_last_emit.get(k, 0.0)
-            if now - last < interval_s:
-                return
-            _throttle_last_emit[k] = now
-        try:
-            logger_fn(message)
-        except Exception:
-            # Never raise from logging helpers
-            pass
-
-    return _emit
+    return wrapper
 
 
 def log_dedupe(logger_fn, key: str, window_ms: int):
@@ -579,27 +576,28 @@ def log_dedupe(logger_fn, key: str, window_ms: int):
         ddebug = log_dedupe(logger.debug, "qswitch:none", 2000)
         ddebug("No candidates for quickswitch")
     """
-    window_s = max(0.0, float(window_ms) / 1000.0)
-    k = str(key)
-
-    def _emit(message: str) -> None:
-        now = time.monotonic()
-        with _dedupe_state_lock:
-            last_msg, count, last_time = _dedupe_state.get(k, ("", 0, 0.0))
-            if message == last_msg and (now - last_time) < window_s:
-                _dedupe_state[k] = (last_msg, count + 1, last_time)
+    def wrapper(*args, **kwargs):
+        # Lock-free: UI thread confinement for dedupe state
+        current_time = time.time()
+        message_str = str(args[0]) if args else ""
+        
+        if key in _dedupe_state:
+            last_message, suppressed_count, last_time = _dedupe_state[key]
+            if last_message == message_str:
+                # Same message - increment suppressed count
+                _dedupe_state[key] = (last_message, suppressed_count + 1, current_time)
                 return
-            # If we had suppressed repeats for the previous message, emit a summary line first
-            if count > 0 and last_msg:
-                try:
-                    logger_fn(f"{last_msg} [dedup suppressed {count} repeats]")
-                except Exception:
-                    pass
-            # Emit current message and reset state
-            _dedupe_state[k] = (message, 0, now)
-        try:
-            logger_fn(message)
-        except Exception:
-            pass
+            else:
+                # Different message - emit suppression summary if needed
+                if suppressed_count > 0:
+                    logger_fn(f"\033[2m[DEDUP] Suppressed {suppressed_count} duplicate messages\033[0m")
+                # Update state with new message
+                _dedupe_state[key] = (message_str, 0, current_time)
+        else:
+            # First message for this key
+            _dedupe_state[key] = (message_str, 0, current_time)
+        
+        # Emit the message
+        logger_fn(*args, **kwargs)
 
-    return _emit
+    return wrapper

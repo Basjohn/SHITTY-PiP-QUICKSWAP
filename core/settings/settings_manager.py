@@ -7,18 +7,18 @@ UI-thread-only mutations enforced via ThreadManager and lock-free reads.
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar, Union
-import os
-import sys
 
-from PySide6.QtCore import QObject, Signal, QCoreApplication, QThread
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal
+
+from core.interfaces import ISettingsManager
+from core.threading import ThreadManager
+from utils.paths import get_runtime_root
 
 from .. import logging as core_logging
-from utils.paths import get_runtime_root
-from core.interfaces import ISettingsManager
 from .types import SettingDefinition, SettingsCategory
-from core.threading import ThreadManager
 
 get_logger = core_logging.get_logger
 
@@ -355,6 +355,12 @@ class SettingsManager(QObject):
     _instance = None
     _initialized = False
     
+    @classmethod
+    def _reset_for_testing(cls):
+        """Reset singleton state for testing purposes."""
+        cls._instance = None
+        cls._initialized = False
+    
     def __new__(cls, *args, **kwargs):
         """Ensure singleton behavior."""
         if cls._instance is None:
@@ -364,6 +370,15 @@ class SettingsManager(QObject):
     def __init__(self, parent: Optional[QObject] = None, settings_file: Optional[Union[str, Path]] = None):
         """Initialize the settings manager."""
         if SettingsManager._initialized:
+            # For testing: allow reinitializing with different settings file
+            if settings_file is not None and hasattr(self, '_settings_file'):
+                old_file = self._settings_file
+                new_file = Path(settings_file)
+                if old_file != new_file:
+                    # Reset for new file path
+                    self._settings_file = new_file
+                    self._impl = _SettingsManagerImpl()
+                    self._impl.load(self._settings_file)
             return
             
         super().__init__(parent)
@@ -397,6 +412,22 @@ class SettingsManager(QObject):
         self._impl.load(self._settings_file)
         # Apply explicit migrations, then validate
         self._apply_migrations()
+        
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            from utils.resource_manager import ResourceType, get_resource_manager
+            self._resource_manager = get_resource_manager()
+            self._resource_id = self._resource_manager.register(
+                self,
+                ResourceType.CUSTOM,
+                "SettingsManager singleton",
+                cleanup_handler=lambda obj: obj._cleanup()
+            )
+            self._logger.debug("Registered SettingsManager with ResourceManager")
+        except Exception as e:
+            self._logger.warning(f"Failed to register with ResourceManager: {e}")
+            self._resource_manager = None
+            self._resource_id = None
         self._validate_loaded_settings()
 
         # Ensure defaults are flushed to disk on first run
@@ -414,6 +445,28 @@ class SettingsManager(QObject):
             self._logger.error(f"[KEYPASS] Failed to ensure blocklist defaults: {e}", exc_info=True)
         
         SettingsManager._initialized = True
+    
+    def _cleanup(self):
+        """Cleanup handler for ResourceManager."""
+        try:
+            # Save current settings before cleanup
+            self.save()
+            # Clear handlers
+            self._handlers.clear()
+            self._save_coalesce.clear()
+            self._logger.debug("SettingsManager cleanup completed")
+        except Exception as e:
+            self._logger.error(f"Error during SettingsManager cleanup: {e}")
+    
+    def shutdown(self):
+        """Explicit shutdown method."""
+        if hasattr(self, '_resource_id') and self._resource_id and hasattr(self, '_resource_manager') and self._resource_manager:
+            try:
+                self._resource_manager.unregister(self._resource_id)
+                self._resource_id = None
+            except Exception as e:
+                self._logger.warning(f"Failed to unregister from ResourceManager: {e}")
+        self._cleanup()
 
     # --- UI-thread helpers -------------------------------------------------
     @staticmethod
@@ -743,37 +796,40 @@ class SettingsManager(QObject):
 
         Precedence:
         1) If an explicit settings file path was provided, use its parent directory.
-        2) Portable mode: if SPQ_PORTABLE=1 or a './settings' directory exists next to the executable, use it.
-        3) Fallback to the user configuration directory (~/.spqmodular).
+        2) Primary: /settings folder next to runtime root
+        3) Fallback: settings.json next to executable
+        4) Last resort: user config directory (~/.spqmodular)
         """
-        # 1) Explicit settings file
+        # 1) Explicit settings file path provided (for tests)
         try:
-            if hasattr(self, '_settings_file') and self._settings_file:
-                p = Path(self._settings_file)
-                return p.parent
+            if hasattr(self, '_settings_file') and self._settings_file and self._settings_file != Path():
+                explicit_path = Path(self._settings_file)
+                if explicit_path.is_absolute():
+                    return explicit_path.parent
         except Exception:
             pass
 
-        # 2) Portable mode detection
+        # 2) Primary: /settings folder next to runtime root
         try:
             runtime_root = get_runtime_root()
-            portable_dir = runtime_root / 'settings'
-            if os.environ.get('SPQ_PORTABLE', '0') == '1' or getattr(sys, 'frozen', False) or portable_dir.exists():
-                try:
-                    self._logger.debug(f"[SETTINGS] Portable settings dir resolved: {portable_dir}")
-                except Exception:
-                    pass
-                return portable_dir
-        except Exception:
-            # Ignore portable detection failures and continue to fallback
-            pass
+            settings_dir = runtime_root / 'settings'
+            self._logger.debug(f"[SETTINGS] Primary location: {settings_dir}")
+            return settings_dir
+        except Exception as e:
+            self._logger.warning(f"[SETTINGS] Failed to resolve runtime root: {e}")
 
-        # 3) Fallback
-        fallback = Path.home() / '.spqmodular'
+        # 3) Fallback: settings.json next to executable
         try:
-            self._logger.debug(f"[SETTINGS] Using user config dir: {fallback}")
-        except Exception:
-            pass
+            if getattr(sys, 'frozen', False):
+                exe_dir = Path(sys.executable).parent
+                self._logger.debug(f"[SETTINGS] Fallback to exe directory: {exe_dir}")
+                return exe_dir
+        except Exception as e:
+            self._logger.warning(f"[SETTINGS] Failed to resolve exe directory: {e}")
+
+        # 4) Last resort: user config directory
+        fallback = Path.home() / '.spqmodular'
+        self._logger.debug(f"[SETTINGS] Last resort user config: {fallback}")
         return fallback
 
     def _ensure_keypassthrough_blocklist_defaults(self) -> None:

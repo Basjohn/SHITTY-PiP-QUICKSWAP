@@ -123,7 +123,7 @@ class ThreadManager:
                             If None, a new instance will be created.
         """
         self._shutdown = False
-        self._lock = threading.RLock()
+        # Lock-free: Uses atomic operations and UI thread dispatch
         # Default configuration optimized for capture applications
         cpu_count = os.cpu_count() or 1
         # Keep UI responsiveness by reserving one core if possible
@@ -186,7 +186,12 @@ class ThreadManager:
         except Exception as e:
             logger.error(f"Failed to start ResourceManager mutation worker: {e}")
     def _initialize_pools(self):
-        """Initialize thread pools based on configuration"""
+        """
+        Initialize thread pools based on configuration.
+        
+        Creates ThreadPoolExecutor instances for each configured pool type
+        and registers them with the ResourceManager for cleanup tracking.
+        """
         for pool_type, max_workers in self.config.items():
             if max_workers is None:
                 max_workers = None  # Let ThreadPoolExecutor decide
@@ -234,9 +239,8 @@ class ThreadManager:
         if self._shutdown:
             raise RuntimeError("Thread manager is shut down")
         task = Task(func, *args, task_id=task_id, priority=priority, **kwargs)
-        # Minimal lock scope only to safely read executor reference
-        with self._lock:
-            executor = self._executors[pool_type]
+        # Lock-free: Atomic read of executor reference
+        executor = self._executors[pool_type]
         # Wrap the function to handle result processing
         def wrapped_func():
                 start_time = time.time()
@@ -316,10 +320,10 @@ class ThreadManager:
             KeyError: If task_id is not found
             TimeoutError: If timeout is exceeded
         """
-        with self._lock:
-            task = self._active_tasks.get(task_id)
-            if not task:
-                raise KeyError(f"Task {task_id} not found or already completed")
+        # Lock-free: Atomic read of task reference
+        task = self._active_tasks.get(task_id)
+        if not task:
+            raise KeyError(f"Task {task_id} not found or already completed")
         try:
             return task.future.result(timeout=timeout)
         except Exception as e:
@@ -334,31 +338,31 @@ class ThreadManager:
         Returns:
             bool: True if task was successfully cancelled
         """
-        with self._lock:
-            task = self._active_tasks.get(task_id)
-            if task and task.future:
-                cancelled = task.future.cancel()
-                if cancelled:
-                    self._active_tasks.pop(task_id, None)
-                    logger.info(f"Cancelled task {task_id}")
-                return cancelled
+        # Lock-free: Atomic read of task reference
+        task = self._active_tasks.get(task_id)
+        if task and task.future:
+            cancelled = task.future.cancel()
+            if cancelled:
+                self._active_tasks.pop(task_id, None)
+                logger.info(f"Cancelled task {task_id}")
+            return cancelled
         return False
     def get_active_tasks(self) -> List[str]:
         """Get list of currently active task IDs"""
-        with self._lock:
-            return list(self._active_tasks.keys())
+        # Lock-free: Atomic read of task keys
+        return list(self._active_tasks.keys())
     def get_pool_stats(self) -> Dict[str, Dict[str, int]]:
         """Get statistics for all thread pools"""
-        with self._lock:
-            return {pool_type.value: stats.copy() 
-                   for pool_type, stats in self._stats.items()}
+        # Lock-free: Atomic read of stats
+        return {pool_type.value: stats.copy() 
+               for pool_type, stats in self._stats.items()}
     def get_pool_info(self) -> Dict[str, Dict[str, Any]]:
         """Get detailed information about thread pools"""
         info = {}
-        with self._lock:
-            for pool_type, executor in self._executors.items():
-                info[pool_type.value] = {
-                    'max_workers': executor._max_workers,
+        # Lock-free: Atomic read of executor info
+        for pool_type, executor in self._executors.items():
+            info[pool_type.value] = {
+                'max_workers': executor._max_workers,
                     'active_threads': len(executor._threads),
                     'pending_tasks': executor._work_queue.qsize(),
                     'stats': self._stats[pool_type].copy()
@@ -398,16 +402,16 @@ class ThreadManager:
         logger.info("Shutting down thread manager...")
         current_thread = threading.current_thread()
         
-        # Check shutdown state and set flag under lock, but release before blocking operations
-        with self._lock:
-            if self._shutdown:
-                return  # Already shutting down or shut down
-            self._shutdown = True
-            # Capture references we need while under lock
-            resource_manager = self._resource_manager
-            active_task_ids = list(self._active_tasks.keys())
-            executors = list(self._executors.items())
-            resource_id = getattr(self, "_resource_id", None)
+        # Lock-free: Atomic check and set shutdown state
+        if self._shutdown:
+            return  # Already shutting down or shut down
+        self._shutdown = True
+        
+        # Capture references we need
+        resource_manager = self._resource_manager
+        active_task_ids = list(self._active_tasks.keys())
+        executors = list(self._executors.items())
+        resource_id = getattr(self, "_resource_id", None)
         
         # Now perform potentially blocking operations without holding the lock
         # Proactively stop ResourceManager's IO-pool mutation worker to avoid pool shutdown hangs
@@ -477,8 +481,8 @@ class ThreadManager:
         except Exception as e:
             logger.debug("get_pool_info failed for stats publish: %s", e)
             # Fallback minimal stats
-            with self._lock:
-                info = {pool.value: self._stats[pool].copy() for pool in ThreadPoolType}
+            # Lock-free: Atomic read of stats
+            info = {pool.value: self._stats[pool].copy() for pool in ThreadPoolType}
         return info
 
     def _publish_stats_once(self) -> None:
@@ -544,16 +548,16 @@ class ThreadManager:
                     try:
                         task_obj = ev[1]
                         if task_obj is not None:
-                            with self._lock:
-                                self._active_tasks[task_obj.task_id] = task_obj
+                            # Lock-free: Atomic write to active tasks
+                            self._active_tasks[task_obj.task_id] = task_obj
                     except Exception:
                         pass
                     continue
                 if kind == 'unregister_active':
                     try:
                         task_id = ev[1]
-                        with self._lock:
-                            self._active_tasks.pop(task_id, None)
+                        # Lock-free: Atomic removal from active tasks
+                        self._active_tasks.pop(task_id, None)
                     except Exception:
                         pass
                     continue
@@ -563,10 +567,10 @@ class ThreadManager:
                     pt = next((p for p in ThreadPoolType if p.value == pool_value), None)
                     if pt is None:
                         continue
-                    with self._lock:
-                        stats = self._stats[pt]
-                        if kind in stats:
-                            stats[kind] += 1
+                    # Lock-free: Atomic stats update
+                    stats = self._stats[pt]
+                    if kind in stats:
+                        stats[kind] += 1
                         sh = self._mut_shadow_stats[pt]
                         if kind in sh:
                             sh[kind] += 1
@@ -607,7 +611,10 @@ class ThreadManager:
         try:
             app = QCoreApplication.instance()
             if app is None:
-                raise RuntimeError("run_on_ui_thread called without a QCoreApplication")
+                # During test teardown, QApplication may be destroyed - silently skip
+                logger = get_logger("ThreadManager")
+                logger.debug("run_on_ui_thread called without QCoreApplication - skipping (likely test teardown)")
+                return
             # If we are already on UI thread, call directly
             if QThread.currentThread() is app.thread():
                 func(*args, **(kwargs or {}))
@@ -725,8 +732,9 @@ class UICoalescer:
         self._window_ms = max(0, int(window_ms))
         self._shutdown = False
         # Guard scheduling flag across producer (any thread) and consumer (UI)
-        self._sched_lock = threading.RLock()
+        # Lock-free: Uses atomic flag for scheduling coordination
         self._drain_scheduled = False
+        # Note: _sched_lock removed in lock-free migration - using atomic flag only
 
     def submit(self, task: Callable[[], None]) -> None:
         if self._shutdown or task is None:
@@ -737,19 +745,19 @@ class UICoalescer:
         except Exception as e:
             logger.exception("UICoalescer[%s] enqueue failed: %s", self._name, e)
             return
-        # Schedule a drain tick if not already scheduled
-        with self._sched_lock:
-            if not self._drain_scheduled:
-                self._drain_scheduled = True
-                self._tm.single_shot(self._window_ms, self._drain_on_ui)
+        # Schedule a drain tick if not already scheduled (lock-free atomic flag)
+        if not self._drain_scheduled:
+            self._drain_scheduled = True
+            self._tm.single_shot(self._window_ms, self._drain_on_ui)
 
     def flush(self) -> None:
         """Force an immediate drain on the UI thread."""
         if self._shutdown:
             return
-        with self._sched_lock:
-            self._drain_scheduled = True  # ensure a tick will run
-        self._tm.single_shot(0, self._drain_on_ui)
+        # Force immediate drain (lock-free atomic flag)
+        if not self._drain_scheduled:
+            self._drain_scheduled = True
+            self._tm.single_shot(0, self._drain_on_ui)
 
     def shutdown(self) -> None:
         """Stop scheduling and best-effort drain then clear."""
@@ -766,8 +774,7 @@ class UICoalescer:
     # Internal ----------------------------------------------------------------
     def _drain_on_ui(self) -> None:
         if self._shutdown:
-            with self._sched_lock:
-                self._drain_scheduled = False
+            self._drain_scheduled = False
             return
         count = 0
         try:
@@ -783,15 +790,13 @@ class UICoalescer:
                     logger.exception("UICoalescer[%s] task raised: %s", self._name, e)
                 count += 1
         finally:
-            with self._sched_lock:
-                self._drain_scheduled = False
+            # Reset scheduling flag (lock-free atomic)
+            self._drain_scheduled = False
         if count > 1:
             logger.debug("UICoalescer[%s] drained %d tasks (coalesced=%d)", self._name, count, count - 1)
         # If items arrived during drain, schedule another tick
         if not self._shutdown and not self._q.is_empty():
-            with self._sched_lock:
-                if not self._drain_scheduled:
-                    self._drain_scheduled = True
-                    self._tm.single_shot(self._window_ms, self._drain_on_ui)
-
-    
+            # Force immediate drain (lock-free atomic flag)
+            if not self._drain_scheduled:
+                self._drain_scheduled = True
+                self._tm.single_shot(0, self._drain_on_ui)

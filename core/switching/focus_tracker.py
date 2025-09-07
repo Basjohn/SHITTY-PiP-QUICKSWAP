@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import threading
 import time
 from typing import Optional
 
 from PySide6.QtCore import QObject
 
 from core.logging import get_logger
+from core.threading import ThreadManager
 from core.switching.mru_manager import get_mru_manager
 from utils.window_validation import is_valid_window, get_window_title
 import win32gui
@@ -26,16 +26,16 @@ class FocusTracker(QObject):
     """
 
     _instance: Optional["FocusTracker"] = None
-    _lock = threading.Lock()
+    # Lock-free: Singleton creation confined to UI thread
 
     POLL_INTERVAL_MS = 200
     STABLE_DEBOUNCE_MS = 100
 
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+        # Lock-free: UI thread only access for singleton creation
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
     def __init__(self) -> None:
@@ -108,26 +108,25 @@ class FocusTracker(QObject):
                 
             now = time.time() * 1000.0
             
-            # Thread-safe state updates
-            with self._lock:
-                # Check if this is a new candidate
-                if hwnd != self._candidate_hwnd:
-                    self._candidate_hwnd = hwnd
-                    self._candidate_since = now
-                    return
-                    
-                # Check if candidate has been stable long enough
-                if now - self._candidate_since < self.STABLE_DEBOUNCE_MS:
-                    return
-                    
-                # Check if this is actually a change from last recorded
-                if hwnd == self._last_seen_hwnd:
-                    return
-                    
-                # Update last seen before releasing lock
-                self._last_seen_hwnd = hwnd
+            # Lock-free: UI thread confinement for state updates
+            # Check if this is a new candidate
+            if hwnd != self._candidate_hwnd:
+                self._candidate_hwnd = hwnd
+                self._candidate_since = now
+                return
                 
-            # Record the stable focus change (outside lock to avoid deadlock)
+            # Check if candidate has been stable long enough
+            if now - self._candidate_since < self.STABLE_DEBOUNCE_MS:
+                return
+                
+            # Check if this is actually a change from last recorded
+            if hwnd == self._last_seen_hwnd:
+                return
+                
+            # Update last seen
+            self._last_seen_hwnd = hwnd
+                
+            # Record the stable focus change
             try:
                 get_mru_manager().record(hwnd)
                 

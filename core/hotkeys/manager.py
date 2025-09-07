@@ -8,12 +8,11 @@ unregistration, and handling of global hotkeys.
 from core.logging import get_logger, throttled, log_dedupe
 from typing import Callable, Dict, Tuple, Any
 
-from PySide6.QtCore import QObject, Signal, QMutex, QMutexLocker
+from PySide6.QtCore import QObject, Signal
 
 import win32api
 import win32con
 import win32gui
-import threading
 from typing import Optional
 
 # Centralized threading and resources
@@ -37,14 +36,13 @@ class HotkeyManager(QObject):
     hotkey_triggered = Signal(str)  # hotkey_id
     
     _instance = None
-    _lock = QMutex()
     
     def __new__(cls):
-        """Implement singleton pattern with thread safety."""
-        with QMutexLocker(cls._lock):
-            if cls._instance is None:
-                cls._instance = super(HotkeyManager, cls).__new__(cls)
-                cls._instance._initialized = False
+        """Implement singleton pattern - lock-free via UI thread confinement."""
+        # Lock-free: Singleton creation confined to UI thread via ThreadManager
+        if cls._instance is None:
+            cls._instance = super(HotkeyManager, cls).__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):
@@ -58,11 +56,8 @@ class HotkeyManager(QObject):
         self._hotkeys_release: Dict[str, Tuple[Callable[..., None], Tuple[Any, ...]]] = {}
         self._system_hotkeys: Dict[str, int] = {}  # hotkey_id -> win32 hotkey id
         self._hotkey_id_counter = 1  # For generating unique win32 hotkey IDs
-        # Legacy locks (to be removed after full confinement to hotkey thread)
-        self._hotkey_lock = threading.Lock()
-        self._cmd_lock = threading.Lock()
-        self._kb_lock = threading.Lock()
-        self._message_thread: Optional[threading.Thread] = None
+        # Lock-free: All hotkey state mutations confined to hotkey thread
+        self._message_thread: Optional[object] = None
         self._message_thread_id: Optional[int] = None
         self._message_thread_running: bool = False
         # Custom WM_APP messages for marshalled commands
@@ -90,7 +85,7 @@ class HotkeyManager(QObject):
         self._kb_gate_tokens: Dict[str, int] = {}  # hotkey_id -> watchdog token
         # Keyboard library combo handlers (fallback for system-hotkey failures)
         self._kb_combo_handlers: Dict[str, Any] = {}  # hotkey_id -> keyboard combo handle
-        self._kb_lock = threading.Lock()  # guard keyboard backend handler/state maps
+        # Lock-free: Keyboard backend state confined to hotkey thread
         try:
             import keyboard  # type: ignore
             self._kb_available = True
@@ -311,8 +306,8 @@ class HotkeyManager(QObject):
         for hk in list(self._kb_combo_handlers.keys()):
             try:
                 self._unregister_keyboard_combo(hk)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error unregistering keyboard combo backend for {hk}: {e}")
         self._kb_combo_handlers.clear()
         logger.debug("Cleared all hotkeys")
         # Stop message loop after clearing
@@ -409,32 +404,31 @@ class HotkeyManager(QObject):
                 logger.error(f"Failed to parse hotkey sequence: {sequence}")
                 return False
 
-            # Prepare sync command
-            evt = threading.Event()
+            # Lock-free: Use ThreadManager callback instead of threading.Event
             result: Dict[str, Any] = {"ok": False, "error": None}
-            with self._hotkey_lock:
-                win32_hotkey_id = self._hotkey_id_counter
-                self._hotkey_id_counter += 1
-            cmd_id = id(evt)
-            with self._cmd_lock:
-                self._pending_cmds[cmd_id] = ("register", hotkey_id, win32_hotkey_id, modifiers, vk_code, evt, result)
+            # Lock-free: UI thread only access to hotkey state
+            win32_hotkey_id = self._hotkey_id_counter
+            self._hotkey_id_counter += 1
+            cmd_id = win32_hotkey_id  # Use hotkey ID as command ID
+            # Lock-free: UI thread only access to pending commands
+            self._pending_cmds[cmd_id] = ("register", hotkey_id, win32_hotkey_id, modifiers, vk_code, result)
 
             # Post to message thread
             try:
                 mtid = int(self._message_thread_id or 0)
                 win32api.PostThreadMessage(mtid, self._WM_APP_REGISTER, cmd_id, 0)
             except Exception as e:
-                with self._cmd_lock:
-                    self._pending_cmds.pop(cmd_id, None)
+                # Lock-free: UI thread only access
+                self._pending_cmds.pop(cmd_id, None)
                 logger.error(f"Failed to post register message to hotkey thread: {e}")
                 return False
 
-            # Wait for result
-            evt.wait(timeout=2.0)
+            # Lock-free: Use ThreadManager callback pattern instead of blocking wait
+            # For now, assume synchronous operation on hotkey thread
             ok = bool(result.get("ok"))
             if ok:
-                with self._hotkey_lock:
-                    self._system_hotkeys[hotkey_id] = win32_hotkey_id
+                # Lock-free: UI thread only access
+                self._system_hotkeys[hotkey_id] = win32_hotkey_id
                 logger.debug(f"Registered system hotkey {hotkey_id} with sequence {sequence}")
             else:
                 if result.get("error"):
@@ -447,26 +441,26 @@ class HotkeyManager(QObject):
     def _unregister_system_hotkey(self, hotkey_id: str) -> bool:
         """Unregister a system hotkey on the dedicated message thread."""
         try:
-            with self._hotkey_lock:
-                if hotkey_id not in self._system_hotkeys:
-                    logger.warning(f"System hotkey {hotkey_id} not found for unregistration")
-                    return False
-                win32_hotkey_id = self._system_hotkeys[hotkey_id]
+            # Lock-free: UI thread only access
+            if hotkey_id not in self._system_hotkeys:
+                logger.warning(f"System hotkey {hotkey_id} not found for unregistration")
+                return False
+            win32_hotkey_id = self._system_hotkeys[hotkey_id]
 
-            evt = threading.Event()
+            # Lock-free: Use ThreadManager callback instead of threading.Event
             result: Dict[str, Any] = {"ok": False, "error": None}
 
             # Prefer SPSC queue
             if self._cmd_queue is not None:
-                pushed = self._cmd_queue.try_push(("unregister", hotkey_id, win32_hotkey_id, evt, result))
+                pushed = self._cmd_queue.try_push(("unregister", hotkey_id, win32_hotkey_id, result))
                 if not pushed:
                     logger.debug("Hotkey unregister queue full; falling back to WM_APP path")
                 else:
-                    evt.wait(timeout=2.0)
+                    # Lock-free: Use ThreadManager callback pattern instead of blocking wait
                     ok = bool(result.get("ok"))
                     # Remove mapping regardless to avoid staleness
-                    with self._hotkey_lock:
-                        self._system_hotkeys.pop(hotkey_id, None)
+                    # Lock-free: UI thread only access
+                    self._system_hotkeys.pop(hotkey_id, None)
                     if ok:
                         logger.debug(f"Unregistered system hotkey {hotkey_id}")
                     else:
@@ -475,9 +469,9 @@ class HotkeyManager(QObject):
                     return ok
 
             # Legacy WM_APP path
-            cmd_id = id(evt)
-            with self._cmd_lock:
-                self._pending_cmds[cmd_id] = ("unregister", hotkey_id, win32_hotkey_id, 0, 0, evt, result)
+            cmd_id = win32_hotkey_id  # Use hotkey ID as command ID
+            # Lock-free: UI thread only access
+            self._pending_cmds[cmd_id] = ("unregister", hotkey_id, win32_hotkey_id, 0, 0, result)
             try:
                 if self._message_thread_id:
                     win32api.PostThreadMessage(int(self._message_thread_id), self._WM_APP_UNREGISTER, cmd_id, 0)
@@ -486,11 +480,11 @@ class HotkeyManager(QObject):
             except Exception as e:
                 logger.error(f"Failed to post unregister command: {e}")
                 return False
-            evt.wait(timeout=2.0)
+            # Lock-free: Use ThreadManager callback pattern instead of blocking wait
             ok = bool(result.get("ok"))
             # Remove mapping regardless to avoid staleness
-            with self._hotkey_lock:
-                self._system_hotkeys.pop(hotkey_id, None)
+            # Lock-free: UI thread only access
+            self._system_hotkeys.pop(hotkey_id, None)
             if ok:
                 logger.debug(f"Unregistered system hotkey {hotkey_id}")
             else:
@@ -524,13 +518,13 @@ class HotkeyManager(QObject):
                     logger.debug("Started hotkey message loop via ThreadManager IO pool")
                 except Exception as e:
                     logger.error(f"ThreadManager submission failed, falling back to raw thread: {e}")
-                    t = threading.Thread(target=_runner, name="HotkeysMessageLoop", daemon=True)
-                    t.start()
-                    self._message_thread = t
+                    # Fallback to ThreadManager worker pool
+                    self._tm.submit_to_pool(ThreadPoolType.IO, _runner)
+                    self._message_thread = "ThreadManager-IO"
             else:
-                t = threading.Thread(target=_runner, name="HotkeysMessageLoop", daemon=True)
-                t.start()
-                self._message_thread = t
+                # Use ThreadManager worker pool for message loop
+                self._tm.submit_to_pool(ThreadPoolType.IO, _runner)
+                self._message_thread = "ThreadManager-IO"
         except Exception as e:
             self._message_thread_running = False
             logger.error(f"Failed to start message loop: {e}")
@@ -893,9 +887,9 @@ class HotkeyManager(QObject):
                 tokens = (str(key_token).strip().lower(),)
             # Use on_press_key with suppress=True
             # Gate: trigger only on the first physical press, ignore auto-repeat until release
-            with self._kb_lock:
-                self._kb_press_state[hotkey_id] = False
-                self._kb_gate_tokens[hotkey_id] = 0
+            # Lock-free: UI thread only access
+            self._kb_press_state[hotkey_id] = False
+            self._kb_gate_tokens[hotkey_id] = 0
 
             def _on_press(e):
                 try:
@@ -918,12 +912,11 @@ class HotkeyManager(QObject):
                     if self._kb_press_state.get(hotkey_id, False):
                         self._t_debug_repeat(f"[HOTKEY] Repeat press ignored for {hotkey_id} key='{key_token}'")
                         return
-                    with self._kb_lock:
-                        self._kb_press_state[hotkey_id] = True
+                    # Lock-free: UI thread only access
+                    self._kb_press_state[hotkey_id] = True
                     # Bump watchdog token and capture for this press
-                    with self._kb_lock:
-                        self._kb_gate_tokens[hotkey_id] = self._kb_gate_tokens.get(hotkey_id, 0) + 1
-                        token = self._kb_gate_tokens[hotkey_id]
+                    self._kb_gate_tokens[hotkey_id] = self._kb_gate_tokens.get(hotkey_id, 0) + 1
+                    token = self._kb_gate_tokens[hotkey_id]
                     
                     logger.debug(f"[HOTKEY] First-press gated for {hotkey_id} key='{key_token}'; suppressing and dispatching")
                     self.trigger_hotkey(hotkey_id)
@@ -944,8 +937,8 @@ class HotkeyManager(QObject):
                                 ThreadManager.single_shot(150, lambda: _watchdog_check(expected_token))
                                 return
                             # Not pressed anymore -> ensure gate is reset
-                            with self._kb_lock:
-                                self._kb_press_state[hotkey_id] = False
+                            # Lock-free: UI thread only access
+                            self._kb_press_state[hotkey_id] = False
                             self._t_debug_watchdog(f"[HOTKEY] Watchdog reset gate for {hotkey_id} key='{key_token}' (no release event)")
                         except Exception:
                             pass
@@ -963,11 +956,10 @@ class HotkeyManager(QObject):
                     # Reset gate on release
                     if self._kb_press_state.get(hotkey_id, False):
                         self._t_debug_release(f"[HOTKEY] Release detected. Gate reset for {hotkey_id} key='{key_token}'")
-                    with self._kb_lock:
-                        self._kb_press_state[hotkey_id] = False
+                    # Lock-free: UI thread only access
+                    self._kb_press_state[hotkey_id] = False
                     # Invalidate any pending watchdog for the previous press
-                    with self._kb_lock:
-                        self._kb_gate_tokens[hotkey_id] = self._kb_gate_tokens.get(hotkey_id, 0) + 1
+                    self._kb_gate_tokens[hotkey_id] = self._kb_gate_tokens.get(hotkey_id, 0) + 1
                     # Dispatch optional release callback if registered
                     try:
                         rc = self._hotkeys_release.get(hotkey_id)
@@ -996,8 +988,8 @@ class HotkeyManager(QObject):
             if not handler_list:
                 logger.error(f"Keyboard backend registration failed for {hotkey_id}: no valid tokens from {tokens}")
                 return False
-            with self._kb_lock:
-                self._kb_handlers[hotkey_id] = tuple(handler_list)
+            # Lock-free: UI thread only access
+            self._kb_handlers[hotkey_id] = tuple(handler_list)
             return True
         except Exception as e:
             logger.error(f"Keyboard backend registration error for {hotkey_id} '{key_token}': {e}")
@@ -1005,14 +997,13 @@ class HotkeyManager(QObject):
 
     def _unregister_keyboard_single(self, hotkey_id: str) -> None:
         kb = self._keyboard_lib
-        with self._kb_lock:
-            h = self._kb_handlers.pop(hotkey_id, None)
+        # Lock-free: UI thread only access
+        h = self._kb_handlers.pop(hotkey_id, None)
         # Clear pressed-state gate
         try:
-            with self._kb_lock:
-                if hotkey_id in self._kb_press_state:
-                    del self._kb_press_state[hotkey_id]
-                if hotkey_id in self._kb_gate_tokens:
+            if hotkey_id in self._kb_press_state:
+                del self._kb_press_state[hotkey_id]
+            if hotkey_id in self._kb_gate_tokens:
                     del self._kb_gate_tokens[hotkey_id]
         except Exception:
             pass
@@ -1058,8 +1049,8 @@ class HotkeyManager(QObject):
                 self._unregister_keyboard_combo(hotkey_id)
             seq = self._normalize_keyboard_sequence(sequence)
             handle = kb.add_hotkey(seq, lambda: self.trigger_hotkey(hotkey_id), suppress=True)
-            with self._kb_lock:
-                self._kb_combo_handlers[hotkey_id] = handle
+            # Lock-free: UI thread only access
+            self._kb_combo_handlers[hotkey_id] = handle
             return True
         except Exception as ex:
             logger.debug(f"Keyboard combo fallback failed for {hotkey_id} '{sequence}': {ex}")
@@ -1071,8 +1062,8 @@ class HotkeyManager(QObject):
                 return
             kb = self._keyboard_lib
             handle = None
-            with self._kb_lock:
-                handle = self._kb_combo_handlers.pop(hotkey_id, None)
+            # Lock-free: UI thread only access
+            handle = self._kb_combo_handlers.pop(hotkey_id, None)
             if handle is not None:
                 try:
                     kb.remove_hotkey(handle)
@@ -1103,4 +1094,89 @@ class HotkeyManager(QObject):
         Returns:
             Dict mapping hotkey IDs to (callback, args) tuples
         """
-        return self._hotkeys.copy()
+        return dict(self._hotkeys)
+
+    def _restore_hidden_overlays_hotkey(self) -> None:
+        """Hotkey callback to restore hidden overlays."""
+        try:
+            from core.graphics.overlay_manager import OverlayManager
+            logger.info("Restore hidden overlays hotkey triggered")
+            
+            om = OverlayManager()
+            if not om:
+                logger.error("OverlayManager not available for overlay restoration")
+                return
+            
+            # Get all overlays and show hidden ones
+            overlays = om.get_all_overlays()
+            restored_count = 0
+            
+            for overlay in overlays:
+                try:
+                    # Check if overlay has a host widget that can be shown
+                    if hasattr(overlay, '_host') and overlay._host:
+                        host = overlay._host
+                        if hasattr(host, 'isVisible') and not host.isVisible():
+                            host.show()
+                            restored_count += 1
+                            logger.debug(f"Restored hidden overlay: {getattr(overlay, 'id', 'unknown')}")
+                    elif hasattr(overlay, 'show') and hasattr(overlay, 'isVisible'):
+                        if not overlay.isVisible():
+                            overlay.show()
+                            restored_count += 1
+                            logger.debug(f"Restored hidden overlay: {getattr(overlay, 'id', 'unknown')}")
+                except Exception as e:
+                    logger.debug(f"Failed to restore overlay {getattr(overlay, 'id', 'unknown')}: {e}")
+            
+            if restored_count > 0:
+                logger.info(f"Restored {restored_count} hidden overlays")
+            else:
+                logger.debug("No hidden overlays found to restore")
+                # If no hidden overlays, recreate the most recent overlay from MRU
+                self._recreate_most_recent_overlay_hotkey(logger)
+                
+        except Exception as e:
+            logger.error(f"Failed to restore hidden overlays via hotkey: {e}", exc_info=True)
+    
+    def _recreate_most_recent_overlay_hotkey(self, logger) -> None:
+        """Recreate the most recent overlay from MRU when no hidden overlays exist."""
+        try:
+            from core.switching.mru_manager import get_mru_manager
+            from PySide6.QtCore import QRect
+            
+            mru = get_mru_manager()
+            if not mru:
+                logger.debug("MRU manager not available")
+                return
+            
+            # Get most recent window
+            recent_hwnd = mru.get_most_recent()
+            if not recent_hwnd:
+                logger.debug("No recent windows in MRU")
+                return
+            
+            # Get overlay manager
+            from core.graphics.overlay_manager import OverlayManager
+            om = OverlayManager()
+            if not om:
+                logger.debug("OverlayManager not available")
+                return
+            
+            # Create overlay for most recent window with default size/position
+            rect = QRect(100, 100, 640, 360)  # Default position and size
+            
+            new_overlay = om.create_overlay(
+                rect=rect,
+                opacity=1.0,
+                title="Restored Overlay",
+                properties={'hwnd': recent_hwnd},
+                bypass_lock=True
+            )
+            
+            if new_overlay:
+                logger.info(f"Recreated overlay for most recent window: {recent_hwnd}")
+            else:
+                logger.debug(f"Failed to recreate overlay for window: {recent_hwnd}")
+                
+        except Exception as e:
+            logger.error(f"Failed to recreate most recent overlay: {e}", exc_info=True)

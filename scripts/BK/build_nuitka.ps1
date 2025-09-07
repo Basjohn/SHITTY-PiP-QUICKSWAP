@@ -233,14 +233,6 @@ if (!(Test-Path $WorkOut)) {
     New-Item -ItemType Directory -Path $WorkOut -Force | Out-Null
 }
 
-# Auto-versioning (reduce AV false positives by changing PE hash per build)
-$verMajor = 1
-$verMinor = [int](Get-Date -Format 'yy')
-$verPatch = [int](Get-Date -Format 'MMdd')
-$verBuild = [int](Get-Date -Format 'HHmm')
-$FileVersion = "$verMajor.$verMinor.$verPatch.$verBuild"
-$ProductVersion = $FileVersion
-
 $nuArgs = @(
     '-m', 'nuitka',
     '--standalone',
@@ -249,32 +241,25 @@ $nuArgs = @(
     '--nofollow-import-to=pytest',
     '--nofollow-import-to=tests',
     "--output-dir=$WorkOut",
-    '--output-filename=SPQCoreApp.exe',
-    '--windows-company-name="SPQ Development"',
-    '--windows-product-name="SPQ Screen Capture"',
-    "--windows-file-version=$FileVersion",
-    "--windows-product-version=$ProductVersion",
-    '--windows-file-description="SPQ Screen Capture Application"'
+    '--output-filename=SPQ_core.exe'
 )
 
 # Console mode selection
 if ($Console) {
-    $nuArgs += @('--windows-console-mode=attach')
+    $nuArgs += '--windows-console-mode=attach'
     Write-Info "Building with console output enabled"
 } else {
-    $nuArgs += @('--windows-console-mode=disable')
+    $nuArgs += '--windows-console-mode=disable'
     Write-Info "Building without console window"
 }
 
 # Add icon if available
 if (Test-Path $IconPath) { 
-    $nuArgs += @("--windows-icon-from-ico=$IconPath")
+    $nuArgs += "--windows-icon-from-ico=$IconPath" 
     Write-Info "Using icon: ${IconPath}"
 }
 
-# Specify main module explicitly to avoid positional parsing issues
-$MainPy = (Join-Path $ProjectRoot 'main.py')
-$nuArgs += @("--main=$MainPy")
+$nuArgs += (Join-Path $ProjectRoot 'main.py')
 
 Write-Info "Nuitka command: ${PythonExe} $($nuArgs -join ' ')"
 
@@ -327,7 +312,7 @@ Write-Info "Locating Nuitka output in ${WorkOut}..."
 $distCandidates = @()
 if (Test-Path $WorkOut) {
     $distCandidates = @(Get-ChildItem -Directory -Path $WorkOut -Filter '*.dist' -ErrorAction SilentlyContinue | Where-Object { 
-        Test-Path (Join-Path $_.FullName 'SPQCoreApp.exe') 
+        Test-Path (Join-Path $_.FullName 'SPQ_core.exe') 
     })
     Write-Info "Found $($distCandidates.Count) dist directories: $(( $distCandidates | ForEach-Object Name ) -join ', ')"
 }
@@ -335,7 +320,7 @@ if (Test-Path $WorkOut) {
 # Fallback to common default
 if ($distCandidates.Count -eq 0) {
     $fallback = Join-Path $WorkOut 'main.dist'
-    if (Test-Path $fallback -and (Test-Path (Join-Path $fallback 'SPQCoreApp.exe'))) {
+    if (Test-Path $fallback -and (Test-Path (Join-Path $fallback 'SPQ_core.exe'))) {
         $distCandidates = @(Get-Item $fallback)
         Write-Info "Using fallback directory: ${fallback}"
     }
@@ -343,7 +328,7 @@ if ($distCandidates.Count -eq 0) {
 
 if ($distCandidates.Count -eq 0) {
     Write-Err "Nuitka output not found!"
-    Write-Err "Expected: *.dist directory containing SPQCoreApp.exe under ${WorkOut}"
+    Write-Err "Expected: *.dist directory containing SPQ_core.exe under ${WorkOut}"
     
     # Debug info
     if (Test-Path $WorkOut) {
@@ -386,15 +371,15 @@ try {
 }
 
 # Validate staging
-$StagedCore = Join-Path $BinDir 'SPQCoreApp.exe'
+$StagedCore = Join-Path $BinDir 'SPQ_core.exe'
 if (-not (Test-Path $StagedCore)) {
-    Write-Err "Staging failed: SPQCoreApp.exe not found at ${StagedCore}"
+    Write-Err "Staging failed: SPQ_core.exe not found at ${StagedCore}"
     if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
     exit 1
 }
 
 $coreSize = [math]::Round((Get-Item $StagedCore).Length / 1MB, 1)
-Write-Info "Staged SPQCoreApp.exe (${coreSize} MB)"
+Write-Info "Staged SPQ_core.exe (${coreSize} MB)"
 
 # Clean up empty directories
 Write-Info 'Cleaning up empty directories...'
@@ -478,7 +463,7 @@ public static class Program
         {
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             string binDir = Path.Combine(baseDir, "data", "bin");
-            string coreExe = Path.Combine(binDir, "SPQCoreApp.exe");
+            string coreExe = Path.Combine(binDir, "SPQ_core.exe");
 
             // Validate core application
             if (!Directory.Exists(binDir) || !File.Exists(coreExe))

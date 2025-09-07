@@ -16,7 +16,6 @@ from __future__ import annotations
 import atexit
 import logging
 import sys
-import threading
 import uuid
 import weakref
 import os
@@ -359,11 +358,12 @@ class ResourceManager:
             resources.sort(key=lambda x: (_group_rank(x), _priority(x), x.created_at))
             self._logger.debug(
                 "Deterministic cleanup order computed: %s",
-                [rid for rid, _ in resources]
+                [ri.resource_id for ri in resources]
             )
 
             self._logger.info(f"Cleaning up {count} resources in deterministic order...")
-            for rid, _ri in resources:
+            for ri in resources:
+                rid = ri.resource_id
                 # Inline unregister to avoid re-entrancy through the queue
                 resource = self._weak_refs.get(rid, lambda: None)()
                 cleanup_handler = self._cleanup_handlers.pop(rid, None)
@@ -1276,39 +1276,12 @@ class ResourceManager:
             result = func()
             self._publish_snapshot()
             return result
-        # Dispatch via ThreadManager if available; else use direct UI invoker
-        done = threading.Event()
-        out: Dict[str, Any] = {"res": None, "err": None}
-        def _call():
-            try:
-                out["res"] = func()
-                try:
-                    self._publish_snapshot()
-                except Exception:
-                    self._logger.debug("snapshot publish failed", exc_info=True)
-            except Exception as e:
-                out["err"] = e
-            finally:
-                try:
-                    done.set()
-                except Exception:
-                    pass
-        try:
-            tm = self._thread_manager if self._tm_ref is None else (self._tm_ref() if self._tm_ref else None)
-            if tm is not None and hasattr(tm, 'run_on_ui_thread'):
-                tm.run_on_ui_thread(_call)
-            else:
-                # Fallback to static dispatcher
-                from core.threading.manager import ThreadManager as _TM
-                _TM.run_on_ui_thread(_call)
-        except Exception:
-            # As a last resort, attempt direct call (should not happen)
-            _call()
-        if not done.wait(timeout):
-            raise TimeoutError("ResourceManager UI mutation timeout")
-        if out["err"] is not None:
-            raise out["err"]
-        return out["res"]
+        
+        # Lock-free: Direct call for now to avoid circular import
+        # TODO: Implement proper ThreadManager integration after circular import resolution
+        result = func()
+        self._publish_snapshot()
+        return result
 
     def _mutation_worker_loop(self) -> None:
         """Deprecated: no-op."""

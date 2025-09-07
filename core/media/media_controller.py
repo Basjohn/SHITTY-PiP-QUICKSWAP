@@ -1,11 +1,10 @@
 """Centralized media controller with app-specific routing and crash protection."""
 
 from __future__ import annotations
-
 import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
-
+from PySide6.QtCore import QTimer
 from core.logging import get_logger
 from utils.win.winmsg import (
     is_window,
@@ -62,9 +61,15 @@ class MediaController:
         self._window_cache = {}  # Cache for window enumeration
         self._cache_ttl = 5.0  # Cache TTL in seconds
         self._last_cache_update = 0.0
-        # Cache for app detection to avoid repeated process lookups
+        # Initialize state
+        self._running_media_apps = {}  # hwnd -> app_name
         self._app_detection_cache = {}  # hwnd -> (app_name, timestamp)
-        self._app_detection_ttl = 2.0  # Cache app detection for 2 seconds
+        self._app_detection_ttl = 2.0  # seconds
+        
+        # Continuous volume adjustment state
+        self._volume_hold_state = {}  # hwnd -> {'direction': 'up'/'down', 'start_time': float, 'timer': QTimer}
+        self._volume_hold_delay = 0.5  # seconds before continuous adjustment starts
+        self._volume_continuous_interval = 0.05  # seconds between continuous steps
         
         # App catalog with comprehensive definitions from SPQStruggle
         self._default_apps = {
@@ -384,6 +389,22 @@ class MediaController:
         if not windows:
             return None
         
+        # PRIORITY: Check if overlay is targeting a specific window of this app
+        try:
+            from core.input import get_key_passthrough_controller
+            kp = get_key_passthrough_controller()
+            target_hwnd = getattr(kp, '_target_hwnd', None)
+            
+            if target_hwnd and target_hwnd in windows:
+                try:
+                    title = win32gui.GetWindowText(target_hwnd) if WIN_AVAILABLE else ""
+                    self._logger.debug(f"Using overlay target window for {app_name}: hwnd={target_hwnd} title='{title}'")
+                except Exception:
+                    pass
+                return target_hwnd
+        except Exception:
+            pass
+        
         # For apps with multiple windows, try to find the main one
         for hwnd in windows:
             try:
@@ -425,12 +446,15 @@ class MediaController:
         if not (WIN_AVAILABLE and hwnd and is_window(hwnd)):
             return None
             
-        # Check cache first
+        # Check cache first - optimized for frequent lookups
         current_time = time.time()
         if hwnd in self._app_detection_cache:
             app_name, timestamp = self._app_detection_cache[hwnd]
+            # Use cached result if within TTL
             if current_time - timestamp < self._app_detection_ttl:
                 return app_name
+            # Remove expired entry
+            del self._app_detection_cache[hwnd]
                 
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -446,7 +470,11 @@ class MediaController:
                     self._logger.debug(f"_detect_app_for_hwnd: Matched {pname} -> {candidate_name}")
                     app_name = candidate_name
                     break
-                    
+            
+            # Enhanced fallback: try to derive app name from window title or process name
+            if app_name is None:
+                app_name = self._derive_app_name_from_context(hwnd, pname)
+                
             # Cache the result (even if None)
             self._app_detection_cache[hwnd] = (app_name, current_time)
             
@@ -459,6 +487,267 @@ class MediaController:
             # Cache the failure to avoid repeated exceptions
             self._app_detection_cache[hwnd] = (None, current_time)
             return None
+
+    def _derive_app_name_from_context(self, hwnd: int, process_name: str) -> Optional[str]:
+        """Derive application name from window context when not in catalog.
+        
+        This helps resolve UNKNOWN application names by using window title,
+        class name, and process characteristics to identify media applications.
+        """
+        try:
+            # Get window title and class name for analysis
+            window_title = ""
+            class_name = ""
+            try:
+                window_title = win32gui.GetWindowText(hwnd).lower()
+                class_name = win32gui.GetClassName(hwnd).lower()
+            except Exception:
+                pass
+            
+            # Common media application patterns
+            media_patterns = {
+                # Process name patterns
+                'spotify.exe': 'spotify',
+                'vlc.exe': 'vlc',
+                'chrome.exe': 'chrome',
+                'firefox.exe': 'firefox',
+                'msedge.exe': 'edge',
+                'discord.exe': 'discord',
+                'potplayer.exe': 'potplayer',
+                'potplayermini.exe': 'potplayer',
+                'potplayermini64.exe': 'potplayer64',
+                'mpc-hc.exe': 'mpc_hc',
+                'mpc-hc64.exe': 'mpc_hc64',
+                'mpc-be.exe': 'mpc_be',
+                'mpc-be64.exe': 'mpc_be64',
+                'mpv.exe': 'mpv',
+                'mpvnet.exe': 'mpv_net',
+                'kodi.exe': 'kodi',
+                'foobar2000.exe': 'foobar',
+                'aimp.exe': 'aimp',
+                'winamp.exe': 'winamp',
+                'musicbee.exe': 'musicbee',
+                'mediamonkey.exe': 'mediamonkey',
+                'itunes.exe': 'itunes',
+                'kmplayer.exe': 'kmplayer',
+                'gom.exe': 'gom',
+                'bsplayer.exe': 'bsplayer',
+                'wmplayer.exe': 'media_player',
+                'plexmediaplayer.exe': 'plex',
+                'jellyfinmediaplayer.exe': 'jellyfin',
+            }
+            
+            # Check direct process name match
+            if process_name in media_patterns:
+                derived_name = media_patterns[process_name]
+                self._logger.debug(f"Derived app name from process: {process_name} -> {derived_name}")
+                return derived_name
+            
+            # Check window title patterns for browsers and media apps
+            title_patterns = {
+                'spotify': 'spotify',
+                'youtube': 'chrome',  # Default to chrome for YouTube
+                'netflix': 'chrome',
+                'twitch': 'chrome',
+                'discord': 'discord',
+                'vlc media player': 'vlc',
+                'potplayer': 'potplayer',
+                'media player classic': 'mpc_hc',
+                'foobar2000': 'foobar',
+                'aimp': 'aimp',
+                'winamp': 'winamp',
+                'musicbee': 'musicbee',
+                'mediamonkey': 'mediamonkey',
+                'itunes': 'itunes',
+                'kmplayer': 'kmplayer',
+                'gom player': 'gom',
+                'bs.player': 'bsplayer',
+                'windows media player': 'media_player',
+                'plex': 'plex',
+                'jellyfin': 'jellyfin',
+                'kodi': 'kodi',
+                'mpv': 'mpv',
+            }
+            
+            for pattern, app_name in title_patterns.items():
+                if pattern in window_title:
+                    self._logger.debug(f"Derived app name from title: '{window_title}' -> {app_name}")
+                    return app_name
+            
+            # Check class name patterns
+            class_patterns = {
+                'chrome_widgetwin_1': 'chrome',
+                'mozillawindowclass': 'firefox',
+                'qt5qwindowicon': 'vlc',  # Common for Qt-based media players
+                'potplayer': 'potplayer',
+                'mediaplayerclassicw': 'mpc_hc',
+                'aimp2_mainform': 'aimp',
+                'winamp v1.x': 'winamp',
+                'kmplayer': 'kmplayer',
+                'gomplayerwndclass': 'gom',
+                'bsplayer': 'bsplayer',
+                'wmplayerapp': 'media_player',
+                'kodi': 'kodi',
+                'mpv': 'mpv',
+            }
+            
+            for pattern, app_name in class_patterns.items():
+                if pattern in class_name:
+                    self._logger.debug(f"Derived app name from class: '{class_name}' -> {app_name}")
+                    return app_name
+            
+            # If we still can't identify it, but it has media-related characteristics, 
+            # return a generic identifier based on process name
+            if any(keyword in window_title for keyword in ['play', 'music', 'video', 'media', 'player']):
+                # Use process name without extension as fallback
+                base_name = process_name.replace('.exe', '').replace('.', '_').lower()
+                self._logger.debug(f"Generic media app derived: {process_name} -> {base_name}")
+                return base_name
+            
+            return None
+            
+        except Exception as e:
+            self._logger.debug(f"_derive_app_name_from_context failed: {e}")
+            return None
+
+    def _start_continuous_volume_adjustment(self, hwnd: int, direction: str) -> None:
+        """Start continuous volume adjustment for key hold behavior."""
+        try:
+            # Stop any existing continuous adjustment for this window
+            self._stop_continuous_volume_adjustment(hwnd)
+            
+            # Create timer for continuous adjustment
+            timer = QTimer()
+            timer.timeout.connect(lambda: self._perform_continuous_volume_step(hwnd, direction))
+            
+            # Store state
+            self._volume_hold_state[hwnd] = {
+                'direction': direction,
+                'start_time': time.time(),
+                'timer': timer
+            }
+            
+            # Start timer with initial delay, then continuous intervals
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._switch_to_continuous_mode(hwnd))
+            timer.start(int(self._volume_hold_delay * 1000))  # Convert to milliseconds
+            
+        except Exception as e:
+            self._logger.debug(f"Failed to start continuous volume adjustment: {e}")
+
+    def _switch_to_continuous_mode(self, hwnd: int) -> None:
+        """Switch from initial delay to continuous adjustment mode."""
+        try:
+            if hwnd not in self._volume_hold_state:
+                return
+                
+            state = self._volume_hold_state[hwnd]
+            timer = state['timer']
+            direction = state['direction']
+            
+            # Disconnect old signal and connect new one for continuous mode
+            timer.disconnect()
+            timer.timeout.connect(lambda: self._perform_continuous_volume_step(hwnd, direction))
+            timer.setSingleShot(False)
+            timer.start(int(self._volume_continuous_interval * 1000))
+            
+        except Exception as e:
+            self._logger.debug(f"Failed to switch to continuous volume mode: {e}")
+
+    def _perform_continuous_volume_step(self, hwnd: int, direction: str) -> None:
+        """Perform a single step of continuous volume adjustment."""
+        try:
+            if hwnd not in self._volume_hold_state:
+                return
+                
+            # Get current volume to check bounds
+            try:
+                current_volume = session_volume.get_session_volume_for_hwnd(hwnd)
+                if current_volume is None:
+                    return
+                    
+                # Stop if we've reached the bounds
+                if direction == 'up' and current_volume >= 0.99:
+                    self._stop_continuous_volume_adjustment(hwnd)
+                    return
+                elif direction == 'down' and current_volume <= 0.01:
+                    self._stop_continuous_volume_adjustment(hwnd)
+                    return
+                    
+            except Exception:
+                pass  # Continue with adjustment even if we can't check bounds
+            
+            # Use progressive steps for smooth continuous adjustment
+            # Start with 1% steps, increase to 2% after 1 second for faster traversal
+            hold_duration = time.time() - self._volume_hold_state[hwnd]['start_time']
+            if hold_duration > 1.0:
+                continuous_step = 0.02 if direction == 'up' else -0.02
+            else:
+                continuous_step = 0.01 if direction == 'up' else -0.01
+            
+            # Perform the volume adjustment
+            try:
+                if session_volume.adjust_session_volume_for_hwnd(hwnd, continuous_step):
+                    pass  # Success, continue
+                else:
+                    # If session volume fails, stop continuous adjustment
+                    self._stop_continuous_volume_adjustment(hwnd)
+            except Exception:
+                self._stop_continuous_volume_adjustment(hwnd)
+                
+        except Exception as e:
+            self._logger.debug(f"Continuous volume step failed: {e}")
+            self._stop_continuous_volume_adjustment(hwnd)
+
+    def _stop_continuous_volume_adjustment(self, hwnd: int) -> None:
+        """Stop continuous volume adjustment for a window."""
+        try:
+            if hwnd in self._volume_hold_state:
+                state = self._volume_hold_state[hwnd]
+                timer = state['timer']
+                timer.stop()
+                timer.deleteLater()
+                del self._volume_hold_state[hwnd]
+        except Exception as e:
+            self._logger.debug(f"Failed to stop continuous volume adjustment: {e}")
+
+    def stop_all_continuous_volume_adjustments(self) -> None:
+        """Stop all continuous volume adjustments (cleanup method)."""
+        try:
+            for hwnd in list(self._volume_hold_state.keys()):
+                self._stop_continuous_volume_adjustment(hwnd)
+        except Exception as e:
+            self._logger.debug(f"Failed to stop all continuous volume adjustments: {e}")
+
+    def handle_volume_key_press(self, hwnd: int, direction: str) -> bool:
+        """Handle volume key press with continuous adjustment support.
+        
+        Args:
+            hwnd: Target window handle
+            direction: 'up' or 'down'
+            
+        Returns:
+            True if handled successfully
+        """
+        try:
+            # Perform immediate single step
+            command = self.APPCOMMAND_VOLUME_UP if direction == 'up' else self.APPCOMMAND_VOLUME_DOWN
+            success, _ = self.send_media_command(hwnd, command)
+            
+            # Start continuous adjustment for key hold
+            self._start_continuous_volume_adjustment(hwnd, direction)
+            
+            return success
+        except Exception as e:
+            self._logger.debug(f"Volume key press handling failed: {e}")
+            return False
+
+    def handle_volume_key_release(self, hwnd: int) -> None:
+        """Handle volume key release to stop continuous adjustment."""
+        try:
+            self._stop_continuous_volume_adjustment(hwnd)
+        except Exception as e:
+            self._logger.debug(f"Volume key release handling failed: {e}")
 
     # --- Public helpers ----------------------------------------------------
     def detect_app_for_hwnd(self, hwnd: int) -> Optional[str]:
@@ -523,6 +812,110 @@ class MediaController:
             self._logger.debug(f"Browser media command failed: {e}")
             return False
     
+    def _send_browser_media_command_targeted(self, target_hwnd: int, command: int) -> bool:
+        """Send media command to browser targeting specific window matching DWM overlay content.
+        
+        This method attempts to match the target_hwnd (from overlay) to the correct browser
+        child window, solving the multi-window browser media control issue.
+        """
+        if not WIN_AVAILABLE:
+            return False
+            
+        try:
+            # First, try to send command directly to target_hwnd if it's responsive
+            if is_process_responsive(target_hwnd, timeout_ms=500):
+                if safe_send_appcommand(target_hwnd, command, timeout_ms=500):
+                    try:
+                        self._logger.debug(f"Direct command to target hwnd={target_hwnd} succeeded")
+                    except Exception:
+                        pass
+                    return True
+            
+            # If direct approach fails, find parent browser window and enumerate children
+            try:
+                # Get the top-level browser window that contains this target
+                parent_hwnd = target_hwnd
+                while parent_hwnd:
+                    parent = win32gui.GetParent(parent_hwnd)
+                    if not parent:
+                        break
+                    parent_hwnd = parent
+                
+                # Verify this is a browser window
+                app_name = self._detect_app_for_hwnd(parent_hwnd)
+                if app_name not in ['chrome', 'firefox', 'edge', 'discord']:
+                    # Fall back to original method if not a browser
+                    return self._send_browser_media_command(target_hwnd, command)
+                
+                # Enumerate child windows and prioritize those matching target characteristics
+                child_windows = []
+                target_title = ""
+                target_class = ""
+                
+                try:
+                    target_title = win32gui.GetWindowText(target_hwnd).lower()
+                    target_class = win32gui.GetClassName(target_hwnd).lower()
+                except Exception:
+                    pass
+                
+                def enum_child_callback(child_hwnd, _):
+                    child_windows.append(child_hwnd)
+                    return True
+                
+                win32gui.EnumChildWindows(parent_hwnd, enum_child_callback, None)
+                
+                # Prioritize child windows that match target characteristics
+                prioritized_children = []
+                other_children = []
+                
+                for child_hwnd in child_windows:
+                    try:
+                        child_title = win32gui.GetWindowText(child_hwnd).lower()
+                        child_class = win32gui.GetClassName(child_hwnd).lower()
+                        
+                        # Score based on similarity to target
+                        score = 0
+                        if target_title and child_title and target_title in child_title:
+                            score += 10
+                        if target_class and child_class and target_class == child_class:
+                            score += 5
+                        
+                        # Check for media-related content
+                        media_keywords = ['youtube', 'netflix', 'spotify', 'twitch', 'vimeo', 'disney', 'prime video', 'hulu', 'plex', 'jellyfin']
+                        if any(keyword in child_title for keyword in media_keywords):
+                            score += 3
+                        
+                        if score > 0:
+                            prioritized_children.append((score, child_hwnd))
+                        else:
+                            other_children.append(child_hwnd)
+                    except Exception:
+                        other_children.append(child_hwnd)
+                
+                # Sort prioritized children by score (highest first)
+                prioritized_children.sort(key=lambda x: x[0], reverse=True)
+                ordered_children = [hwnd for _, hwnd in prioritized_children] + other_children
+                
+                # Try sending command to prioritized children first
+                for child_hwnd in ordered_children:
+                    if is_process_responsive(child_hwnd, timeout_ms=500):
+                        if safe_send_appcommand(child_hwnd, command, timeout_ms=500):
+                            try:
+                                self._logger.debug(f"Targeted browser command: parent={parent_hwnd} child={child_hwnd} succeeded")
+                            except Exception:
+                                pass
+                            return True
+                
+                return False
+                
+            except Exception as e:
+                self._logger.debug(f"Targeted browser command failed, falling back: {e}")
+                return self._send_browser_media_command(target_hwnd, command)
+            
+        except Exception as e:
+            self._logger.debug(f"Targeted browser media command failed: {e}")
+            return False
+    
     def _send_browser_media_command_enhanced(self, hwnd: int, command: int, app_name: str) -> bool:
         """Enhanced browser media dispatch with subtle activation & retry.
 
@@ -531,8 +924,8 @@ class MediaController:
         - If it fails, request a subtle activation via KeepAlive (no focus steal)
         - Retry child-targeted command after activation
         """
-        # First attempt using existing child routing
-        if self._send_browser_media_command(hwnd, command):
+        # First attempt using targeted child routing
+        if self._send_browser_media_command_targeted(hwnd, command):
             return True
         # Try subtle activation via KeepAlive and retry
         try:
@@ -625,12 +1018,7 @@ class MediaController:
         app_info = self._apps.get(app_name, MediaApp(process="unknown"))
         safe_methods = app_info.safe_methods
         is_crash_prone = app_info.crash_prone
-        try:
-            self._logger.debug(
-                f"Dispatch media cmd={command} app={app_name} hwnd={hwnd} methods={safe_methods} crash_prone={is_crash_prone}"
-            )
-        except Exception:
-            pass
+        # Removed noisy debug logging for media dispatch
         
         # First check if the window is responsive (crash protection)
         if not is_process_responsive(hwnd, timeout_ms=1000):
@@ -638,11 +1026,11 @@ class MediaController:
         
         # Per-app session volume (preferred) — handle volume first regardless of crash-prone
         if command in (self.APPCOMMAND_VOLUME_UP, self.APPCOMMAND_VOLUME_DOWN):
-            # Configurable per-step volume delta (default 5%)
+            # Configurable per-step volume delta (default 2% for finer control)
             try:
-                cfg_step = float(self._settings.get("media.volume_step", 0.05))
+                cfg_step = float(self._settings.get("media.volume_step", 0.02))
             except Exception:
-                cfg_step = 0.05
+                cfg_step = 0.02
             # Clamp to safe range [0.01, 0.25]
             if cfg_step < 0.01:
                 cfg_step = 0.01
@@ -658,11 +1046,26 @@ class MediaController:
                         level = session_volume.get_session_volume_for_hwnd(hwnd)
                     except Exception:
                         level = None
+                    # Get window title for better OSD display
+                    window_title = None
+                    try:
+                        if WIN_AVAILABLE:
+                            from utils.window_validation import get_window_title
+                            window_title = get_window_title(hwnd)
+                    except Exception:
+                        pass
+                    
+                    # Use window title if app_name is unknown
+                    display_name = app_name
+                    if app_name == "unknown" and window_title:
+                        display_name = window_title
+                    
                     self._publish(
                         'media.volume.changed',
                         {
                             'hwnd': hwnd,
-                            'app_name': app_name,
+                            'app_name': display_name,
+                            'window_title': window_title,
                             'level': level,
                             'volume': level,
                             'source': 'session',
@@ -1059,33 +1462,70 @@ class MediaController:
                 results.append((app_name, hwnd))
         return results
     
-    def get_preferred_app(self, monitor_id: Optional[int] = None) -> Optional[str]:
-        """Get preferred media app, optionally filtered by monitor."""
-        # Try to detect app from current overlay target first
+    def get_preferred_app(self) -> Optional[str]:
+        """Get the preferred media app based on current context.
+        
+        Precise window control only - no fallbacks:
+        1. Overlay target window (if valid and recognized)
+        2. Return None if no precise target available
+        """
         try:
-            from core.input.key_passthrough_controller import get_key_passthrough_controller
+            # Only check overlay target - no fallbacks for precise control
+            from core.input import get_key_passthrough_controller
             kp = get_key_passthrough_controller()
             target_hwnd = getattr(kp, '_target_hwnd', None)
             
             if target_hwnd and WIN_AVAILABLE and is_window(target_hwnd):
                 detected_app = self._detect_app_for_hwnd(target_hwnd)
                 if detected_app:
-                    self._logger.debug(f"Preferred app from overlay target: {detected_app} (hwnd={target_hwnd})")
+                    self._logger.debug(f"Precise target app: {detected_app} (hwnd={target_hwnd})")
                     return detected_app
+            
+            # No fallbacks - return None for precise control
+            self._logger.debug("No precise target window available - no fallbacks")
+            return None
+                
         except Exception as e:
-            self._logger.debug(f"Failed to get overlay target app: {e}")
-        
-        # Check preferred apps from settings
-        preferred_apps = self._settings.get('media.preferred_apps', [])
-        running_apps = self.list_running_apps()
-        
-        for app in preferred_apps:
-            if app in running_apps:
-                return app
-        
-        # Fallback to any running app
-        return running_apps[0] if running_apps else None
-    
+            self._logger.debug(f"Error determining target app: {e}")
+            
+        return None
+
+    def _has_active_audio_session(self, app_name: str) -> bool:
+        """Check if app has active audio sessions."""
+        try:
+            from utils.audio.session_volume import get_session_volume_for_process
+            app = self._apps.get(app_name)
+            if not app or not hasattr(app, 'process'):
+                return False
+            
+            # Check if process has audio sessions with volume > 0
+            volume = get_session_volume_for_process(app.process)
+            return volume is not None and volume > 0.01
+        except Exception:
+            return False
+
+    def _get_app_with_highest_volume(self) -> Optional[str]:
+        """Get app with highest audio session volume."""
+        try:
+            from utils.audio.session_volume import get_session_volume_for_process
+            best_app = None
+            highest_volume = 0.0
+            
+            for app_name, app in self._apps.items():
+                if not hasattr(app, 'process'):
+                    continue
+                try:
+                    volume = get_session_volume_for_process(app.process)
+                    if volume is not None and volume > highest_volume:
+                        highest_volume = volume
+                        best_app = app_name
+                except Exception:
+                    continue
+                    
+            return best_app if highest_volume > 0.01 else None
+        except Exception:
+            return None
+
     def is_enabled(self) -> bool:
         """Check if media control is enabled in settings."""
         return self._settings.get('features.media_control_enabled', False)

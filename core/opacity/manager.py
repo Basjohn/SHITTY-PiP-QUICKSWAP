@@ -11,7 +11,6 @@ from core.threading import ThreadManager
 from core.hotkeys.manager import HotkeyManager
 from utils.resource_manager import get_resource_manager, ResourceType
 from PySide6.QtCore import QObject, Signal
-import threading
 
 class OpacityManager(QObject):
     """Centralized opacity manager for the application.
@@ -39,14 +38,14 @@ class OpacityManager(QObject):
     increaseKeyReleased = Signal()
     
     _instance = None
-    _lock = threading.Lock()
+    # Lock-free: Singleton creation confined to UI thread
     
     def __new__(cls):
-        """Implement singleton pattern with thread safety."""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(OpacityManager, cls).__new__(cls)
-                cls._instance._initialized = False
+        """Implement singleton pattern with lock-free UI thread confinement."""
+        # Lock-free: UI thread only access for singleton creation
+        if cls._instance is None:
+            cls._instance = super(OpacityManager, cls).__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):

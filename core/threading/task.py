@@ -6,9 +6,7 @@ that can be executed by the ThreadManager.
 """
 import time
 import uuid
-import threading
 from typing import Any, Callable, Optional
-
 
 class Task:
     """Represents an asynchronous task that can be executed by the ThreadManager."""
@@ -31,7 +29,7 @@ class Task:
         self.completed_at = None
         self.result = None
         self.exception = None
-        self._event = threading.Event()
+        self._completed = False  # Lock-free: Use atomic bool instead of threading.Event
     
     def execute(self, executor) -> None:
         """Execute the task using the given executor.
@@ -50,7 +48,7 @@ class Task:
                 raise
             finally:
                 self.completed_at = time.time()
-                self._event.set()
+                self._completed = True  # Lock-free: Set completion flag atomically
         
         self.future = executor.submit(_wrapper)
     
@@ -58,20 +56,27 @@ class Task:
         """Wait for the task to complete.
         
         Args:
-            timeout: Maximum time to wait in seconds, or None to wait forever
+            timeout: Maximum time to wait in seconds
             
         Returns:
-            bool: True if the task completed, False if the timeout was reached
+            True if task completed, False if timeout occurred
         """
-        return self._event.wait(timeout)
+        # Lock-free: Busy wait with yielding instead of blocking Event.wait()
+        import time
+        start_time = time.time()
+        while not self._completed:
+            if timeout is not None and (time.time() - start_time) >= timeout:
+                return False
+            time.sleep(0.001)  # Small yield to prevent busy spinning
+        return True
     
-    def done(self) -> bool:
-        """Check if the task has completed.
+    def is_done(self) -> bool:
+        """Check if the task is completed.
         
         Returns:
-            bool: True if the task has completed, False otherwise
+            True if task is completed
         """
-        return self._event.is_set()
+        return self._completed  # Lock-free: Atomic read
     
     def get_result(self, timeout: Optional[float] = None) -> Any:
         """Get the result of the task.

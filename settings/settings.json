@@ -1,13 +1,13 @@
 {
-    "theme": "dark",
-    "media.volume_step": 0.05,
+    "theme": "light",
+    "media.volume_step": 0.1,
     "media.app_catalog": {},
     "media.wm_command_ids": {},
-    "appearance.opacity": 100,
+    "appearance.opacity": 49,
     "overlay.rounded_borders": true,
     "ui.main_window_geometry": {
-        "x": 1006,
-        "y": 69,
+        "x": 772,
+        "y": 159,
         "width": 700,
         "height": 540,
         "maximized": false
@@ -17,7 +17,7 @@
     "features.autoswitch_enabled": true,
     "features.keypassthrough_enabled": false,
     "features.keypassthrough_blocklist_enabled": true,
-    "features.display_locked_switching": true,
+    "features.display_locked_switching": false,
     "features.media_control_enabled": true,
     "debug.keypassthrough_verbose": true,
     "debug.window_filter_verbose": false,
@@ -29,9 +29,9 @@
     "hotkeys.opacity_quickswitch": "Shift+B",
     "graphics.pipeline": "dxgi",
     "graphics.presentation": "cpu-blit",
-    "behavior.auto_switch": true,
-    "behavior.click_through": false,
+    "behavior.auto_switch": false,
+    "behavior.click_through": true,
     "performance.cache_size": 100,
     "performance.threads": 4,
-    "capture.fps": 144
+    "capture.fps": 165
 }

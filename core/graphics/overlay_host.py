@@ -48,8 +48,7 @@ class OverlayHost(QWidget):
         # Get centralized theme manager
         self._theme_manager = ThemeManager.instance()
 
-        if getattr(config, "click_through", False):
-            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Removed click-through functionality
 
         self.setWindowTitle(getattr(config, "title", "Overlay"))
 
@@ -61,6 +60,7 @@ class OverlayHost(QWidget):
         self.canvas = IntegratedBorderCanvas(self)
         # Ensure QSS background/border are painted on the canvas
         self.canvas.setAttribute(Qt.WA_StyledBackground, True)
+        # Canvas styling setup
         # Intercept context menu events from the canvas so the host owns the menu
         try:
             self.canvas.installEventFilter(self)
@@ -110,6 +110,7 @@ class OverlayHost(QWidget):
         try:
             # Use top-level indicator window prototype to avoid DWM child compositing issues
             self._focus_indicator = FocusIndicatorWindow(self)
+            # Focus indicator setup
             logger = get_logger("OverlayHost")
             logger.debug(f"Created focus indicator: {self._focus_indicator}")
             # Initial attach and position
@@ -526,7 +527,35 @@ class OverlayHost(QWidget):
                     event.accept()
                     return
             
-            # Proceed with quickswitch for left-button double-clicks
+            # Check if overlay is locked - check both global and individual lock states
+            try:
+                from core.graphics.overlay_manager import OverlayManager
+                om = OverlayManager()
+                is_globally_locked = om and om.is_overlay_locked()
+                is_individually_locked = hasattr(self, '_parent_overlay') and self._parent_overlay and getattr(self._parent_overlay, '_is_window_locked', False)
+                
+                if is_globally_locked or is_individually_locked:
+                    logger.info(f"Overlay locked (global={is_globally_locked}, individual={is_individually_locked}) - focusing current window instead of switching")
+                    # Focus the currently captured window without switching
+                    if hasattr(self, '_parent_overlay') and self._parent_overlay:
+                        current_hwnd = getattr(self._parent_overlay, '_captured_hwnd', None)
+                        if current_hwnd:
+                            try:
+                                import win32gui
+                                win32gui.SetForegroundWindow(current_hwnd)
+                                logger.info(f"Focused locked window: {current_hwnd}")
+                                event.accept()
+                                return
+                            except Exception as focus_err:
+                                logger.debug(f"Failed to focus window {current_hwnd}: {focus_err}")
+                    
+                    # If we can't focus the specific window, just accept the event to prevent switching
+                    event.accept()
+                    return
+            except Exception as lock_err:
+                logger.debug(f"Error checking lock state: {lock_err}")
+            
+            # Proceed with quickswitch for left-button double-clicks when not locked
             try:
                 from core.switching.quickswitch_controller import get_quickswitch_controller
                 ctrl = get_quickswitch_controller()
@@ -709,6 +738,8 @@ class OverlayHost(QWidget):
         # On hide, ensure we never leave an overridden cursor active
         try:
             self._reset_cursor_safely()
+            # Hide and cleanup focus indicator
+            self._cleanup_focus_indicator()
             # Safety: release any volume holds on hide
             try:
                 kp = get_key_passthrough_controller()
@@ -733,6 +764,41 @@ class OverlayHost(QWidget):
         except Exception:
             pass
         super().hideEvent(event)
+
+    def _cleanup_focus_indicator(self) -> None:
+        """Clean up focus indicator to prevent it from remaining visible after overlay destruction."""
+        try:
+            if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
+                from core.logging import get_logger
+                logger = get_logger("OverlayHost")
+                logger.info("Cleaning up focus indicator")
+                
+                # Hide immediately
+                self._focus_indicator.hide()
+                
+                # Set focus state to false
+                self._focus_indicator.set_has_focus(False)
+                
+                # Schedule deletion via ThreadManager to avoid Qt lifecycle issues
+                from core.threading import ThreadManager
+                indicator = self._focus_indicator
+                self._focus_indicator = None
+                
+                # Defer deletion to avoid Qt parent-child cleanup conflicts
+                ThreadManager.single_shot(50, lambda: self._safe_delete_indicator(indicator))
+                
+        except Exception as e:
+            from core.logging import get_logger
+            logger = get_logger("OverlayHost")
+            logger.debug(f"Focus indicator cleanup failed: {e}")
+
+    def _safe_delete_indicator(self, indicator) -> None:
+        """Safely delete focus indicator widget."""
+        try:
+            if indicator is not None:
+                indicator.deleteLater()
+        except Exception:
+            pass
 
     # Emit geometryChanged for integrated rendering coordination
     def moveEvent(self, event):
@@ -808,8 +874,5 @@ class OverlayHost(QWidget):
             ThreadManager.run_on_ui_thread(_do_flash)
         except Exception:
             # Fallback: call directly
-            try:
-                if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
-                    self._focus_indicator.flash_block(duration_ms)
-            except Exception:
-                pass
+            if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
+                self._focus_indicator.flash_block(duration_ms)

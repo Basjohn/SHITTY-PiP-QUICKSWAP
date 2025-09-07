@@ -89,8 +89,8 @@ if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force 
 
 $IconPath = Join-Path $ProjectRoot 'resources/ShittyPIP.ico'
 
-# Build Nuitka onefile
-Write-Info 'Starting Nuitka build (single-file)...'
+# Build Nuitka onefile with AV-friendly flags
+Write-Info 'Starting Nuitka build (single-file with AV optimizations)...'
 $nuArgs = @(
     '-m','nuitka',
     '--onefile',
@@ -99,7 +99,15 @@ $nuArgs = @(
     '--nofollow-import-to=pytest',
     '--nofollow-import-to=tests',
     "--output-dir=$DistDir",
-    '--output-filename=SPQ.exe'
+    '--output-filename=SPQ.exe',
+    '--disable-console',
+    '--windows-company-name=SPQModular',
+    '--windows-product-name=SPQ Screen Capture',
+    '--windows-file-version=1.0.0.0',
+    '--windows-product-version=1.0.0',
+    '--windows-file-description=SPQ Screen Capture Application',
+    '--onefile-tempdir-spec={TEMP}/spq_runtime_{PID}',
+    '--disable-ccache'
 )
 if ($BuildDebug) {
     $nuArgs += @('--show-scons','--verbose')

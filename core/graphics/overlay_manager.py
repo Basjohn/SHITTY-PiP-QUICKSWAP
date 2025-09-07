@@ -5,20 +5,25 @@ This module provides an enhanced version of the OverlayManager class with suppor
 - Most Recently Used (MRU) tracking for quick switching
 - Overlay locking to prevent unwanted overlay changes
 - Integrated z-order management via ZOrderManager
-- Centralized lifecycle management for all overlay types
 """
 from __future__ import annotations
 
-import threading
+# Standard library imports
 import time
-from typing import Dict, List, Optional, Any, Callable
+from typing import Any, Callable, Dict, List, Optional
 
+# Third-party imports
 from PySide6.QtCore import QRect
 
+# Local imports - Core
+from core.graphics.backend_manager import BackendManager
+from core.graphics.backends import BackendType
+from core.graphics.overlay import Overlay as OverlayBase
 from core.logging import get_logger
-from .overlay import Overlay as OverlayBase
+from core.threading import ThreadManager
+
+# Local imports - Relative
 from .types import OverlayConfig, OverlayType
-from .backend_manager import BackendManager, BackendType
 
 logger = get_logger(__name__)
 
@@ -57,7 +62,7 @@ class OverlayManager:
         # MRU tracking
         self._mru_overlays: List[str] = []
         self._overlays_locked: bool = False  # Initialize to False - overlays start unlocked
-        self._lock = threading.RLock()
+        # Lock-free implementation - all mutations happen on UI thread via ThreadManager
         
         # Debug overlay lock state
         self._logger.debug(f"OverlayManager initialized with overlays_locked={self._overlays_locked}")
@@ -68,6 +73,24 @@ class OverlayManager:
         # Set via set_app_instance_provider() by the composition root (ApplicationCore)
         self._app_instance_provider: Optional[Callable[[], object]] = None
         
+        # Auto-switch manager for handling window closures
+        self._auto_switch_manager = None
+        
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            from utils.resource_manager import get_resource_manager, ResourceType
+            self._resource_manager = get_resource_manager()
+            self._resource_id = self._resource_manager.register(
+                self,
+                ResourceType.CUSTOM,
+                "OverlayManager singleton",
+                cleanup_handler=lambda obj: obj._cleanup()
+            )
+            self._logger.debug("Registered OverlayManager with ResourceManager")
+        except Exception as e:
+            self._logger.warning(f"Failed to register with ResourceManager: {e}")
+            self._resource_manager = None
+            self._resource_id = None
         
         # Z-order management handled by centralized ZOrderManager
         
@@ -78,6 +101,12 @@ class OverlayManager:
                             ", ".join(b.name for b in available))
         else:
             self._logger.warning("No overlay backends available")
+            
+        # Initialize auto-switch manager
+        self._initialize_auto_switch()
+        
+        # Apply initial auto-switch setting from configuration
+        self._apply_initial_auto_switch_setting()
 
     def set_app_instance_provider(self, provider: Callable[[], object]) -> None:
         """Set the provider used to inject the application instance into overlays.
@@ -85,9 +114,9 @@ class OverlayManager:
         Args:
             provider: A zero-arg callable returning the application instance.
         """
-        with self._lock:
-            self._app_instance_provider = provider
-            self._logger.debug("OverlayManager app_instance provider set")
+        # UI thread operation - no lock needed
+        self._app_instance_provider = provider
+        self._logger.debug("OverlayManager app_instance provider set")
     
     # MRU and Locking Methods
     def update_mru(self, overlay_id: str) -> None:
@@ -96,22 +125,24 @@ class OverlayManager:
         Args:
             overlay_id: The ID of the overlay to update in MRU
         """
-        with self._lock:
-            if self._overlays_locked or overlay_id not in self._overlays:
-                return
-                
-            # Update timestamp
-            self._focus_timestamps[overlay_id] = time.time()
+        # UI thread operation - no lock needed
+        if self._overlays_locked or overlay_id not in self._overlays:
+            return
             
-            # Update MRU list
-            if overlay_id in self._mru_overlays:
-                self._mru_overlays.remove(overlay_id)
-            self._mru_overlays.insert(0, overlay_id)
-            
-            # Trim MRU list if needed
-            if len(self._mru_overlays) > self.MAX_MRU_ITEMS:
-                removed = self._mru_overlays.pop()
-                self._focus_timestamps.pop(removed, None)
+        # Update timestamp
+        self._focus_timestamps[overlay_id] = time.time()
+        
+        # Remove from current position if exists
+        if overlay_id in self._mru_overlays:
+            self._mru_overlays.remove(overlay_id)
+        
+        # Add to front
+        self._mru_overlays.insert(0, overlay_id)
+        
+        # Trim to max size
+        while len(self._mru_overlays) > self.MAX_MRU_ITEMS:
+            removed = self._mru_overlays.pop()
+            self._focus_timestamps.pop(removed, None)
     
     def is_overlay_locked(self) -> bool:
         """Check if overlays are currently locked.
@@ -127,9 +158,12 @@ class OverlayManager:
         Args:
             locked: Whether to lock the overlays
         """
-        with self._lock:
-            self._overlays_locked = locked
-            self._logger.info("Overlay lock %s", "enabled" if locked else "disabled")
+        # UI thread operation - no lock needed
+        self._overlays_locked = locked
+        self._logger.info("Overlay lock %s", "enabled" if locked else "disabled")
+        
+        # Update focus indicator state for all overlays immediately
+        self._update_focus_indicator_lock_state(locked)
     
     def get_mru_overlays(self, limit: int = 0) -> List[OverlayBase]:
         """Get overlays sorted by most recently used.
@@ -140,20 +174,21 @@ class OverlayManager:
         Returns:
             List of overlays sorted by most recently used
         """
-        with self._lock:
-            overlays = [self._overlays[oid] for oid in self._mru_overlays 
-                      if oid in self._overlays]
-            return overlays[:limit] if limit > 0 else overlays
+        # UI thread operation - no lock needed
+        overlays = [self._overlays[oid] for oid in self._mru_overlays 
+                  if oid in self._overlays]
+        return overlays[:limit] if limit > 0 else overlays
     
     # Core Overlay Management Methods
     def create_overlay(self, 
                      rect: Optional[QRect] = None,
-                     overlay_type: Optional[OverlayType] = OverlayType.WINDOW,
-                     title: str = "Overlay",
+                     overlay_type: Optional[OverlayType] = None,
+                     title: str = "",
                      opacity: float = 1.0,
-                     backend: BackendType = BackendType.AUTO,
+                     backend: Optional[BackendType] = None,
                      properties: Optional[Dict[str, Any]] = None,
-                     config: Optional[Any] = None) -> Optional[str]:
+                     config: Optional[Any] = None,
+                     bypass_lock: bool = False) -> Optional[str]:
         """Create a new overlay with the given parameters.
         
         Backward compatibility:
@@ -170,203 +205,208 @@ class OverlayManager:
             backend: Preferred backend to use
             properties: Backend-specific properties
             config: Ignored; accepted for backward compatibility only
+            bypass_lock: If True, bypass overlay lock for system operations
             
         Returns:
             Overlay ID if successful, None otherwise
         """
-        with self._lock:
-            if self._overlays_locked:
-                self._logger.warning("Cannot create overlay: overlays are locked")
-                return None
+        # UI thread operation - no lock needed
+        if self._overlays_locked and not bypass_lock:
+            self._logger.warning("Cannot create overlay: overlays are locked")
+            return None
 
-            # Check if we can reuse the existing overlay when swapping windows
-            reuse_existing = False
-            existing_overlay = None
+        # Check if we can reuse the existing overlay when swapping windows
+        reuse_existing = False
+        existing_overlay = None
+        
+        if self._active_overlay_id is not None:
+            existing_overlay = self._overlays.get(self._active_overlay_id)
             
-            if self._active_overlay_id is not None:
-                existing_overlay = self._overlays.get(self._active_overlay_id)
+            # If current overlay is flagged for recreation, tear it down instead of reusing
+            if existing_overlay is not None and getattr(existing_overlay, "_needs_recreate", False):
+                self._logger.warning(
+                    "Active overlay %s marked _needs_recreate; tearing down for fresh creation",
+                    self._active_overlay_id,
+                )
+                self._remove_overlay_internal(self._active_overlay_id)
+                self._active_overlay_id = None
+                existing_overlay = None
+            
+            # Only reuse for window overlays with the same backend type
+            if (existing_overlay and 
+                overlay_type == OverlayType.WINDOW and 
+                existing_overlay.get_config().overlay_type == OverlayType.WINDOW and
+                backend == existing_overlay.get_backend_type()):
                 
-                # If current overlay is flagged for recreation, tear it down instead of reusing
-                if existing_overlay is not None and getattr(existing_overlay, "_needs_recreate", False):
-                    self._logger.warning(
-                        "Active overlay %s marked _needs_recreate; tearing down for fresh creation",
-                        self._active_overlay_id,
-                    )
+                # Keep the existing overlay and just update its properties
+                self._logger.info("Reusing existing overlay %s for window swap", self._active_overlay_id)
+                reuse_existing = True
+            else:
+                # Different overlay type or backend, destroy the existing one
+                if self._active_overlay_id is not None and existing_overlay is not None:
+                    self._logger.info("Replacing active overlay %s with a new one", self._active_overlay_id)
                     self._remove_overlay_internal(self._active_overlay_id)
                     self._active_overlay_id = None
-                    existing_overlay = None
-                
-                # Only reuse for window overlays with the same backend type
-                if (existing_overlay and 
-                    overlay_type == OverlayType.WINDOW and 
-                    existing_overlay.get_config().overlay_type == OverlayType.WINDOW and
-                    backend == existing_overlay.get_backend_type()):
-                    
-                    # Keep the existing overlay and just update its properties
-                    self._logger.info("Reusing existing overlay %s for window swap", self._active_overlay_id)
-                    reuse_existing = True
-                else:
-                    # Different overlay type or backend, destroy the existing one
-                    if self._active_overlay_id is not None and existing_overlay is not None:
-                        self._logger.info("Replacing active overlay %s with a new one", self._active_overlay_id)
-                        self._remove_overlay_internal(self._active_overlay_id)
-                        self._active_overlay_id = None
 
-            # Normalize defaults for optional args
-            if rect is None:
-                rect = QRect(0, 0, 1, 1)
-            if overlay_type is None:
-                overlay_type = OverlayType.WINDOW
+        # Normalize defaults for optional args
+        if rect is None:
+            rect = QRect(0, 0, 1, 1)
+        if overlay_type is None:
+            overlay_type = OverlayType.WINDOW
 
-            # Create overlay configuration
-            config_obj = OverlayConfig(
-                overlay_type=overlay_type,
-                position=rect.topLeft(),
-                size=rect.size(),
-                opacity=opacity,
-                title=title,
-                properties=properties or {}
-            )
+        # Create overlay configuration
+        config_obj = OverlayConfig(
+            overlay_type=overlay_type,
+            position=rect.topLeft(),
+            size=rect.size(),
+            opacity=opacity,
+            title=title,
+            properties=properties or {}
+        )
+        
+        if reuse_existing and existing_overlay:
+            # Reuse the existing overlay - just update its properties
+            overlay_id = self._active_overlay_id
+            overlay = existing_overlay
             
-            if reuse_existing and existing_overlay:
-                # Reuse the existing overlay - just update its properties
-                overlay_id = self._active_overlay_id
-                overlay = existing_overlay
+            # Update the overlay with new properties
+            try:
+                # Update window/source properties without recreating
+                if 'hwnd' in config_obj.properties and hasattr(overlay, 'update_source'):
+                    self._logger.info("Updating source for overlay %s", overlay_id)
+                    overlay.update_source(config_obj.properties['hwnd'])
                 
-                # Update the overlay with new properties
+                # Update position and size if changed
+                current_config = overlay.get_config()
+                if (current_config.position != config_obj.position or 
+                    current_config.size != config_obj.size):
+                    self._logger.info("Updating geometry for overlay %s", overlay_id)
+                    overlay.set_geometry(rect)
+                
+                # Update opacity if changed
+                if current_config.opacity != config_obj.opacity:
+                    self._logger.info("Updating opacity for overlay %s", overlay_id)
+                    overlay.set_opacity(config_obj.opacity)
+                    
+                # Update title if changed
+                if current_config.title != config_obj.title:
+                    self._logger.info("Updating title for overlay %s", overlay_id)
+                    overlay.set_title(config_obj.title)
+                    
+                # Update MRU
+                self.update_mru(overlay_id)
+                
+                self._logger.info("Reused overlay %s with updated properties", overlay_id)
+                return overlay_id
+            except Exception as e:
+                # If updating fails, fall back to creating a new overlay
+                self._logger.error("Failed to update overlay %s: %s", overlay_id, str(e))
+                self._remove_overlay_internal(overlay_id)
+                self._active_overlay_id = None
+                reuse_existing = False
+        
+        # Create a new overlay if not reusing
+        overlay = self._backend_manager.create_overlay(config_obj, backend)
+        if not overlay:
+            self._logger.error("Failed to create overlay")
+            return None
+        
+        # Inject the application instance into DWM overlays before initialization.
+        # Enables centralized OverlayContextMenu population and strict wiring.
+        try:
+            # Local import to avoid circular dependency at module import time
+            from .backends.dwm.integrated_dwm_backend import IntegratedDWMOverlay as _DWMOverlay
+
+            if isinstance(overlay, _DWMOverlay):
+                # Require overlay attributes for safe switching
+                if not hasattr(overlay, "app_instance"):
+                    self._logger.error("DWMOverlay lacks 'app_instance' attribute; aborting overlay creation")
+                    return None
+                if not hasattr(overlay, "_handle_swap_window"):
+                    self._logger.error("DWMOverlay missing '_handle_swap_window'; aborting overlay creation")
+                    return None
+
+                # Obtain app instance from injected provider (strict, no fallback)
+                if self._app_instance_provider is None:
+                    self._logger.error("No app_instance provider set; cannot create DWM overlay")
+                    return None
                 try:
-                    # Update window/source properties without recreating
-                    if 'hwnd' in config_obj.properties and hasattr(overlay, 'update_source'):
-                        self._logger.info("Updating source for overlay %s", overlay_id)
-                        overlay.update_source(config_obj.properties['hwnd'])
-                    
-                    # Update position and size if changed
-                    current_config = overlay.get_config()
-                    if (current_config.position != config_obj.position or 
-                        current_config.size != config_obj.size):
-                        self._logger.info("Updating geometry for overlay %s", overlay_id)
-                        overlay.set_geometry(rect)
-                    
-                    # Update opacity if changed
-                    if current_config.opacity != config_obj.opacity:
-                        self._logger.info("Updating opacity for overlay %s", overlay_id)
-                        overlay.set_opacity(config_obj.opacity)
-                        
-                    # Update title if changed
-                    if current_config.title != config_obj.title:
-                        self._logger.info("Updating title for overlay %s", overlay_id)
-                        overlay.set_title(config_obj.title)
-                        
-                    # Update MRU
-                    self.update_mru(overlay_id)
-                    
-                    self._logger.info("Reused overlay %s with updated properties", overlay_id)
-                    return overlay_id
-                except Exception as e:
-                    # If updating fails, fall back to creating a new overlay
-                    self._logger.error("Failed to update overlay %s: %s", overlay_id, str(e))
-                    self._remove_overlay_internal(overlay_id)
-                    self._active_overlay_id = None
-                    reuse_existing = False
-            
-            # Create a new overlay if not reusing
-            overlay = self._backend_manager.create_overlay(config_obj, backend)
-            if not overlay:
-                self._logger.error("Failed to create overlay")
-                return None
-            
-            # Inject the application instance into DWM overlays before initialization.
-            # Enables centralized OverlayContextMenu population and strict wiring.
-            try:
-                # Local import to avoid circular dependency at module import time
-                from .backends.dwm.integrated_dwm_backend import IntegratedDWMOverlay as _DWMOverlay
-
-                if isinstance(overlay, _DWMOverlay):
-                    # Require overlay attributes for safe switching
-                    if not hasattr(overlay, "app_instance"):
-                        self._logger.error("DWMOverlay lacks 'app_instance' attribute; aborting overlay creation")
-                        return None
-                    if not hasattr(overlay, "_handle_swap_window"):
-                        self._logger.error("DWMOverlay missing '_handle_swap_window'; aborting overlay creation")
-                        return None
-
-                    # Obtain app instance from injected provider (strict, no fallback)
-                    if self._app_instance_provider is None:
-                        self._logger.error("No app_instance provider set; cannot create DWM overlay")
-                        return None
-                    try:
-                        app_instance = self._app_instance_provider()
-                    except Exception as prov_e:
-                        self._logger.error("app_instance provider failed: %s", prov_e)
-                        return None
-
-                    overlay.app_instance = app_instance
-                    self._logger.debug("Injected app_instance into DWMOverlay for context menu window switching")
-            except Exception as e:
-                # Enforce strict no-fallback policy
-                self._logger.error("Failed to prepare DWMOverlay injection: %s", str(e))
-                return None
-
-            # Ensure window-mode features are lazily initialized when creating window overlays
-            try:
-                if config_obj.overlay_type == OverlayType.WINDOW and self._app_instance_provider is not None:
                     app_instance = self._app_instance_provider()
-                    if hasattr(app_instance, "ensure_window_mode_features"):
-                        app_instance.ensure_window_mode_features()
-                        self._logger.debug("Ensured window-mode features are initialized for window overlay")
-            except Exception as e:
-                # Do not abort overlay creation for lazy-init errors; log and continue
-                self._logger.debug(f"ensure_window_mode_features failed: {e}")
+                except Exception as prov_e:
+                    self._logger.error("app_instance provider failed: %s", prov_e)
+                    return None
 
-            # Generate a unique ID for the overlay
-            overlay_id = overlay.id
-            self._overlays[overlay_id] = overlay
-            
-            # Initialize the overlay
-            if not overlay.initialize():
-                self._logger.error("Failed to initialize overlay %s", overlay_id)
+                overlay.app_instance = app_instance
+                self._logger.debug("Injected app_instance into DWMOverlay for context menu window switching")
+        except Exception as e:
+            # Enforce strict no-fallback policy
+            self._logger.error("Failed to prepare DWMOverlay injection: %s", str(e))
+            return None
+
+        # Ensure window-mode features are lazily initialized when creating window overlays
+        try:
+            if config_obj.overlay_type == OverlayType.WINDOW and self._app_instance_provider is not None:
+                app_instance = self._app_instance_provider()
+                if hasattr(app_instance, "ensure_window_mode_features"):
+                    app_instance.ensure_window_mode_features()
+                    self._logger.debug("Ensured window-mode features are initialized for window overlay")
+        except Exception as e:
+            # Do not abort overlay creation for lazy-init errors; log and continue
+            self._logger.debug(f"ensure_window_mode_features failed: {e}")
+
+        # Generate a unique ID for the overlay
+        overlay_id = overlay.id
+        self._overlays[overlay_id] = overlay
+        
+        # Initialize the overlay
+        if not overlay.initialize():
+            self._logger.error("Failed to initialize overlay %s", overlay_id)
+            self._overlays.pop(overlay_id, None)
+            return None
+        
+        # Add to MRU
+        self.update_mru(overlay_id)
+        
+        # Register for auto-switch monitoring if DWM overlay with hwnd
+        if backend == BackendType.DWM and properties and properties.get("hwnd"):
+            self._register_overlay_window(overlay_id, properties["hwnd"])
+        
+        # Show the overlay first to ensure window handle is stable
+        overlay.show()
+        
+        # Register overlay with ZOrderManager for centralized z-order enforcement
+        try:
+            main_widget = getattr(overlay, "_host", None)
+            if main_widget is None:
+                self._logger.error(f"Cannot register overlay {overlay_id}: missing host widget")
+                try:
+                    overlay.close()
+                except Exception:
+                    pass
                 self._overlays.pop(overlay_id, None)
                 return None
             
-            # Add to MRU
-            self.update_mru(overlay_id)
+            # Defer registration to ensure window handle is stable
+            from core.threading import ThreadManager
             
-            # Show the overlay first to ensure window handle is stable
-            overlay.show()
+            def _register_after_stable():
+                if main_widget.isVisible() and main_widget.winId():
+                    # Register with unified z-order manager
+                    from utils.resource_manager import get_resource_manager
+                    rm = get_resource_manager()
+                    rm.register_overlay(overlay_id, main_widget)
             
-            # Register overlay with ZOrderManager for centralized z-order enforcement
-            try:
-                main_widget = getattr(overlay, "_host", None)
-                if main_widget is None:
-                    self._logger.error(f"Cannot register overlay {overlay_id}: missing host widget")
-                    try:
-                        overlay.close()
-                    except Exception:
-                        pass
-                    self._overlays.pop(overlay_id, None)
-                    return None
-                
-                # Defer registration to ensure window handle is stable
-                from core.threading import ThreadManager
-                
-                def _register_after_stable():
-                    if main_widget.isVisible() and main_widget.winId():
-                        # Register with unified z-order manager
-                        from utils.resource_manager import get_resource_manager
-                        rm = get_resource_manager()
-                        rm.register_overlay(overlay_id, main_widget)
-                
-                # Register after a short delay to ensure window handle stability
-                ThreadManager.single_shot(50, _register_after_stable)
-                
-            except Exception as e:
-                self._logger.error(f"Failed to setup z-order registration for {overlay_id}: {e}")
+            # Register after a short delay to ensure window handle stability
+            ThreadManager.single_shot(50, _register_after_stable)
             
-            # Mark as active
-            self._active_overlay_id = overlay_id
-            
-            self._logger.info("Created overlay %s with backend %s", overlay_id, overlay.__class__.__name__)
-            return overlay_id
+        except Exception as e:
+            self._logger.error(f"Failed to setup z-order registration for {overlay_id}: {e}")
+        
+        # Mark as active
+        self._active_overlay_id = overlay_id
+        
+        self._logger.info("Created overlay %s with backend %s", overlay_id, overlay.__class__.__name__)
+        return overlay_id
     
     def get_overlay(self, overlay_id: str) -> Optional[OverlayBase]:
         """Get an overlay by its ID and update MRU.
@@ -377,11 +417,11 @@ class OverlayManager:
         Returns:
             The overlay, or None if not found
         """
-        with self._lock:
-            overlay = self._overlays.get(overlay_id)
-            if overlay:
-                self.update_mru(overlay_id)
-            return overlay
+        # UI thread operation - no lock needed
+        overlay = self._overlays.get(overlay_id)
+        if overlay:
+            self.update_mru(overlay_id)
+        return overlay
 
     def get_active_overlay(self) -> Optional[OverlayBase]:
         """Return the currently active overlay instance, if any.
@@ -389,26 +429,38 @@ class OverlayManager:
         Thread-safe accessor used by modules needing to interact with the
         active overlay (e.g., UI feedback on input decisions).
         """
-        with self._lock:
-            if self._active_overlay_id is None:
-                return None
-            return self._overlays.get(self._active_overlay_id)
+        # UI thread operation - no lock needed
+        if self._active_overlay_id is None:
+            return None
+        return self._overlays.get(self._active_overlay_id)
     
-    def remove_overlay(self, overlay_id: str) -> bool:
-        """Remove and clean up an overlay.
+    def remove_overlay(self, overlay_id: str, bypass_lock: bool = False) -> bool:
+        """Remove an overlay by ID.
         
         Args:
             overlay_id: The ID of the overlay to remove
+            bypass_lock: If True, bypass overlay lock for system operations
             
         Returns:
             True if the overlay was removed, False otherwise
         """
-        with self._lock:
-            if self._overlays_locked:
-                self._logger.warning("Cannot remove overlay: overlays are locked")
-                return False
-                
-            return self._remove_overlay_internal(overlay_id)
+        # UI thread operation - no lock needed
+        if self._overlays_locked and not bypass_lock:
+            self._logger.warning("Cannot remove overlay: overlays are locked")
+            return False
+            
+        return self._remove_overlay_internal(overlay_id)
+    
+    def destroy_overlay(self, overlay_id: str) -> bool:
+        """Destroy and clean up an overlay (alias for remove_overlay).
+        
+        Args:
+            overlay_id: The ID of the overlay to destroy
+            
+        Returns:
+            True if the overlay was destroyed, False otherwise
+        """
+        return self.remove_overlay(overlay_id)
 
     def _remove_overlay_internal(self, overlay_id: str) -> bool:
         """Internal helper to remove and clean up an overlay without acquiring the lock twice."""
@@ -420,6 +472,9 @@ class OverlayManager:
         if overlay_id in self._mru_overlays:
             self._mru_overlays.remove(overlay_id)
         self._focus_timestamps.pop(overlay_id, None)
+
+        # Unregister from auto-switch monitoring
+        self._unregister_overlay_window(overlay_id)
 
         try:
 
@@ -451,28 +506,28 @@ class OverlayManager:
 
     def close_active(self) -> None:
         """Close and remove the currently active overlay, if any."""
-        with self._lock:
-            if self._active_overlay_id is not None:
-                self._remove_overlay_internal(self._active_overlay_id)
-                self._active_overlay_id = None
+        # UI thread operation - no lock needed
+        if self._active_overlay_id is not None:
+            self._remove_overlay_internal(self._active_overlay_id)
+            self._active_overlay_id = None
 
     def set_opacity(self, value: float) -> bool:
         """Route opacity updates to the active overlay.
 
         Returns True if an active overlay exists and was updated.
         """
-        with self._lock:
-            if self._active_overlay_id is None:
-                return False
-            overlay = self._overlays.get(self._active_overlay_id)
-            if overlay is None:
-                return False
-            try:
-                overlay.update_config(opacity=value)
-                return True
-            except Exception as e:
-                self._logger.exception("Failed to set opacity on active overlay: %s", str(e))
-                return False
+        # UI thread operation - no lock needed
+        if self._active_overlay_id is None:
+            return False
+        overlay = self._overlays.get(self._active_overlay_id)
+        if overlay is None:
+            return False
+        try:
+            overlay.update_config(opacity=value)
+            return True
+        except Exception as e:
+            self._logger.exception("Failed to set opacity on active overlay: %s", str(e))
+            return False
 
     # Convenience creation helpers (window/monitor paths)
     def create_window_overlay(self, rect: QRect, title: str = "Overlay", opacity: float = 1.0,
@@ -497,6 +552,9 @@ class OverlayManager:
     def update_overlay(self, overlay_id: str, **kwargs) -> bool:
         """Update an overlay's configuration.
         
+        This method must be called from the UI thread to maintain lock-free operation.
+        Cross-thread calls will be automatically dispatched to the UI thread.
+        
         Args:
             overlay_id: The ID of the overlay to update
             **kwargs: Configuration values to update
@@ -504,47 +562,55 @@ class OverlayManager:
         Returns:
             True if the update was successful, False otherwise
         """
-        with self._lock:
-            if self._overlays_locked:
-                self._logger.warning("Cannot update overlay: overlays are locked")
-                return False
+        # Ensure UI thread operation for lock-free design
+        from PySide6.QtCore import QThread, QCoreApplication
+        app = QCoreApplication.instance()
+        if app and QThread.currentThread() != app.thread():
+            # Dispatch to UI thread and return immediately
+            ThreadManager.run_on_ui_thread(self.update_overlay, overlay_id, **kwargs)
+            return True
+        
+        # UI thread operation - no lock needed
+        if self._overlays_locked:
+            self._logger.warning("Cannot update overlay: overlays are locked")
+            return False
+            
+        overlay = self._overlays.get(overlay_id)
+        if overlay is None:
+            return False
+            
+        try:
+            # Update position if provided
+            if 'position' in kwargs:
+                overlay.set_position(kwargs['position'])
                 
-            overlay = self._overlays.get(overlay_id)
-            if overlay is None:
-                return False
+            # Update size if provided
+            if 'size' in kwargs:
+                overlay.set_size(kwargs['size'])
                 
-            try:
-                # Update position if provided
-                if 'position' in kwargs:
-                    overlay.set_position(kwargs['position'])
-                    
-                # Update size if provided
-                if 'size' in kwargs:
-                    overlay.set_size(kwargs['size'])
-                    
-                # Update opacity if provided
-                if 'opacity' in kwargs:
-                    overlay.set_opacity(kwargs['opacity'])
-                    
-                # Update visibility if provided
-                if 'visible' in kwargs:
-                    if kwargs['visible']:
-                        overlay.show()
-                    else:
-                        overlay.hide()
+            # Update opacity if provided
+            if 'opacity' in kwargs:
+                overlay.set_opacity(kwargs['opacity'])
                 
-                # Update MRU if any changes were made
-                if kwargs:
-                    self.update_mru(overlay_id)
+            # Update visibility if provided
+            if 'visible' in kwargs:
+                if kwargs['visible']:
+                    overlay.show()
+                else:
+                    overlay.hide()
+            
+            # Update MRU if any changes were made
+            if kwargs:
+                self.update_mru(overlay_id)
+            
+            self._logger.debug("Updated overlay %s: %s", overlay_id, 
+                             ", ".join(f"{k}={v}" for k, v in kwargs.items()))
+            return True
                 
-                self._logger.debug("Updated overlay %s: %s", overlay_id, 
-                                 ", ".join(f"{k}={v}" for k, v in kwargs.items()))
-                return True
-                
-            except Exception as e:
-                self._logger.exception("Failed to update overlay %s: %s", 
-                                     overlay_id, str(e))
-                return False
+        except Exception as e:
+            self._logger.exception("Failed to update overlay %s: %s", 
+                                 overlay_id, str(e))
+            return False
     
     def get_all_overlays(self) -> List[OverlayBase]:
         """Get all managed overlays.
@@ -552,8 +618,8 @@ class OverlayManager:
         Returns:
             A list of all managed overlays
         """
-        with self._lock:
-            return list(self._overlays.values())
+        # UI thread operation - no lock needed
+        return list(self._overlays.values())
     
     def enforce_z_order(self, overlay_id: str) -> bool:
         """Enforce z-order for the specified overlay using the centralized ZOrderManager.
@@ -564,10 +630,10 @@ class OverlayManager:
         Returns:
             True if successful, False otherwise
         """
-        with self._lock:
-            from utils.resource_manager import get_resource_manager
-            rm = get_resource_manager()
-            return rm.enforce_z_order(overlay_id)
+        # UI thread operation - no lock needed
+        from utils.resource_manager import get_resource_manager
+        rm = get_resource_manager()
+        return rm.enforce_z_order(overlay_id)
     
     def schedule_z_order_enforcement(self, overlay_id: str, delay_ms: int = 0) -> None:
         """Schedule z-order enforcement with optional delay using ThreadManager.
@@ -587,16 +653,125 @@ class OverlayManager:
     
     def clear_all(self) -> None:
         """Remove and clean up all overlays if not locked."""
-        with self._lock:
-            if self._overlays_locked:
-                self._logger.warning("Cannot clear overlays: overlays are locked")
-                return
-                
-            for overlay_id in list(self._overlays.keys()):
-                self.remove_overlay(overlay_id)
+        # UI thread operation - no lock needed
+        if self._overlays_locked:
+            self._logger.warning("Cannot clear overlays: overlays are locked")
+            return
             
-            # Clear MRU and timestamps
+        for overlay_id in list(self._overlays.keys()):
+            self.remove_overlay(overlay_id)
+        
+        # Clear MRU and timestamps
+        self._mru_overlays.clear()
+        self._focus_timestamps.clear()
+        
+        self._logger.info("Cleared all overlays")
+    
+    def _cleanup(self):
+        """Cleanup handler for ResourceManager."""
+        try:
+            # Clear all overlays
+            self.clear_all()
+            # Reset state
+            self._active_overlay_id = None
+            self._overlays_locked = False
             self._mru_overlays.clear()
             self._focus_timestamps.clear()
-            
-            self._logger.info("Cleared all overlays")
+            self._logger.debug("OverlayManager cleanup completed")
+        except Exception as e:
+            self._logger.error(f"Error during OverlayManager cleanup: {e}")
+    
+    def _initialize_auto_switch(self) -> None:
+        """Initialize the auto-switch manager."""
+        try:
+            from .window_monitor import initialize_auto_switch_manager
+            self._auto_switch_manager = initialize_auto_switch_manager(self)
+            self._logger.debug("Auto-switch manager initialized")
+        except Exception as e:
+            self._logger.warning(f"Failed to initialize auto-switch manager: {e}")
+            self._auto_switch_manager = None
+    
+    def set_auto_switch_enabled(self, enabled: bool) -> None:
+        """Enable or disable auto-switching when windows close.
+        
+        Args:
+            enabled: Whether to enable auto-switching
+        """
+        if self._auto_switch_manager:
+            self._auto_switch_manager.set_auto_switch_enabled(enabled)
+            self._logger.info(f"Auto-switch {'enabled' if enabled else 'disabled'}")
+        else:
+            self._logger.warning("Auto-switch manager not available")
+    
+    def _register_overlay_window(self, overlay_id: str, hwnd: int) -> None:
+        """Register an overlay's source window for auto-switch monitoring.
+        
+        Args:
+            overlay_id: ID of the overlay
+            hwnd: Source window handle
+        """
+        if self._auto_switch_manager and hwnd:
+            self._auto_switch_manager.register_overlay_window(overlay_id, hwnd)
+    
+    def _unregister_overlay_window(self, overlay_id: str) -> None:
+        """Unregister an overlay from auto-switch monitoring.
+        
+        Args:
+            overlay_id: ID of the overlay
+        """
+        if self._auto_switch_manager:
+            self._auto_switch_manager.unregister_overlay(overlay_id)
+    
+    def _apply_initial_auto_switch_setting(self) -> None:
+        """Apply the initial auto-switch setting from configuration."""
+        try:
+            from utils.settings_manager import get_settings_manager
+            settings_manager = get_settings_manager()
+            if settings_manager:
+                auto_switch_enabled = bool(settings_manager.get("behavior.auto_switch", True))
+                self.set_auto_switch_enabled(auto_switch_enabled)
+                self._logger.debug(f"Applied initial auto-switch setting: {auto_switch_enabled}")
+        except Exception as e:
+            self._logger.warning(f"Failed to apply initial auto-switch setting: {e}")
+            # Default to enabled if settings unavailable
+            self.set_auto_switch_enabled(True)
+
+    def shutdown(self):
+        """Explicit shutdown method."""
+        # Shutdown auto-switch manager
+        if self._auto_switch_manager:
+            try:
+                from .window_monitor import shutdown_auto_switch_manager
+                shutdown_auto_switch_manager()
+                self._auto_switch_manager = None
+            except Exception as e:
+                self._logger.warning(f"Failed to shutdown auto-switch manager: {e}")
+        
+        if hasattr(self, '_resource_id') and self._resource_id and hasattr(self, '_resource_manager') and self._resource_manager:
+            try:
+                self._resource_manager.unregister(self._resource_id)
+                self._resource_id = None
+            except Exception as e:
+                self._logger.warning(f"Failed to unregister from ResourceManager: {e}")
+        self._cleanup()
+    
+    def _update_focus_indicator_lock_state(self, locked: bool) -> None:
+        """Update focus indicator lock state for all overlays.
+        
+        Args:
+            locked: Whether overlays are locked
+        """
+        try:
+            # Update all overlays, not just active one
+            for overlay_id, overlay in self._overlays.items():
+                if hasattr(overlay, '_overlay_host'):
+                    host = getattr(overlay, '_overlay_host')
+                    if host and hasattr(host, '_focus_indicator'):
+                        indicator = getattr(host, '_focus_indicator')
+                        if indicator and hasattr(indicator, 'set_locked'):
+                            indicator.set_locked(locked)
+                            self._logger.debug(f"Updated focus indicator lock state for overlay {overlay_id}: {locked}")
+        except Exception as e:
+            self._logger.debug(f"Failed to update focus indicator lock state: {e}")
+
+    # Removed click-through functionality - was incompatible with overlay architecture

@@ -5,22 +5,20 @@ This module contains the EventSystem class which implements the IEventSystem
 interface for managing events and callbacks in the application.
 """
 
-import threading
+from typing import Any, Callable, Dict, List, Optional, Union, Type, TypeVar
 import time
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
-
-from core.interfaces import IEventSystem
 from core.logging import get_logger
-from .event_types import Event, EventType, Subscription
+from core.interfaces import IEventSystem
+from core.events.event_types import Event, EventType, Subscription
 from core.threading import ThreadManager
+
+# Type variable for generic event types
+T = TypeVar('T', bound=Event)
 try:
     from core.settings.settings_manager import SettingsManager  # optional
 except Exception:  # pragma: no cover - settings not critical for tracing
     SettingsManager = None  # type: ignore
-
-# Type variables
-T = TypeVar('T', bound=Event)
 
 
 class EventSystem(IEventSystem):
@@ -36,7 +34,7 @@ class EventSystem(IEventSystem):
         """Initialize the event system with empty subscriptions."""
         self._subscriptions: Dict[str, List[Subscription]] = defaultdict(list)
         self._subscription_map: Dict[str, Subscription] = {}
-        self._lock = threading.RLock()
+        # Lock-free: All mutations dispatched to UI thread via ThreadManager
         self._logger = get_logger('EventSystem')
         self._event_history: List[Event] = []
         self._max_history = 1000  # Maximum number of events to keep in history
@@ -49,6 +47,22 @@ class EventSystem(IEventSystem):
         except Exception:
             # Non-fatal; default remains False
             pass
+        
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            from utils.resource_manager import get_resource_manager, ResourceType
+            self._resource_manager = get_resource_manager()
+            self._resource_id = self._resource_manager.register(
+                self,
+                ResourceType.CUSTOM,
+                "EventSystem singleton",
+                cleanup_handler=lambda obj: obj._cleanup()
+            )
+            self._logger.debug("Registered EventSystem with ResourceManager")
+        except Exception as e:
+            self._logger.warning(f"Failed to register with ResourceManager: {e}")
+            self._resource_manager = None
+            self._resource_id = None
     
     def subscribe(
         self, 
@@ -101,13 +115,13 @@ class EventSystem(IEventSystem):
         # Create the subscription
         subscription = Subscription(effective_cb, event_type, priority, filter_fn)
         
-        with self._lock:
-            # Store the subscription
-            self._subscriptions[event_type].append(subscription)
-            self._subscription_map[subscription.id] = subscription
-            
-            # Sort using Subscription.__lt__ to ensure single source of truth for ordering
-            self._subscriptions[event_type].sort()
+        # Lock-free: UI thread only access
+        # Store the subscription
+        self._subscriptions[event_type].append(subscription)
+        self._subscription_map[subscription.id] = subscription
+        
+        # Sort using Subscription.__lt__ to ensure single source of truth for ordering
+        self._subscriptions[event_type].sort()
         
         self._logger.debug(
             "New subscription: id=%s, event_type=%s, priority=%d, callback=%s",
@@ -125,33 +139,33 @@ class EventSystem(IEventSystem):
         Args:
             subscription_id: ID of the subscription to remove
         """
-        with self._lock:
-            subscription = self._subscription_map.pop(subscription_id, None)
-            if subscription is None:
-                self._logger.warning("Unsubscribe called with unknown id: %s", subscription_id)
-                return
+        # Lock-free: UI thread only access
+        subscription = self._subscription_map.pop(subscription_id, None)
+        if subscription is None:
+            self._logger.warning("Unsubscribe called with unknown id: %s", subscription_id)
+            return
+        
+        # Mark as inactive
+        subscription.active = False
+        
+        # Remove from the subscriptions list
+        event_type = subscription.event_type
+        if event_type in self._subscriptions:
+            self._subscriptions[event_type] = [
+                s for s in self._subscriptions[event_type] 
+                if s.id != subscription_id
+            ]
             
-            # Mark as inactive
-            subscription.active = False
-            
-            # Remove from the subscriptions list
-            event_type = subscription.event_type
-            if event_type in self._subscriptions:
-                self._subscriptions[event_type] = [
-                    s for s in self._subscriptions[event_type] 
-                    if s.id != subscription_id
-                ]
-                
-                # Remove the event type if there are no more subscriptions
-                if not self._subscriptions[event_type]:
-                    self._subscriptions.pop(event_type, None)
-            
-            self._logger.debug(
-                "Unsubscribed: id=%s, event_type=%s, callback=%s",
-                subscription_id,
-                event_type,
-                self._format_callback(subscription.callback)
-            )
+            # Remove the event type if there are no more subscriptions
+            if not self._subscriptions[event_type]:
+                self._subscriptions.pop(event_type, None)
+        
+        self._logger.debug(
+            "Unsubscribed: id=%s, event_type=%s, callback=%s",
+            subscription_id,
+            event_type,
+            self._format_callback(subscription.callback)
+        )
     
     def publish(
         self, 
@@ -272,31 +286,31 @@ class EventSystem(IEventSystem):
         if isinstance(event_type, EventType):
             event_type = event_type.value
 
-        event_received = threading.Event()
+        # Lock-free: Use callback-based pattern instead of blocking wait
         result = []
 
         # Fast-path: check recent event history for a matching event to avoid race
-        with self._lock:
-            for evt in reversed(self._event_history):
-                if evt.type == event_type and (condition is None or condition(evt)):
-                    self._logger.debug("wait_for satisfied from history: type=%s", event_type)
-                    return evt
+        # Lock-free: UI thread only access
+        for evt in reversed(self._event_history):
+            if evt.type == event_type and (condition is None or condition(evt)):
+                self._logger.debug("wait_for satisfied from history: type=%s", event_type)
+                return evt
         
         def handler(evt: Event) -> None:
             if condition is None or condition(evt):
                 result.append(evt)
-                event_received.set()
         
         # Subscribe to the event
         sub_id = self.subscribe(event_type, handler)
         
-        try:
-            # Wait for the event with timeout
-            event_received.wait(timeout)
-            return result[0] if result else None
-        finally:
-            # Always clean up the subscription
-            self.unsubscribe(sub_id)
+        # Lock-free: Use ThreadManager timer instead of blocking wait
+        start_time = time.time()
+        while not result and (timeout is None or (time.time() - start_time) < timeout):
+            ThreadManager.process_events(10)  # Process events for 10ms
+        
+        # Always clean up the subscription
+        self.unsubscribe(sub_id)
+        return result[0] if result else None
     
     def get_subscription_count(self, event_type: Optional[Union[str, EventType]] = None) -> int:
         """Get the number of active subscriptions.
@@ -310,16 +324,16 @@ class EventSystem(IEventSystem):
         if event_type is not None and isinstance(event_type, EventType):
             event_type = event_type.value
         
-        with self._lock:
-            if event_type is None:
-                return len(self._subscription_map)
-            return len(self._subscriptions.get(event_type, []))
+        # Lock-free: UI thread only access
+        if event_type is None:
+            return len(self._subscription_map)
+        return len(self._subscriptions.get(event_type, []))
     
     def clear_all_subscriptions(self) -> None:
         """Remove all subscriptions."""
-        with self._lock:
-            self._subscriptions.clear()
-            self._subscription_map.clear()
+        # Lock-free: UI thread only access
+        self._subscriptions.clear()
+        self._subscription_map.clear()
     
     def _get_matching_subscriptions(self, event_type: str) -> List[Subscription]:
         """Get all subscriptions that match the given event type.
@@ -330,27 +344,27 @@ class EventSystem(IEventSystem):
         Returns:
             List of matching subscriptions, sorted by priority
         """
-        with self._lock:
-            # Get direct matches and wildcard matches
-            subscriptions: List[Subscription] = []
+        # Lock-free: UI thread only access
+        # Get direct matches and wildcard matches
+        subscriptions: List[Subscription] = []
+        
+        # Check for direct matches first
+        if event_type in self._subscriptions:
+            subscriptions.extend(self._subscriptions[event_type])
+        
+        # Check for wildcard matches
+        for pattern, subs in self._subscriptions.items():
+            if pattern == event_type:
+                continue  # Already handled above
             
-            # Check for direct matches first
-            if event_type in self._subscriptions:
-                subscriptions.extend(self._subscriptions[event_type])
-            
-            # Check for wildcard matches
-            for pattern, subs in self._subscriptions.items():
-                if pattern == event_type:
-                    continue  # Already handled above
-                
-                # Check if this is a wildcard pattern that matches the event type
-                if '*' in pattern:
-                    if self._pattern_matches(pattern, event_type):
-                        subscriptions.extend(subs)
-            
-            # Sort using Subscription.__lt__ (higher numeric runs earlier; zero last)
-            subscriptions.sort()
-            return subscriptions
+            # Check if this is a wildcard pattern that matches the event type
+            if '*' in pattern:
+                if self._pattern_matches(pattern, event_type):
+                    subscriptions.extend(subs)
+        
+        # Sort using Subscription.__lt__ (higher numeric runs earlier; zero last)
+        subscriptions.sort()
+        return subscriptions
     
     def _pattern_matches(self, pattern: str, event_type: str) -> bool:
         """Check if an event type matches a wildcard pattern."""
@@ -362,10 +376,33 @@ class EventSystem(IEventSystem):
     
     def _add_to_history(self, event: Event) -> None:
         """Add an event to the history, maintaining the maximum size."""
-        with self._lock:
-            self._event_history.append(event)
-            if len(self._event_history) > self._max_history:
-                self._event_history.pop(0)
+        # Lock-free: UI thread only access
+        self._event_history.append(event)
+        if len(self._event_history) > self._max_history:
+            self._event_history.pop(0)
+    
+    def _cleanup(self):
+        """Cleanup handler for ResourceManager."""
+        try:
+            # Clear all subscriptions
+            self._subscriptions.clear()
+            self._subscription_map.clear()
+            # Clear event history
+            self._event_history.clear()
+            self._logger.debug("EventSystem cleanup completed")
+        except Exception as e:
+            self._logger.error(f"Error during EventSystem cleanup: {e}")
+    
+    def shutdown(self):
+        """Explicit shutdown method."""
+        if hasattr(self, '_resource_id') and self._resource_id and hasattr(self, '_resource_manager') and self._resource_manager:
+            try:
+                self._resource_manager.unregister(self._resource_id)
+                self._resource_id = None
+            except Exception as e:
+                self._logger.warning(f"Failed to unregister from ResourceManager: {e}")
+        self._cleanup()
+        self._logger.info(f"Event system shutdown complete. Processed {len(self._event_history)} events total.")
     
     @staticmethod
     def _format_callback(callback: Callable) -> str:

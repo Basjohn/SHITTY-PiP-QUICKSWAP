@@ -7,7 +7,6 @@ QObject and Protocol.
 """
 from __future__ import annotations
 
-import threading
 import weakref
 from typing import Any, Callable, Optional, TypeVar
 
@@ -97,13 +96,13 @@ class WindowManagerAdapter(QObject):
         if self._initialized and self._impl is not None:
             return func(self._impl, *args, **kwargs)
         
-        # Queue the operation for later
+        # Lock-free: Queue operation and use ThreadManager callback instead of threading.Event
         result: Optional[T] = None
         exception: Optional[Exception] = None
-        event = threading.Event()
+        operation_complete = False
         
         def wrapper() -> None:
-            nonlocal result, exception
+            nonlocal result, exception, operation_complete
             try:
                 if self._impl is not None:
                     result = func(self._impl, *args, **kwargs)
@@ -112,16 +111,19 @@ class WindowManagerAdapter(QObject):
             except Exception as e:
                 exception = e
             finally:
-                event.set()
+                operation_complete = True
         
         self._pending_operations.append(wrapper)
-        event.wait()
         
-        if exception is not None:
+        # Lock-free: Busy wait with ThreadManager yielding instead of blocking Event.wait()
+        from core.threading import ThreadManager
+        tm = ThreadManager()
+        while not operation_complete:
+            tm.yield_ui_thread()
+        
+        if exception:
             raise exception
-        
-        # We know result is not None if no exception was raised
-        return result  # type: ignore
+        return result
     
     # IWindowManager implementation
     
