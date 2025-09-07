@@ -759,12 +759,10 @@ class MainDialog(QMainWindow):
         try:
             self.tray_manager = SystemTrayManager(self)
             self.tray_manager.show_main_window_requested.connect(self.show)
-            self.tray_manager.show_settings_requested.connect(self.show)
+            self.tray_manager.show_settings_requested.connect(self._on_tray_show_settings)
             # Route Quit to a full shutdown sequence
             self.tray_manager.quit_requested.connect(self._on_tray_quit)
-            # Connect tray toggles
-            if hasattr(self.tray_manager, 'toggle_click_through_requested'):
-                self.tray_manager.toggle_click_through_requested.connect(self._on_tray_toggle_click_through)
+            # Connect tray toggles (removed click-through)
             if hasattr(self.tray_manager, 'toggle_overlay_lock_requested'):
                 self.tray_manager.toggle_overlay_lock_requested.connect(self._on_tray_toggle_overlay_lock)
             if hasattr(self.tray_manager, 'toggle_auto_switch_requested'):
@@ -779,19 +777,14 @@ class MainDialog(QMainWindow):
             except Exception:
                 pass
 
-            # Sync initial tray labels/states with current settings
-            try:
-                click_through = bool(self.settings_manager.get("behavior.click_through", False))
-                self.tray_manager.set_click_through_state(click_through)
-            except Exception:
-                pass
+            # Sync initial tray labels/states with current settings (removed click-through)
             try:
                 locked = bool(self.overlay_manager.is_overlay_locked())
                 self.tray_manager.set_overlay_lock_state(locked)
             except Exception:
                 pass
             try:
-                auto_switch = bool(self.settings_manager.get("behavior.auto_switch", True))
+                auto_switch = bool(self.settings_manager.get("features.autoswitch_enabled", False))
                 self.tray_manager.set_auto_switch_state(auto_switch)
             except Exception:
                 pass
@@ -823,20 +816,14 @@ class MainDialog(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to quit from tray: {e}")
 
-    def _on_tray_toggle_click_through(self) -> None:
-        """Handle tray request to toggle click-through behavior."""
+    # Removed click-through tray toggle handler
+
+    def _on_tray_show_settings(self) -> None:
+        """Handle tray request to show settings dialog."""
         try:
-            current = bool(self.settings_manager.get("behavior.click_through", False))
-            new_state = not current
-            self.settings_manager.set("behavior.click_through", new_state)
-            # Reflect new state in tray label
-            try:
-                self.tray_manager.set_click_through_state(new_state)
-            except Exception:
-                pass
-            logger.info(f"Tray toggled click-through -> {new_state}")
+            self._show_subsettings_dialog()
         except Exception as e:
-            logger.error(f"Failed to toggle click-through from tray: {e}")
+            logger.error(f"Failed to show settings from tray: {e}")
 
     def _on_tray_toggle_overlay_lock(self) -> None:
         """Handle tray request to toggle overlay lock."""
@@ -856,9 +843,19 @@ class MainDialog(QMainWindow):
     def _on_tray_toggle_auto_switch(self) -> None:
         """Handle tray request to toggle auto-switch setting."""
         try:
-            current = bool(self.settings_manager.get("behavior.auto_switch", True))
+            current = bool(self.settings_manager.get("features.autoswitch_enabled", False))
             new_state = not current
-            self.settings_manager.set("behavior.auto_switch", new_state)
+            self.settings_manager.set("features.autoswitch_enabled", new_state)
+            
+            # Apply to overlay manager
+            try:
+                from core.graphics import get_overlay_manager
+                overlay_manager = get_overlay_manager()
+                if overlay_manager:
+                    overlay_manager.set_auto_switch_enabled(new_state)
+            except Exception as e:
+                logger.error(f"Failed to apply auto-switch setting to overlay manager: {e}")
+            
             # Keep tray checkbox state in sync
             try:
                 self.tray_manager.set_auto_switch_state(new_state)
@@ -1342,17 +1339,17 @@ class MainDialog(QMainWindow):
 
     def _compute_min_size_for_display(self) -> QSize:
         """Compute minimum overlay size honoring current display aspect ratio.
-        Not smaller than 640x360, scaled to preserve AR of the active screen.
+        Not smaller than 427x240, scaled to preserve AR of the active screen.
         """
         screen = self.screen()
         if not screen:
-            return QSize(640, 360)
+            return QSize(427, 240)
         geo = screen.geometry()
         w, h = geo.width(), geo.height()
         if h <= 0:
-            return QSize(640, 360)
+            return QSize(427, 240)
         ar = float(w) / float(h)
-        base_w, base_h = 640, 360
+        base_w, base_h = 427, 240
         # Two candidates preserving AR, at least base size
         cand1 = QSize(max(base_w, int(round(base_h * ar))), base_h)
         cand2 = QSize(base_w, max(base_h, int(round(base_w / ar))))
@@ -1364,7 +1361,7 @@ class MainDialog(QMainWindow):
         """Default top-left rect on current display using computed min size."""
         screen = self.screen()
         if not screen:
-            return QRect(0, 0, 640, 360)
+            return QRect(0, 0, 427, 240)
         geo = screen.geometry()
         size = self._compute_min_size_for_display()
         return QRect(geo.left(), geo.top(), size.width(), size.height())

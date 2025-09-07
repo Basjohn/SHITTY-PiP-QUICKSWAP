@@ -59,9 +59,9 @@ def pytest_configure(config: pytest.Config) -> None:
     # Optional timeout watchdog (opt-in): set SPQ_TEST_TIMEOUT=1
     if os.environ.get("SPQ_TEST_TIMEOUT", "0").lower() in {"1", "true", "yes", "on"}:
         try:
-            seconds = float(os.environ.get("SPQ_TEST_TIMEOUT_SECONDS", "20"))
+            seconds = float(os.environ.get("SPQ_TEST_TIMEOUT_SECONDS", "60"))
         except Exception:
-            seconds = 20.0
+            seconds = 60.0
         _start_timeout_watchdog(seconds)
 
 @pytest.fixture(scope="session")

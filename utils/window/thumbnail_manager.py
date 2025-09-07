@@ -286,17 +286,33 @@ class ThumbnailManager:
             
         try:
             # Constants for DWM composition
+            DWMWA_NCRENDERING_POLICY = 2
             DWMWA_FORCE_ICONIC_REPRESENTATION = 7
             DWMWA_HAS_ICONIC_BITMAP = 10
             DWMWA_DISALLOW_PEEK = 11
+            DWMWA_EXCLUDED_FROM_PEEK = 12
+            DWMWA_CLOAK = 13
+            DWMWA_FREEZE_REPRESENTATION = 15
             
-            # Get thumbnail handle
+            # Non-client rendering policies
+            DWMNCRP_USEWINDOWSTYLE = 0
+            DWMNCRP_DISABLED = 1
+            DWMNCRP_ENABLED = 2
             
             # Apply consistent composition attributes to normalize rendering
             # These settings help ensure consistent rendering across different window types
-            value = ctypes.c_int(0)  # 0 = disabled
             
-            # Ensure we're not using iconic representation (can cause rendering issues)
+            # Force standard non-client rendering (fixes color distortion in system apps)
+            value = ctypes.c_int(DWMNCRP_ENABLED)  # Force DWM rendering
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(hwnd),
+                DWMWA_NCRENDERING_POLICY,
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+            
+            # Disable iconic representation (can cause color distortion)
+            value = ctypes.c_int(0)  # 0 = disabled
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
                 DWMWA_FORCE_ICONIC_REPRESENTATION,
@@ -304,10 +320,18 @@ class ThumbnailManager:
                 ctypes.sizeof(value)
             )
             
-            # Ensure we're not using iconic bitmap (can cause rendering issues)
+            # Disable iconic bitmap (can cause color distortion)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
                 DWMWA_HAS_ICONIC_BITMAP,
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+            
+            # Disable freeze representation (can cause stale/distorted content)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(hwnd),
+                DWMWA_FREEZE_REPRESENTATION,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -317,6 +341,14 @@ class ThumbnailManager:
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
                 DWMWA_DISALLOW_PEEK,
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+            
+            # Exclude from peek (additional protection)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.wintypes.HWND(hwnd),
+                DWMWA_EXCLUDED_FROM_PEEK,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )

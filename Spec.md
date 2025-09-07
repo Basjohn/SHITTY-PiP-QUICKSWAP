@@ -13,6 +13,11 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Hardware-Accelerated Rendering**: DXGI-only capture via dxcam (CPU-copy frames). No WGC. No swapchain presenter.
 - **Multi-Monitor Support**: Full support for multiple monitor configurations with independent settings
 - **DPI Awareness**: Proper handling of high-DPI displays and scaling
+- **Robust Aspect Ratio Management**: 
+  - DWM overlay uses sophisticated client area and window rect fallback logic
+  - Monitor overlay inherits DWM aspect ratio caching for consistent scaling
+  - Bounds checking (0.2-5.0 ratio limits) prevents extreme distortions
+  - DPI-aware thumbnail property scaling for proper rendering
 - **Comprehensive Theming System**: 
   - Support for light/dark themes with custom styling
   - Structured QSS organization for maintainability
@@ -34,6 +39,7 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 
 - **Strict No-Fallback**: Either complete functionality or explicit failure with clear logging; deferred initialization with retries is acceptable
 - **Window Type Handling**: Unknown window types are logged and raise `ValueError`; no fallback to `WindowType.CUSTOM`
+- **Resource Management**: All managers register with ResourceManager using lambda-wrapped cleanup handlers (`cleanup_handler=lambda obj: obj._cleanup()`) for consistent parameter signatures
 - **Debug Logging Policy**: Debug logging disabled by default; enable via `SPQ_DEBUG` environment variable (`1`, `true`, `yes`, or `on`). All debug logs gated behind `utils.debug.debug_enabled`. Frequent logs throttled; `BorderRenderer` employs per-path rate limiting
   - KeyPassthrough verbose decision logs: settings key `debug.keypassthrough_verbose` enables detailed non-media decision logging (target validation, early return reasons, routing results). Default: false.
   - EventSystem dispatch tracing: settings key `debug.events_trace` enables lightweight begin/end trace logs with handler identity, priority, duration, and handled flag. Default: false.
@@ -62,6 +68,10 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 
 ### Architectural Rules (Cross-cutting)
 
+- **Lock-free Concurrency Model**: All utility modules use UI thread confinement for state mutations (completed migration 2024-12-28)
+  - `ZOrderManager`, `CursorManager`, `MouseCaptureCoordinator` - all migrated to lock-free design
+  - Cross-thread calls dispatched via `ThreadManager.run_on_ui_thread()`
+  - No explicit locks (RLock, Lock) in utility modules
 - **No Backwards-Compatibility Layers**: Do not add legacy shims, dual paths, or compatibility wrappers. Remove redundant/legacy code during refactors
 - **No Duplication**: Centralize shared logic (e.g., `ThreadManager`, `ZOrderManager`, `ThemeManager`, `OverlayManager`). Extract shared behavior once and reuse
 - **No Code Bloat**: Prefer standardized interfaces, single sources of truth, and small composable helpers over ad-hoc per-backend logic
@@ -154,11 +164,32 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
   - Both scripts validate tools, stage `data/` (resources/themes), create `settings/` and `logs/`, and write `PORTABLE_README.txt`.
   - Nuitka post-stage cleanup: after staging, the build script removes empty `<portable_root>/data/themes` and `<portable_root>/data/resources` directories to reflect that assets are embedded via Qt resources; non-empty directories are preserved.
 
-#### Settings initialization (first run, portable)
+#### Settings System Architecture (Spec)
+
+**SettingsManager (`core/settings/settings_manager.py`)**
+
+- **Singleton Pattern**: Thread-safe singleton with test isolation support via `_reset_for_testing()` class method
+- **File Location Hierarchy**: Robust fallback system for settings file resolution:
+  1. **Explicit Path**: When provided (for tests), uses exact path without fallback
+  2. **Primary**: `<runtime_root>/settings/settings.json` (portable builds)
+  3. **Fallback**: `<executable_dir>/settings.json` (legacy compatibility)
+  4. **Last Resort**: `~/.spqmodular/settings.json` (user profile)
+- **Comprehensive Defaults**: 25+ logically categorized settings with production-ready defaults:
+  - **UI Settings**: Theme, opacity, DPI scaling, window behavior
+  - **Capture Settings**: FPS (1-165), monitor selection, quality
+  - **Input Settings**: Hotkeys, media control, volume behavior
+  - **Debug Settings**: Logging levels, trace flags, verbose modes
+  - **Feature Flags**: Component enable/disable toggles
+- **Change Notifications**: Qt signal-based change notifications for live updates
+- **Validation**: Strict type checking and range validation with detailed error messages
+- **Test Integration**: Singleton reset capability for test isolation without breaking production usage
+
+#### Settings File Management
 
 - **Resolution**: `SettingsManager._resolve_settings_dir()` targets `<runtime_root>/settings` when `SPQ_PORTABLE=1` is set (by the launcher) or when a sibling `settings/` directory exists next to the executable. Otherwise, it falls back to the user-profile location (see KeyPassthrough spec for the non-portable path reference).
 - **First-run file creation**: After load/migrate/validate, `SettingsManager._ensure_settings_file_exists()` persists the in-memory defaults to `<settings_dir>/settings.json` when the file is missing. Existing files are never overwritten.
 - **Blocklist defaults**: `SettingsManager._ensure_keypassthrough_blocklist_defaults()` ensures `<settings_dir>/keypassthrough_blocklist.txt` exists with conservative defaults on first run. Encoding/format per the KeyPassthrough Blocklist spec. Existing files are never overwritten.
+- **Directory Creation**: Settings directory is automatically created if missing during initialization
 - **Logging**: Creation attempts and outcomes are logged (prefixes: `[SETTINGS]`, `[KEYPASS]`). IO errors are logged; the app continues with in-memory settings and retries on subsequent saves.
 - **Guarantee**: In portable builds, after the first successful run and clean exit, `<runtime_root>/settings/settings.json` and `<runtime_root>/settings/keypassthrough_blocklist.txt` will exist.
 
@@ -250,16 +281,49 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
   - `"quickswitch:seed"` — seeding MRU from z-order when sparse
   - `"quickswitch:dispatch"` — UI-thread focus-change dispatch
   - `"quickswitch:fail"` — deduplicated early-abort reasons
+  - `"quickswitch:cooldown"` — cooldown period and watchdog timer
 - **Behavior**: high-frequency debug emits in `quickswitch()` are throttled (category-specific windows) and repeated failure messages are deduplicated to preserve clarity. Functional behavior is unchanged.
 - **Fallback**: if the helpers are unavailable at runtime, initialization falls back to standard `logger.debug` so logging remains functional (no feature dependency on throttling/deduping).
 - **Gating**: respects the global debug policy (`SPQ_DEBUG`, `utils.debug.debug_enabled`).
 
-#### Event System Dispatch Policy (Spec)
+#### Event System Architecture (Spec)
 
-- The centralized event bus (`core/events/event_system.py#EventSystem`) protects subscription maps and event history using a re-entrant lock (`threading.RLock`).
-- Handlers execute after the lock is released. This prevents contention from long-running callbacks and allows safe subscribe/unsubscribe/publish reentrancy.
-- UI-thread routing is opt-in per subscription. Use `dispatch_on_ui=True` in `subscribe(...)` to route callbacks through `ThreadManager.run_on_ui_thread` for thread-affine UI work.
-- Default behavior keeps publish synchronous on the caller’s thread; prefer `dispatch_on_ui=True` (or an async policy at the call site) for heavy/UI handlers.
+**EventSystem (`core/events/event_system.py`)**
+
+{{ ... }}
+- **Rich Event Objects**: Handlers receive full `Event` objects with comprehensive metadata:
+  - **Event Data**: `.data` property contains the actual event payload
+  - **Metadata**: Event ID, timestamp, source, priority, and lifecycle flags
+  - **Lifecycle Management**: `is_handled` flag for event consumption tracking
+  - **Tracing Support**: Optional dispatch tracing via `debug.events_trace` setting
+- **Thread-Safe Dispatch**: Protects subscription maps and event history using a re-entrant lock (`threading.RLock`)
+- **Lock-Free Handler Execution**: Handlers execute after the lock is released to prevent contention from long-running callbacks and allow safe subscribe/unsubscribe/publish reentrancy
+- **UI-Thread Routing**: Opt-in per subscription via `dispatch_on_ui=True` in `subscribe(...)` to route callbacks through `ThreadManager.run_on_ui_thread` for thread-affine UI work
+- **Priority-Based Dispatch**: Handlers executed in priority order with deterministic tie-breaking
+- **Resource Integration**: Registers with ResourceManager for proper cleanup during shutdown
+- **Event History**: Maintains event history for debugging and replay capabilities
+- **Default Behavior**: Keeps publish synchronous on the caller's thread; prefer `dispatch_on_ui=True` (or an async policy at the call site) for heavy/UI handlers
+
+#### Event Object Structure
+
+```python
+class Event:
+    def __init__(self, event_type: str, data: dict, source: str = None, priority: int = 0):
+        self.id: str = uuid.uuid4().hex
+        self.event_type: str = event_type
+        self.data: dict = data  # Actual event payload
+        self.source: str = source
+        self.priority: int = priority
+        self.timestamp: float = time.time()
+        self.is_handled: bool = False
+```
+
+#### Handler API
+
+- **Handler Signature**: `def handler(event: Event) -> None`
+- **Event Access**: Use `event.data` to access the actual event payload
+- **Metadata Access**: Use `event.timestamp`, `event.source`, etc. for debugging and tracing
+- **Event Consumption**: Set `event.is_handled = True` to mark event as consumed
 
 #### Shutdown Coordination (ThreadManager ⇄ ResourceManager)
 
@@ -386,15 +450,16 @@ Order → A, B, C  (Qt first; within Network/DB, lower priority first; then File
 - Destination rect source of truth: use `IntegratedBorderCanvas.content_rect()` (letter/pillarbox area) mapped through `border_frame()` into host-window coordinates; never use the full canvas rect.
 - DPI/coordinates: perform physical-pixel conversion once at update time using Win32 RECT semantics `(x, y, x + width, y + height)` to avoid off-by-one bleeds. Do not pre-convert tuples passed within the code path; convert only at the final update call.
 - Caching: destination rect is recomputed on each content/geometry change; rapid changes are coalesced via UI-thread scheduling. No `_last_dest_rect_phys` cache is maintained in the current implementation.
- - Content inset only: destination rect integrates an inward content inset equal to the border stroke/bleed budget; this is the sole DWM bleed mitigation. Additionally, `IntegratedBorderCanvas.content_rect()` shrinks by the inner accent inset + thickness (DPI-aware, pixel-snapped) from `BorderTheme` to prevent DWM/content overlap of the inner accent line. No QPainterPath clipping, no backdrop clipping layer, and no enhanced host masking are used.
+ - Content inset only: destination rect integrates an inward content inset equal to the border stroke/bleed budget; this is the sole DWM bleed mitigation. Additionally, `IntegratedBorderCanvas.content_rect()` shrinks by the inner accent inset + thickness (DPI-aware, pixel-snapped) calculated via `AccentCalculator` to prevent DWM/content overlap of the inner accent line. No QPainterPath clipping, no backdrop clipping layer, and no enhanced host masking are used.
 - Minimal host round mask retained: a small QRegion mask is applied to the host window for visual consistency only; it does not clip the DWM thumbnail.
 - Removed legacy methods: `_apply_content_clipping`, `_apply_enhanced_host_mask`, `_apply_minimal_host_mask`, `_ensure_backdrop_clipping_layer`, `_remove_backdrop_clipping_layer`.
 - Integrated border rendering: borders are rendered directly in the canvas component:
   - `IntegratedBorderCanvas`: Unified canvas with direct border rendering
   - `BorderRenderer`: Pure rendering engine for pixel-perfect borders
-  - `BorderGeometry`: DPI-aware metrics calculation with caching
+  - `BorderGeometry`: DPI-aware metrics calculation with caching (main border only)
   - `BorderTheme`: Strict theme integration with fail-fast token validation
-  - Features theme-appropriate colors (always white in dark theme), adaptive thickness scaling, optional inner accent effect
+  - `AccentCalculator`: Unified inner accent calculation system providing single source of truth for thickness, inset, and radius with DPI scaling and coordinate alignment validation
+  - Features theme-appropriate colors (always white in dark theme), adaptive thickness scaling, optional inner accent effect with gap-free rendering
   - Eliminates separate BorderOverlay window and all z-order coordination complexity
 - Initialization race fix: removed duplicate initialization triggers that caused back-to-back initialization and incorrect scaling by using centralized `ThreadManager.single_shot` for all deferred operations.
 - Opacity routing (integrated): the canvas backdrop and DWM thumbnail both use the configured opacity for unified fades, while border strokes remain fully opaque for crisp edges. Window opacity is not manipulated in this path.
@@ -709,6 +774,7 @@ See also: `Index.md` → Graphics & Overlays → "Canonical Border/Clipping/Mask
 
 - Detection uses exact, case-insensitive process name matches.
 - mpv.net: process corrected to `mpvnet.exe` (not `mpv.net.exe`) to ensure detection succeeds.
+- **Multi-Window Targeting**: `_find_window_by_app()` prioritizes overlay target window when multiple instances exist, ensuring media commands target the exact window displayed in the overlay rather than the first found window of that application type.
 - MPC variants (HC/BE 32/64): `safe_methods` include `wm_command` and `hotkeys`.
   - When `media.wm_command_ids.{app}` do not provide IDs, declared `hotkeys` are attempted for play/pause/next/previous/stop.
   - This maintains identical functionality without introducing degraded fallbacks; failures are logged explicitly.
@@ -1159,6 +1225,17 @@ rm.cleanup_all()
 ## Media Control Policy
 
 Media control is managed by `core.media.media_controller.MediaController` with the following policies:
+
+### Enhanced Media Control Features (2025-09-05)
+
+- **Targeted Browser Selection**: `_send_browser_media_command_targeted()` intelligently matches DWM overlay source HWND to the correct browser child window using title/class similarity scoring and media content keyword detection (YouTube, Netflix, Spotify, etc.)
+- **Enhanced Application Detection**: `_derive_app_name_from_context()` resolves UNKNOWN applications through comprehensive fallback logic using process names, window titles, class names, and media characteristics (supports 40+ media applications)
+- **Continuous Volume Control**: Key hold detection enables smooth 0-100% volume ramping via `handle_volume_key_press/release()` methods:
+  - Immediate response: 2% step on key press (configurable via `media.volume_step`)
+  - Continuous ramping: After 0.5s hold, switches to 1% steps every 50ms
+  - Auto-bounds detection: Stops at 0% or 100% volume limits
+  - Key release handling: Stops continuous adjustment instantly
+- **Volume Step Configuration**: Default reduced from 5% to 2% for finer control while maintaining [1%-25%] safety range
 
 1. **Overlay-Aware Routing**: Commands prioritize the app matching the current overlay target hwnd
 2. **App-Specific Routing**: Commands are routed to specific applications based on process detection

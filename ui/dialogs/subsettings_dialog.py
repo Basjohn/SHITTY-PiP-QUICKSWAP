@@ -221,6 +221,8 @@ class SubSettingsDialog(QDialog):
         self.media_control_checkbox.setToolTip("Route media keys (play/pause, next, previous, stop) to active media applications.")
         content_layout.addWidget(self.media_control_checkbox)
 
+        # Removed click-through toggle - incompatible with overlay architecture
+
         # Capture FPS selection
         fps_label = QLabel("Monitor Capture FPS:")
         fps_label.setObjectName("SubSettingsSectionLabel")
@@ -314,6 +316,8 @@ class SubSettingsDialog(QDialog):
         media_control_enabled = bool(self.settings_manager.get("features.media_control_enabled", False))
         self.media_control_checkbox.setChecked(media_control_enabled)
 
+        # Removed click-through setting
+
         # Capture FPS
         try:
             fps_value = int(float(self.settings_manager.get("capture.fps", 30)))
@@ -334,53 +338,64 @@ class SubSettingsDialog(QDialog):
         """Save the current settings."""
         # Theme (persist canonical key only; no aliases/fallbacks)
         theme = self.theme_combo.currentText().lower()
-        self.settings_manager.set("theme", theme)
+        self.settings_manager.set("theme", theme, save_immediately=False)
         logger.debug(f"Saved theme setting: theme='{theme}'")
 
+        # Batch all settings changes without immediate saves, then save once at the end
+        
         # Opacity hotkey settings
         opacity_enabled = self.opacity_hotkeys_checkbox.isChecked()
-        self.settings_manager.set("hotkeys.opacity_enabled", opacity_enabled)
+        self.settings_manager.set("hotkeys.opacity_enabled", opacity_enabled, save_immediately=False)
         logger.debug(f"Saved hotkeys.opacity_enabled={opacity_enabled}")
 
         decrease_key = self.decrease_hotkey_edit.keySequence().toString()
-        self.settings_manager.set("hotkeys.opacity_decrease", decrease_key)
+        self.settings_manager.set("hotkeys.opacity_decrease", decrease_key, save_immediately=False)
         logger.debug(f"Saved hotkeys.opacity_decrease='{decrease_key}'")
 
         increase_key = self.increase_hotkey_edit.keySequence().toString()
-        self.settings_manager.set("hotkeys.opacity_increase", increase_key)
+        self.settings_manager.set("hotkeys.opacity_increase", increase_key, save_immediately=False)
         logger.debug(f"Saved hotkeys.opacity_increase='{increase_key}'")
 
         quickswitch_key = self.quickswitch_hotkey_edit.keySequence().toString()
-        self.settings_manager.set("hotkeys.opacity_quickswitch", quickswitch_key)
+        self.settings_manager.set("hotkeys.opacity_quickswitch", quickswitch_key, save_immediately=False)
         logger.debug(f"Saved hotkeys.opacity_quickswitch='{quickswitch_key}'")
 
         # Quickswitch enable toggle
         quickswitch_enabled = self.quickswitch_checkbox.isChecked()
-        self.settings_manager.set("hotkeys.quickswitch_enabled", quickswitch_enabled)
+        self.settings_manager.set("hotkeys.quickswitch_enabled", quickswitch_enabled, save_immediately=False)
         logger.debug(f"Saved hotkeys.quickswitch_enabled={quickswitch_enabled}")
 
-        # Feature toggles (stubbed)
+        # Feature toggles
         autoswitch_enabled = self.autoswitch_checkbox.isChecked()
-        self.settings_manager.set("features.autoswitch_enabled", autoswitch_enabled)
+        self.settings_manager.set("features.autoswitch_enabled", autoswitch_enabled, save_immediately=False)
         logger.debug(f"Saved features.autoswitch_enabled={autoswitch_enabled}")
+        
         keypassthrough_enabled = self.keypassthrough_checkbox.isChecked()
-        self.settings_manager.set("features.keypassthrough_enabled", keypassthrough_enabled)
+        self.settings_manager.set("features.keypassthrough_enabled", keypassthrough_enabled, save_immediately=False)
         logger.debug(f"Saved features.keypassthrough_enabled={keypassthrough_enabled}")
 
         # Display Locked Switching
         display_locked = self.display_locked_checkbox.isChecked()
-        self.settings_manager.set("features.display_locked_switching", display_locked)
+        self.settings_manager.set("features.display_locked_switching", display_locked, save_immediately=False)
         logger.debug(f"Saved features.display_locked_switching={display_locked}")
 
         # Media control
         media_control_enabled = self.media_control_checkbox.isChecked()
-        self.settings_manager.set("features.media_control_enabled", media_control_enabled)
+        self.settings_manager.set("features.media_control_enabled", media_control_enabled, save_immediately=False)
         logger.debug(f"Saved features.media_control_enabled={media_control_enabled}")
+
+        # Removed click-through setting
 
         # Rounded borders
         rounded_enabled = self.rounded_borders_checkbox.isChecked()
-        self.settings_manager.set("overlay.rounded_borders", rounded_enabled)
+        self.settings_manager.set("overlay.rounded_borders", rounded_enabled, save_immediately=False)
         logger.debug(f"Saved overlay.rounded_borders={rounded_enabled}")
+        
+        # Single batched save at the end
+        self.settings_manager.save()
+        
+        # Apply live changes after settings are persisted
+        # Removed click-through overlay application
 
     
     def _on_theme_changed(self, theme_text):
@@ -388,7 +403,7 @@ class SubSettingsDialog(QDialog):
         theme = self.theme_combo.currentText().lower()
         # Persist canonical key only; no alias mirroring
         self.settings_manager.set("theme", theme)
-        self._save_settings()  # Persist immediately for audit traceability
+        # Theme changes are applied immediately for visual feedback
 
     def _on_rounded_borders_changed(self, state):
         """Handle rounded borders toggle: apply live and persist immediately."""
@@ -507,6 +522,8 @@ class SubSettingsDialog(QDialog):
         self.settings_manager.set("features.media_control_enabled", enabled)
         logger.debug(f"Media control toggled to {enabled}")
 
+    # Removed click-through change handler
+
     def _on_capture_fps_changed(self, text):
         """Handle capture FPS change: persist and apply live via PipelineManager."""
         try:
@@ -534,6 +551,7 @@ class SubSettingsDialog(QDialog):
         self.autoswitch_checkbox.stateChanged.connect(self._on_autoswitch_changed)
         self.keypassthrough_checkbox.stateChanged.connect(self._on_keypassthrough_changed)
         self.media_control_checkbox.stateChanged.connect(self._on_media_control_changed)
+        # Removed click-through signal connection
         self.rounded_borders_checkbox.stateChanged.connect(self._on_rounded_borders_changed)
         self.display_locked_checkbox.stateChanged.connect(self._on_display_locked_switching_changed)
         self.capture_fps_combo.currentTextChanged.connect(self._on_capture_fps_changed)

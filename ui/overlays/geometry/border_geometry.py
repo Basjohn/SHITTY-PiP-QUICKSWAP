@@ -92,21 +92,12 @@ class BorderGeometry:
                 base_radius *= (min_dim / 100.0)
             corner_radius = base_radius * dpi_scale
             
-        # Inner accent for depth effect - scale with main border and overlay size
-        # Scale accent thickness proportionally with overlay size like outer border
+        # Inner accent calculation removed - now handled by unified AccentCalculator
         inner_accent_thickness = 0.0
-        if thickness > 2.0:
-            # Increased accent ratio for better visibility: base 0.6 ratio, allow growth with overlay
-            accent_ratio = 0.6
-            size_scale = min(min_dim / 200.0, 2.5)  # Scale up to 2.5x for large overlays
-            inner_accent_thickness = thickness * accent_ratio * size_scale * dpi_scale
+        accent_inset = 0.0
         
         # Calculate render rectangle (widget bounds)
         widget_rect = QRectF(0, 0, size.width(), size.height())
-        
-        # Accent inset - position accent inside the main border
-        # Scale inset based on border thickness
-        accent_inset = thickness * 0.75 if inner_accent_thickness > 0 else 0.0
         
         metrics = BorderMetrics(
             thickness=thickness,

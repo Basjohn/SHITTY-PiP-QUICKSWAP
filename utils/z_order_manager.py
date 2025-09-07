@@ -5,28 +5,30 @@ Centralizes all z-order enforcement with built-in context menu priority,
 eliminating race conditions between ResourceManager and OverlayContextMenu.
 """
 
+# Standard library imports
 import logging
 import weakref
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Dict, Optional, Set
+
 try:
     from typing import WeakSet
 except ImportError:
     # Python 3.11 doesn't have WeakSet in typing, use weakref
     from weakref import WeakSet
-from enum import Enum, auto
-from dataclasses import dataclass
-from threading import RLock
 
-from PySide6.QtCore import QObject, QCoreApplication
-from PySide6.QtWidgets import QWidget, QMenu
+# Third-party imports
+from PySide6.QtCore import QCoreApplication, QObject
+from PySide6.QtWidgets import QMenu, QWidget
 
+# Windows API imports
 try:
-    from win32gui import SetWindowPos, GetLastError, IsWindow
-    from win32con import HWND_TOPMOST, HWND_TOP, SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE
+    from win32con import HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE
+    from win32gui import GetLastError, IsWindow, SetWindowPos
     IS_WINDOWS = True
 except ImportError:
     IS_WINDOWS = False
-
 
 class ZOrderPriority(Enum):
     """Z-order enforcement priority levels"""
@@ -54,24 +56,53 @@ class ZOrderManager(QObject):
     and providing built-in context menu priority handling.
     """
     
+    _instance: Optional['ZOrderManager'] = None
+    _initialized: bool = False
+    
+    def __new__(cls):
+        """Implement singleton pattern - lock-free via UI thread confinement."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
     def __init__(self):
+        """Initialize the z-order manager - idempotent."""
+        if self._initialized:
+            return
+            
         super().__init__()
         self._logger = logging.getLogger(__name__)
-        self._lock = RLock()
+        # Lock-free design - all operations confined to UI thread
         # Throttled emitters for high-frequency debug lines
         try:
-            from core.logging.logger_impl import throttled, log_dedupe  # lightweight import
+            from core.logging.logger_impl import throttled  # lightweight import
             self._tdebug_reg = throttled(self._logger.debug, "zorder:register", 200)
             self._tdebug_unreg = throttled(self._logger.debug, "zorder:unregister", 200)
             self._tdebug_ctx = throttled(self._logger.debug, "zorder:context", 200)
-            self._tdebug_enf = throttled(self._logger.debug, "zorder:enforce", 200)
-            self._dwarn_native = log_dedupe(self._logger.warning, "zorder:native_warn", 2000)
-        except Exception:
-            # Helpers unavailable early in startup; fall back to direct logger
+            self._tdebug_enf = throttled(self._logger.debug, "zorder:enforce", 500)
+        except ImportError:
+            # Fallback to regular logger if throttled not available
             self._tdebug_reg = self._logger.debug
             self._tdebug_unreg = self._logger.debug
             self._tdebug_ctx = self._logger.debug
             self._tdebug_enf = self._logger.debug
+        
+        # Register with ResourceManager for deterministic cleanup
+        try:
+            from utils.resource_manager import get_resource_manager, ResourceType
+            self._resource_manager = get_resource_manager()
+            self._resource_id = self._resource_manager.register(
+                self,
+                ResourceType.CUSTOM,
+                "ZOrderManager singleton",
+                cleanup_handler=lambda obj: obj._cleanup()
+            )
+            self._logger.debug("Registered ZOrderManager with ResourceManager")
+        except Exception as e:
+            self._logger.warning(f"Failed to register with ResourceManager: {e}")
+            self._resource_manager = None
+            self._resource_id = None
             self._dwarn_native = self._logger.warning
         
         # Registry of overlays
@@ -88,90 +119,116 @@ class ZOrderManager(QObject):
         
         # Lazy-initialized UI coalescer (created when Qt is ready)
         self._coalescer = None
+        
+        self._initialized = True
 
         self._logger.info("ZOrderManager initialized")
     
-    def register_overlay(self, overlay_id: str, main_widget: QWidget, 
-                        border_widget: Optional[QWidget] = None) -> bool:
+    def register_overlay(self, overlay_id: str, main_widget: QWidget, border_widget: Optional[QWidget] = None) -> bool:
         """Register an overlay for z-order management
+        
+        This method must be called from the UI thread to maintain lock-free operation.
         
         Args:
             overlay_id: Unique identifier for the overlay
-            main_widget: Main widget of the overlay (with integrated borders)
-            border_widget: Optional border widget (maintained for backward compatibility)
-                          With integrated borders, this parameter is typically None
-        
+            main_widget: Main overlay widget (required)
+            border_widget: Border widget (optional, for backward compatibility)
+            
         Returns:
             bool: True if registration was successful
         """
-        with self._lock:
-            try:
-                main_ref = weakref.ref(main_widget)
-                # Support legacy border_widget parameter but not required for integrated borders
-                border_ref = weakref.ref(border_widget) if border_widget else None
-                
-                self._overlays[overlay_id] = OverlayInfo(
-                    overlay_id=overlay_id,
-                    main_widget=main_ref,
-                    border_widget=border_ref
-                )
-                
-                self._tdebug_reg(f"Registered overlay {overlay_id} with border={border_widget is not None}")
-                return True
-                
-            except Exception as e:
-                self._logger.error(f"Failed to register overlay {overlay_id}: {e}")
-                return False
-    
-    def unregister_overlay(self, overlay_id: str) -> bool:
-        """Unregister an overlay from z-order management"""
-        with self._lock:
-            if overlay_id in self._overlays:
-                del self._overlays[overlay_id]
-                self._pending_enforcements.discard(overlay_id)
-                
-                # Clear context menu state if this overlay was active
-                if self._context_menu_overlay_id == overlay_id:
-                    self._context_menu_overlay_id = None
-                
-                self._tdebug_unreg(f"Unregistered overlay {overlay_id}")
-                return True
+        # Ensure UI thread operation for lock-free design
+        from PySide6.QtCore import QThread, QCoreApplication
+        app = QCoreApplication.instance()
+        if app and QThread.currentThread() != app.thread():
+            # Dispatch to UI thread
+            from core.threading import ThreadManager
+            ThreadManager.run_on_ui_thread(self.register_overlay, overlay_id, main_widget, border_widget)
+            return True
+        
+        # UI thread operation - no lock needed
+        try:
+            main_ref = weakref.ref(main_widget)
+            # Support legacy border_widget parameter but not required for integrated borders
+            border_ref = weakref.ref(border_widget) if border_widget else None
+            
+            self._overlays[overlay_id] = OverlayInfo(
+                overlay_id=overlay_id,
+                main_widget=main_ref,
+                border_widget=border_ref,
+                is_active=True
+            )
+            
+            self._tdebug_reg(f"Registered overlay {overlay_id} (main: {main_widget}, border: {border_widget})")
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to register overlay {overlay_id}: {e}")
             return False
     
-    def begin_context_menu(self, overlay_id: str, menu: QMenu) -> bool:
-        """
-        Begin context menu display with immediate z-order priority.
+    def unregister_overlay(self, overlay_id: str) -> bool:
+        """Unregister an overlay from z-order management
         
-        This gives the context menu immediate priority over normal z-order enforcement.
+        This method must be called from the UI thread to maintain lock-free operation.
         """
-        with self._lock:
-            if overlay_id not in self._overlays:
-                self._logger.error(f"Cannot begin context menu for unregistered overlay {overlay_id}")
-                return False
+        # Ensure UI thread operation for lock-free design
+        from PySide6.QtCore import QThread, QCoreApplication
+        app = QCoreApplication.instance()
+        if app and QThread.currentThread() != app.thread():
+            # Dispatch to UI thread
+            from core.threading import ThreadManager
+            ThreadManager.run_on_ui_thread(self.unregister_overlay, overlay_id)
+            return True
+        
+        # UI thread operation - no lock needed
+        if overlay_id in self._overlays:
+            del self._overlays[overlay_id]
+            self._pending_enforcements.discard(overlay_id)
             
-            self._context_menu_overlay_id = overlay_id
-            self._active_context_menus.add(menu)
-            
-            # Immediate enforcement with context menu priority
-            success = self._enforce_z_order_immediate(overlay_id, ZOrderPriority.CONTEXT_MENU)
-            
-            self._tdebug_ctx(f"Context menu begun for overlay {overlay_id}, enforcement={success}")
-            return success
-    
-    def end_context_menu(self, overlay_id: str, menu: QMenu) -> bool:
-        """End context menu display and restore normal z-order"""
-        with self._lock:
-            self._active_context_menus.discard(menu)
-            
-            # Only clear context menu state if this was the active overlay
+            # Clear context menu state if this was the active overlay
             if self._context_menu_overlay_id == overlay_id:
                 self._context_menu_overlay_id = None
             
-            # Restore normal z-order
-            success = self._enforce_z_order_immediate(overlay_id, ZOrderPriority.NORMAL)
-            
-            self._tdebug_ctx(f"Context menu ended for overlay {overlay_id}, enforcement={success}")
-            return success
+            self._tdebug_unreg(f"Unregistered overlay {overlay_id}")
+            return True
+        return False
+    
+    def begin_context_menu(self, overlay_id: str, menu: QMenu) -> bool:
+        """Begin context menu display with immediate z-order priority
+        
+        This gives the context menu immediate priority over normal z-order enforcement.
+        Must be called from UI thread.
+        """
+        # UI thread operation - no lock needed
+        if overlay_id not in self._overlays:
+            self._logger.error(f"Cannot begin context menu for unregistered overlay {overlay_id}")
+            return False
+        
+        self._context_menu_overlay_id = overlay_id
+        self._active_context_menus.add(menu)
+        
+        # Immediate enforcement with context menu priority
+        success = self._enforce_z_order_immediate(overlay_id, ZOrderPriority.CONTEXT_MENU)
+        
+        self._tdebug_ctx(f"Context menu begun for overlay {overlay_id}, enforcement={success}")
+        return success
+    
+    def end_context_menu(self, overlay_id: str, menu: QMenu) -> bool:
+        """End context menu display and restore normal z-order
+        
+        Must be called from UI thread.
+        """
+        # UI thread operation - no lock needed
+        self._active_context_menus.discard(menu)
+        
+        # Only clear context menu state if this was the active overlay
+        if self._context_menu_overlay_id == overlay_id:
+            self._context_menu_overlay_id = None
+        
+        # Restore normal z-order
+        success = self._enforce_z_order_immediate(overlay_id, ZOrderPriority.NORMAL)
+        
+        self._tdebug_ctx(f"Context menu ended for overlay {overlay_id}, enforcement={success}")
+        return success
     
     def enforce_z_order(self, overlay_id: str, priority: ZOrderPriority = ZOrderPriority.NORMAL) -> bool:
         """
@@ -179,66 +236,63 @@ class ZOrderManager(QObject):
         
         Context menu priority bypasses debouncing for immediate enforcement.
         """
+        # UI thread operation - no lock needed
+        if overlay_id not in self._overlays:
+            self._logger.warning(f"Cannot enforce z-order for unregistered overlay {overlay_id}")
+            return False
+        
+        # Context menu priority gets immediate enforcement
+        if priority == ZOrderPriority.CONTEXT_MENU:
+            return self._enforce_z_order_immediate(overlay_id, priority)
+        
         used_coalescer = False
-        with self._lock:
-            if overlay_id not in self._overlays:
-                self._logger.warning(f"Cannot enforce z-order for unregistered overlay {overlay_id}")
-                return False
-            
-            # Context menu priority gets immediate enforcement
-            if priority == ZOrderPriority.CONTEXT_MENU:
-                return self._enforce_z_order_immediate(overlay_id, priority)
-            
-            # Normal priority: prefer coalesced enforcement via UI coalescer
-            self._pending_enforcements.add(overlay_id)
+        
+        # Normal priority: prefer coalesced enforcement via UI coalescer
+        self._pending_enforcements.add(overlay_id)
 
-            # Try to lazily initialize a coalescer when Qt is ready
-            if self._coalescer is None:
+        # Try to lazily initialize a coalescer when Qt is ready
+        if self._coalescer is None:
+            try:
+                if QCoreApplication.instance() is not None:
+                    from core.threading import get_thread_manager
+                    tm = get_thread_manager()
+                    # 7ms window per project default for responsiveness
+                    self._coalescer = tm.create_ui_coalescer(
+                        name="z_order_enforcement",
+                        capacity=128,
+                        window_ms=7,
+                    )
+                    self._logger.info("ZOrderManager UI Coalescer initialized (window=7ms, cap=128)")
+            except Exception as e:
+                # Log and continue with fallback debounced path
+                self._tdebug_enf(f"UI Coalescer initialization failed: {e}")
+
+        if self._coalescer is not None:
+            try:
+                # Submit a single drain-triggering task; actual work pulls from _pending_enforcements
+                self._coalescer.submit(self._execute_enforcement)
+                used_coalescer = True
+            except Exception as e:
+                self._tdebug_enf(f"UI Coalescer submit failed, falling back to debounce: {e}")
+
+        # Fallback to debounced enforcement when coalescer is unavailable
+        if not used_coalescer:
+            if not self._debounce_pending:
+                self._debounce_pending = True
                 try:
-                    if QCoreApplication.instance() is not None:
-                        from core.threading import get_thread_manager
-                        tm = get_thread_manager()
-                        # 7ms window per project default for responsiveness
-                        self._coalescer = tm.create_ui_coalescer(
-                            name="z_order_enforcement",
-                            capacity=128,
-                            window_ms=7,
-                        )
-                        self._logger.info("ZOrderManager UI Coalescer initialized (window=7ms, cap=128)")
+                    from core.threading import ThreadManager
+                    ThreadManager.single_shot(self._debounce_delay_ms, self._execute_enforcement_wrapper)
                 except Exception as e:
-                    # Log and continue with fallback debounced path
-                    self._tdebug_enf(f"UI Coalescer initialization failed: {e}")
-
-            if self._coalescer is not None:
-                try:
-                    # Submit a single drain-triggering task; actual work pulls from _pending_enforcements
-                    self._coalescer.submit(self._execute_enforcement)
-                    used_coalescer = True
-                except Exception as e:
-                    self._tdebug_enf(f"UI Coalescer submit failed, falling back to debounce: {e}")
-
-            # Fallback to debounced enforcement when coalescer is unavailable
-            if not used_coalescer:
-                if not self._debounce_pending:
-                    self._debounce_pending = True
-                    try:
-                        from core.threading import ThreadManager
-                        ThreadManager.single_shot(self._debounce_delay_ms, self._execute_enforcement_wrapper)
-                    except Exception as e:
-                        # If centralized scheduling is unavailable, execute immediately as a fallback
-                        self._tdebug_enf(f"Debounce scheduling failed, executing immediately: {e}")
-                        # Release the lock before executing to avoid deadlocks
-                        pass
-        # Execute outside the lock if scheduling failed and we didn't use the coalescer
-        if not used_coalescer and self._debounce_pending is False:
-            self._execute_enforcement_wrapper()
+                    # If centralized scheduling is unavailable, execute immediately as a fallback
+                    self._tdebug_enf(f"Debounce scheduling failed, executing immediately: {e}")
+                    self._execute_enforcement_wrapper()
         return True
 
     def _execute_enforcement_wrapper(self):
         """Wrapper to reset debounce flag and execute pending enforcements."""
         try:
-            with self._lock:
-                self._debounce_pending = False
+            # UI thread operation - no lock needed
+            self._debounce_pending = False
         except Exception:
             # Best effort reset
             self._debounce_pending = False
@@ -246,12 +300,12 @@ class ZOrderManager(QObject):
 
     def _execute_enforcement(self):
         """Execute pending z-order enforcements"""
-        with self._lock:
-            pending = self._pending_enforcements.copy()
-            self._pending_enforcements.clear()
-            
-            for overlay_id in pending:
-                self._enforce_z_order_immediate(overlay_id, ZOrderPriority.NORMAL)
+        # UI thread operation - no lock needed
+        pending = self._pending_enforcements.copy()
+        self._pending_enforcements.clear()
+        
+        for overlay_id in pending:
+            self._enforce_z_order_immediate(overlay_id, ZOrderPriority.NORMAL)
     
     def bring_child_to_front(self, widget: QWidget) -> bool:
         """Bring a widget's native window to the front of its parent's z-order.
@@ -418,22 +472,40 @@ class ZOrderManager(QObject):
     
     def get_overlay_count(self) -> int:
         """Get the number of registered overlays"""
-        with self._lock:
-            return len(self._overlays)
+        # UI thread operation - no lock needed
+        return len(self._overlays)
     
     def cleanup(self):
         """Clean up resources"""
-        with self._lock:
-            # Reset debounce state; timers scheduled via ThreadManager cannot be cancelled, but
-            # clearing pending requests prevents further actions.
-            self._debounce_pending = False
-            self._overlays.clear()
-            self._active_context_menus.clear()
-            self._pending_enforcements.clear()
-            self._context_menu_overlay_id = None
-            self._coalescer = None
-            
-            self._logger.info("ZOrderManager cleaned up")
+        # UI thread operation - no lock needed
+        # Reset debounce state; timers scheduled via ThreadManager cannot be cancelled, but
+        # clearing pending requests prevents further actions.
+        self._debounce_pending = False
+        self._overlays.clear()
+        self._active_context_menus.clear()
+        self._pending_enforcements.clear()
+        self._context_menu_overlay_id = None
+        self._coalescer = None
+        
+        self._logger.info("ZOrderManager cleaned up")
+    
+    def _cleanup(self):
+        """Cleanup handler for ResourceManager."""
+        try:
+            self.cleanup()
+            self._logger.debug("ZOrderManager cleanup completed")
+        except Exception as e:
+            self._logger.error(f"Error during ZOrderManager cleanup: {e}")
+    
+    def shutdown(self):
+        """Explicit shutdown method."""
+        if hasattr(self, '_resource_id') and self._resource_id and hasattr(self, '_resource_manager') and self._resource_manager:
+            try:
+                self._resource_manager.unregister(self._resource_id)
+                self._resource_id = None
+            except Exception as e:
+                self._logger.warning(f"Failed to unregister from ResourceManager: {e}")
+        self._cleanup()
 
 
 # Singleton instance

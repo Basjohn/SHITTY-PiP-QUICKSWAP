@@ -65,9 +65,27 @@ class FocusIndicatorWidget(QWidget):
 
     # --- Public API -----------------------------------------------------
     def set_locked(self, locked: bool) -> None:
-        if bool(locked) != self._locked:
-            self._locked = bool(locked)
+        """Set lock state and update visual feedback."""
+        from core.logging import get_logger
+        logger = get_logger("FocusIndicator")
+        
+        new_locked = bool(locked)
+        if new_locked != self._locked:
+            self._locked = new_locked
+            logger.info(f"Focus indicator lock state changed: {self._locked}")
+            # Force immediate visual update
             self.update()
+            self.repaint()
+            # Ensure indicator is visible when lock state changes
+            if self.isVisible():
+                self.raise_()
+                # Bring to front via ResourceManager
+                try:
+                    from utils.resource_manager import get_resource_manager
+                    rm = get_resource_manager()
+                    rm.bring_child_to_front(self)
+                except Exception as e:
+                    logger.debug(f"Failed to bring focus indicator to front: {e}")
 
     def set_passthrough_enabled(self, enabled: bool) -> None:
         if bool(enabled) != self._passthrough_enabled:
@@ -226,8 +244,18 @@ class FocusIndicatorWidget(QWidget):
 
     # --- Events ---------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        """Handle mouse press events for lock toggle."""
         if event and event.button() == Qt.LeftButton:
+            from core.logging import get_logger
+            logger = get_logger("FocusIndicator")
+            logger.info(f"Focus indicator clicked - current lock state: {self._locked}")
+            
+            # Emit lock toggle signal
             self.lock_toggled.emit()
+            
+            # Provide immediate visual feedback
+            self.flash_block(150)  # Brief flash to show click was registered
+            
             event.accept()
             return
         super().mousePressEvent(event)
@@ -319,22 +347,32 @@ class FocusIndicatorWidget(QWidget):
         return self._icon_lock
 
     def _load_pixmap_from_resources(self, filename: str) -> Optional[QPixmap]:
-        """Resolve and load a pixmap from the project's resources directory.
-        Robustly computes the project root relative to this file.
+        """Load a pixmap from Qt resources (embedded in built executables).
+        Falls back to filesystem loading for development environment.
         """
         try:
+            # Import the compiled resources to ensure they're registered
+            try:
+                import ui.resources_rc  # noqa: F401
+            except ImportError:
+                pass
+            
+            # Primary: Load from Qt resource system (works in built executables)
+            resource_path = f":/icons/{filename}"
+            pm = QPixmap(resource_path)
+            if not pm.isNull():
+                return pm
+            
+            # Fallback: Load from filesystem (development environment)
             import os
-            # This file: ui/overlays/geometry/focus_indicator.py
             here = os.path.abspath(os.path.dirname(__file__))
-            # project_root = here/../../.. (geometry -> overlays -> ui -> project root)
             project_root = os.path.abspath(os.path.join(here, os.pardir, os.pardir, os.pardir))
             res_path = os.path.join(project_root, "resources", filename)
-            if not os.path.exists(res_path):
-                # Fallback: try relative to project_root/../resources if structure slightly differs
-                alt = os.path.abspath(os.path.join(project_root, os.pardir, "resources", filename))
-                res_path = alt if os.path.exists(alt) else res_path
-            pm = QPixmap(res_path)
-            return pm if not pm.isNull() else None
+            if os.path.exists(res_path):
+                pm = QPixmap(res_path)
+                return pm if not pm.isNull() else None
+            
+            return None
         except Exception:
             return None
 

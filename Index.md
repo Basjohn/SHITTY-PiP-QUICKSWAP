@@ -1,12 +1,6 @@
-### DWM Thumbnail Management (`utils/window/thumbnail_manager.py`)
-
-- **Register**: Minimal pre-validation (valid src HWND with non-zero client rect). Destination HWND not hard-rejected to avoid transient Qt races. Records `last_hresult`.
-- **Retry**: One-shot retry on `E_INVALIDARG (-2147024809)` after ~15ms sleep.
-- **Update**: `update_thumbnail(...)` logs detailed flags/rects on failure and ensures composition attributes on first visible.
-- **Unregister**: On shutdown, treats `E_INVALIDARG` from `DwmUnregisterThumbnail` as benign (logs DEBUG) to avoid noisy errors when DWM already invalidated the handle.
 # 📚 SPQModular Codebase Index
 
-> **AI Agents**: This is the canonical codebase index. Always regenerate wholesale based on live codebase state. Do not append or create changelogs.
+> **AI Agents**: This is the canonical codebase index. Always regenerate based on live codebase state. Do not append or create changelogs.
 
 ## 📋 Quick Navigation
 
@@ -14,10 +8,311 @@
 - [🧠 Core Services](#-core-services)
 - [🪟 Window Management](#-window-management)
 - [🎨 Graphics & Overlays](#-graphics--overlays)
+- [🎛️ Input Handling](#-input-handling)
+- [🔊 Media Control](#-media-control)
 - [🎯 User Interface](#-user-interface)
 - [🔧 Utilities](#-utilities)
 - [🧪 Testing](#-testing)
 - [📁 Resources & Config](#-resources--config)
+- [🧵 Concurrency](#-concurrency)
+- [📊 Events](#-events)
+
+## 🧠 Core Services
+
+### Application Core (`core/application/`)
+- **`ApplicationCore`**: Central application controller
+  - **Lifecycle Management**:
+    - `initialize()`: Sets up all core services
+    - `shutdown()`: Cleanup in reverse initialization order
+    - `restart()`: Graceful application restart
+  - **Service Access**:
+    - `get_service(service_type)`: Service locator pattern
+    - `has_service(service_type)`: Check service availability
+  - **State Management**:
+    - `state_changed` signal
+    - `get_state()`: Current application state
+    - `set_state(state)`: Update application state
+
+### Settings System (`core/settings/`)
+- **`SettingsManager`**: Centralized configuration with comprehensive defaults
+  - **Features**:
+    - JSON-based persistence with fallback hierarchy
+    - Type-safe get/set operations with validation
+    - Change notifications via signals
+    - Comprehensive settings structure (25+ settings)
+    - Singleton pattern with test isolation support
+  - **File Location Hierarchy**:
+    1. Explicit path (for tests): `settings_file` parameter
+    2. Primary: `<runtime_root>/settings/settings.json`
+    3. Fallback: `<executable_dir>/settings.json`
+    4. Last resort: `~/.spqmodular/settings.json`
+  - **Key Methods**:
+    - `get(key, default=None)`: Get setting value with type conversion
+    - `set(key, value)`: Update setting with validation
+    - `save()`: Persist changes to correct file location
+    - `reset_to_defaults()`: Restore comprehensive defaults
+    - `_reset_for_testing()`: Reset singleton for test isolation
+  - **Settings Categories**: Appearance, Behavior, Hotkeys, Graphics, General, Experimental
+  - **Thread Safety**: All operations are thread-safe with UI-thread enforcement
+
+### Resource Management (`core/resources/`)
+- **`ResourceManager`**: Centralized resource lifecycle
+  - **Features**:
+    - Automatic cleanup on shutdown with proper handler signatures
+    - Memory leak prevention
+    - Resource tracking and monitoring
+    - Lambda-wrapped cleanup handlers for consistent parameter passing
+  - **Key Methods**:
+    - `register(resource, cleanup_fn)`: Track resource with lambda wrapper
+    - `unregister(resource_id)`: Remove tracking
+    - `cleanup_all()`: Force cleanup of all resources
+  - **Thread Safety**: All operations are thread-safe
+  - **Cleanup Handler Pattern**: `cleanup_handler=lambda obj: obj._cleanup()` for consistent signatures
+
+### Event System (`core/events/`)
+- **`EventSystem`**: Publish-subscribe bus with rich Event objects
+  - **Features**:
+    - Rich Event objects with metadata (id, timestamp, source, is_handled)
+    - Priority-based dispatch with proper ordering
+    - Thread-safe operations with UI dispatch support
+    - Event lifecycle management and history tracking
+    - Debugging capabilities with event tracing
+  - **Event Object Structure**:
+    - `event.type`: Event type string
+    - `event.data`: Payload data dictionary
+    - `event.id`: Unique event identifier
+    - `event.timestamp`: Event creation time
+    - `event.source`: Event source object
+    - `event.is_handled`: Consumption flag for stopping propagation
+  - **Key Methods**:
+    - `subscribe(event_type, callback, dispatch_on_ui=False)`: Add subscriber
+    - `unsubscribe(subscription_id)`: Remove subscriber by ID
+    - `publish(event_type, data, source)`: Dispatch event with Event object
+    - `wait_for(event_type, timeout, condition)`: Wait for specific events
+  - **Handler API**: Handlers receive Event objects, access data via `event.data`
+
+## 🎨 Graphics & Overlays
+
+### Backend Management (`core/graphics/`)
+- **`BackendManager`**: Overlay backend selection
+  - **Available Backends**: DWM, Software, Monitor
+  - **Selection Logic**: Priority-based with fallback
+  - **Key Methods**:
+    - `get_available_backends()`: List available backends
+    - `select_backend(preference)`: Choose optimal backend
+    - `create_overlay(config)`: Factory method for overlays
+  - **ResourceManager Integration**: Proper cleanup handlers for deterministic resource management
+
+### DWM Integration (`core/graphics/backends/dwm/`)
+- **`IntegratedDWMOverlay`**: Hardware-accelerated window thumbnails
+  - **Features**:
+    - Native DWM thumbnail rendering
+    - Integrated border canvas with aspect ratio preservation
+    - Hardware acceleration with robust aspect ratio caching
+    - Minimal CPU usage
+  - **Aspect Ratio Management**:
+    - `_cache_source_aspect()`: Robust client area and window rect fallback
+    - Bounds checking (0.2-5.0 ratio limits)
+    - DPI-aware scaling for thumbnail properties
+  - **Key Methods**:
+    - `set_source_window(hwnd)`: Set target window
+    - `update_thumbnail()`: Refresh thumbnail with aspect preservation
+    - `set_opacity(value)`: Adjust transparency
+
+### Monitor Capture (`ui/overlays/monitor/`)
+- **`MonitorOverlay`**: Screen capture overlay with DWM-quality rendering
+  - **Features**:
+    - Real-time monitor capture via DXGI
+    - Integrated border canvas matching DWM overlay styling
+    - Aspect ratio preservation using DWM overlay logic
+    - Hall-of-mirrors detection
+  - **Aspect Ratio Management**:
+    - `_cache_monitor_aspect()`: Monitor dimension caching with bounds checking
+    - Consistent scaling during manual resize operations
+    - Proper letterbox/pillarbox handling
+  - **Key Methods**:
+    - `set_target_monitor(monitor_info)`: Configure capture target
+    - `start_capture()`: Begin screen capture
+    - `stop_capture()`: End capture with cleanup
+
+## 🔊 Media Control
+
+### Audio System (`utils/audio/`)
+- **`AudioManager`**: Central audio control
+  - **Features**:
+    - Volume control
+    - Mute/unmute
+    - Session management
+  - **Key Methods**:
+    - `set_volume(level)`: 0.0-1.0
+    - `get_volume()`: Current volume
+    - `set_mute(muted)`: Toggle mute
+    - `get_sessions()`: List audio sessions
+
+### Media Session (`core/media/session.py`)
+- **`MediaSession`**: Platform media integration
+  - **Platforms**:
+    - Windows: SMTC (System Media Transport Controls)
+    - macOS: Now Playing Info
+    - Linux: MPRIS (Media Player Remote Interfacing Specification)
+  - **Events**:
+    - `playback_state_changed`
+    - `metadata_updated`
+    - `volume_changed`
+
+### Media Keys (`core/input/media_keys.py`)
+- **`MediaKeyHandler`**: System media key interception
+  - **Supported Keys**:
+    - Play/Pause
+    - Next Track
+    - Previous Track
+    - Volume Up/Down
+  - **Integration**:
+    - Global hotkey registration
+    - Event emission
+
+## 🎯 User Interface
+
+### UI Framework (`ui/`)
+- **`ThemeManager`**: Centralized theming
+  - **Features**:
+    - Light/dark theme support
+    - Custom color schemes
+    - Runtime theme switching
+  - **Usage**:
+    ```python
+    theme = ThemeManager.instance()
+    theme.set_theme('dark')
+    ```
+
+### Components (`ui/components/`)
+- **`Toast`**: Notification system
+  - **Features**:
+    - Stacking notifications
+    - Custom durations
+    - Rich content support
+  - **Example**:
+    ```python
+    Toast.show("Operation completed", "The task was successful", icon=Toast.ICON_SUCCESS)
+    ```
+
+- **`CircleCheckBox`**: Custom checkbox
+  - **Features**:
+    - Smooth animations
+    - Custom colors
+    - State management
+
+### Windows (`ui/windows/`)
+- **`MainWindow`**: Primary application window
+  - **Features**:
+    - Menu bar
+    - Status bar
+    - Central widget area
+    - Dock widgets
+  - **Key Methods**:
+    - `add_dock_widget()`
+    - `set_central_widget()`
+    - `show_message()`
+
+### Dialogs (`ui/dialogs/`)
+- **`SettingsDialog`**: Application settings
+  - **Sections**:
+    - General
+    - Appearance
+    - Hotkeys
+    - Advanced
+  - **Features**:
+    - Category navigation
+    - Search functionality
+    - Reset to defaults
+
+- **`AboutDialog`**: Application information
+  - **Sections**:
+    - Version info
+    - Credits
+    - License
+    - System information
+
+## 🧵 Concurrency
+
+### ThreadManager (`core/threading/manager.py`)
+- **Purpose**: Centralized thread and timer management with lock-free design
+- **Architecture**: **LOCK-FREE** - No raw threading locks or mutexes
+- **Recent Fix**: ✅ UICoalescer lock reference bug resolved (2024-12-28)
+- **Features**:
+  - UI thread confinement enforcement
+  - Worker thread pools (IO, COMPUTE, CAPTURE, RENDER, UI)
+  - Single-shot and recurring timers
+  - Task submission and lifecycle management
+  - Lock-free singleton creation and state management
+  - UICoalescer for batching UI operations with atomic scheduling
+- **Key Methods**:
+  - `run_on_ui_thread(func, *args, **kwargs)`: Execute on UI thread
+  - `single_shot(ms, func, *args, **kwargs)`: One-time timer
+  - `submit_task(func, pool_type, *args, **kwargs)`: Background task
+  - `shutdown()`: Clean shutdown of all pools
+  - `create_ui_coalescer()`: Factory for UI operation batching
+- **Concurrency Model**: UI thread confinement + atomic operations + message passing
+- **Migration Status**: ✅ Complete - All raw mutexes eliminated, UICoalescer fully lock-free
+
+### Lock-Free Data Structures (`utils/lockfree/`)
+- **`SPSCQueue`**: Single Producer Single Consumer Queue
+  - **Features**:
+    - Fixed-size ring buffer
+    - Wait-free operations
+    - Thread-safe for single producer/consumer
+  - **Key Methods**:
+    - `push(item)`: Add item (non-blocking)
+    - `pop()`: Remove and return item (non-blocking)
+    - `is_empty()`: Check if queue is empty
+
+- **`TripleBuffer`**: Triple buffering for graphics
+  - **Features**:
+    - Lock-free reads/writes
+    - Always-consistent reads
+    - No allocation during operation
+  - **Key Methods**:
+    - `write(new_data)`: Update buffer
+    - `read()`: Get latest consistent data
+    - `try_read()`: Non-blocking read
+
+## 📊 Events
+
+### Event Types (`core/events/types/`)
+- **`WindowEvents`**: Window-related events
+  - `WindowCreated(hwnd, rect)`
+  - `WindowDestroyed(hwnd)`
+  - `WindowMoved(hwnd, new_rect)`
+  - `WindowFocused(hwnd)`
+  - `WindowMinimized(hwnd)`
+  - `WindowRestored(hwnd)`
+
+- **`InputEvents`**: User input events
+  - `KeyPressed(key, modifiers)`
+  - `KeyReleased(key, modifiers)`
+  - `MouseMoved(x, y, buttons)`
+  - `MousePressed(button, x, y)`
+  - `MouseReleased(button, x, y)`
+  - `WheelScrolled(delta, orientation)`
+
+- **`SystemEvents`**: System-level events
+  - `DisplayChanged()`
+  - `SystemThemeChanged(theme_name)`
+  - `SystemShutdown()`
+  - `SystemWake()`
+
+### Event Handling Patterns
+- **Event Handlers**:
+  - Should be fast and non-blocking
+  - Use `ThreadManager` for heavy operations
+  - Handle exceptions gracefully
+  - Unsubscribe when no longer needed
+
+- **Common Pitfalls**:
+  - Blocking the event loop
+  - Memory leaks from unremoved handlers
+  - Race conditions in event handlers
+  - Deadlocks from nested event processing
 
 ---
 
@@ -37,11 +332,24 @@
 
 ### `main.py`
 - **`PiPApplication`**: Main Qt application class
+  - **Key Methods**:
+    - `__init__`: Initializes Qt application and core services
+    - `_setup_connections`: Sets up signal/slot connections
+    - `_on_about_to_quit`: Cleanup handler
+  - **Signals**: `shutdown_initiated`, `all_windows_closed`
+  - **Dependencies**: `SystemTrayManager`, `ThreadManager`, `ResourceManager`
+  - **Pattern**: Service locator + dependency injection
+
 - **`main()`**: Application bootstrap and service injection
-- **Dependencies**: `SystemTrayManager`, `ThreadManager`, `ResourceManager`
-- **Pattern**: Service locator + dependency injection
-- **Portable Paths**: `utils.paths.get_runtime_root()` first honors `SPQ_RUNTIME_ROOT` (set by the native launcher) and normalizes compiled layouts (`<root>/data/bin` or `<root>/data`) back to `<root>`. Logs resolve to `<root>/logs`. Application icon resolves from `data/resources/ShittyPIP.ico` with a development fallback to repository `resources/`.
-- **Env Flags**: `--debug` sets `SPQ_DEBUG=1` early to enable verbose logging.
+  - **Path Resolution**: Uses `utils.paths.get_runtime_root()`
+    - Honors `SPQ_RUNTIME_ROOT` (set by native launcher)
+    - Normalizes compiled layouts (`<root>/data/bin` or `<root>/data`) to `<root>`
+    - Logs directory: `<root>/logs`
+    - Icons: `data/resources/ShittyPIP.ico` (fallback to `resources/` in dev)
+  - **Environment Flags**:
+    - `--debug`: Sets `SPQ_DEBUG=1` for verbose logging
+    - `--portable`: Forces portable mode for settings
+  - **Error Handling**: Global exception hook for unhandled exceptions
 
 ## 
 
@@ -152,11 +460,15 @@
   - Comprehensive app catalog with safe method definitions
   - Browser-specific routing with child window enumeration
   - Enhanced browser command path with subtle activation-and-retry via KeepAlive (`_send_browser_media_command_enhanced`)
+  - **Targeted Browser Selection**: `_send_browser_media_command_targeted()` matches DWM overlay source HWND to correct browser child window using title/class similarity scoring and media content detection
+  - **Enhanced App Detection**: `_derive_app_name_from_context()` resolves UNKNOWN applications using process names, window titles, class names, and media characteristics (40+ applications supported)
+  - **Continuous Volume Control**: Key hold detection with smooth 0-100% ramping via `handle_volume_key_press/release()` - immediate 2% step + continuous 1% steps after 0.5s hold
   - Hints media activity to KeepAlive on successful commands to maintain background responsiveness
   - Process responsiveness checking before dispatch
   - Window enumeration caching (5s TTL)
 - **Overlay Integration**: `get_preferred_app()` detects from overlay target HWND
-- **Settings**: `media.app_catalog`, `media.preferred_apps`
+- **Multi-Window Targeting**: `_find_window_by_app()` prioritizes overlay target window over generic window selection for precise control with multiple browser/app instances
+- **Settings**: `media.app_catalog`, `media.preferred_apps`, `media.volume_step` (default 2%, range 1%-25%)
 - **API**: `play_pause()`, `next_track()`, `previous_track()`, `volume_up()`, `volume_down()`, `stop()`
 - **HWND APIs**: `*_for_hwnd(hwnd)` methods for direct control
 - **Volume Policy**: Session-only. Per-app audio session via `utils.audio.session_volume` (no hotkey or mixer fallback). The audio module includes a psutil-guarded child-process resolution to handle apps whose audio session runs in renderer/subprocesses (e.g., browsers).
@@ -335,10 +647,40 @@
 #### Overlay Architecture
 - **`overlay.py`**: Base `Overlay` class with common interface
 - **`overlay_host.py`**: Host window for overlays
-- **`overlay_manager.py`**: Centralized lifecycle management with MRU tracking
-  - **API**: `get_active_overlay() -> Optional[Overlay]` thread-safe accessor for the currently active overlay
+- **`OverlayManager`**: Centralized overlay lifecycle management with MRU tracking and auto-switch
+  - **Core Features**:
+    - Single overlay enforcement (one-at-a-time semantics)
+    - Most Recently Used (MRU) tracking for quick switching
+    - Overlay locking to prevent unwanted changes
+    - Integrated z-order management via ZOrderManager
+    - Auto-switch functionality when DWM capture windows close
+  - **Key Methods**:
+    - `create_overlay()`: Create new overlay with configuration
+    - `get_overlay(id)`: Retrieve overlay by ID (updates MRU)
+    - `remove_overlay(id)`: Clean removal with lock checking
+    - `update_mru(id)`: Update MRU list
+    - `set_overlay_lock(locked)`: Enable/disable overlay modifications
+    - `get_mru_overlays(limit)`: Get overlays sorted by recent use
+    - `set_auto_switch_enabled(enabled)`: Enable/disable auto-switching
 - **`backend_manager.py`**: Backend selection and initialization
 - **`types.py`**: Shared type definitions
+- **`window_monitor.py`**: Auto-switch functionality for DWM capture windows
+  - **`WindowMonitor`**: Monitors window validity and detects closures
+  - **`AutoSwitchManager`**: Manages auto-switching when windows close
+  - **Features**: Automatic overlay source switching to next valid window from MRU list
+
+#### Border Rendering System (`ui/overlays/`)
+- **`integrated_border_canvas.py`**: Unified canvas with integrated border rendering
+  - **Features**: Direct border rendering in paintEvent, no separate border windows
+  - **Masking**: Window-level masking via QPainterPath/QRegion for rounded borders
+  - **Theme Integration**: Automatic theme updates and DPI scaling
+- **`accent_calculator.py`**: Unified accent calculation system
+  - **Purpose**: Single source of truth for inner accent thickness, inset, and radius
+  - **Features**: Bounded size scaling, DPI-aware calculations, coordinate alignment validation
+  - **API**: `calculate_accent_properties()` with guaranteed DWM/border alignment
+- **`rendering/border_renderer.py`**: Core border drawing primitives
+- **`geometry/border_geometry.py`**: Border metrics calculation (main border only)
+- **`theming/border_theme.py`**: Theme token integration
 
 #### Supporting Systems
 - **`utils/z_order_manager.py`**: Unified Z-Order Management (ThreadManager-based, no raw QTimer)
@@ -569,10 +911,16 @@
 - **Used By**:
   - Monitor capture/render pipeline: `"monitor_frames_{qt_index}"`
 
-### Z-Order Management (`utils/z_order_manager.py`)
+### Cursor Management (`utils/cursor_manager.py`)
+- **Purpose**: Centralized cursor state management
+- **Concurrency**: Lock-free design with UI thread confinement (migrated 2024-12-28)
+- **Priority System**: Request-based cursor control
+- **Integration**: Works with overlay focus states
+- **Used By**: Overlay interactions, resize operations
 
-#### `ZOrderManager`
+### Z-Order Management (`utils/z_order_manager.py`)
 - **Purpose**: Unified Z-Order Management System
+- **Concurrency**: Lock-free design with UI thread confinement (migrated 2024-12-28)
 - **Integration**: ThreadManager-based debounce (no raw QTimer)
 - **Context Menu Priority**: Built-in support
 - **Policy**: Strict no-fallback, explicit failure logging
@@ -614,6 +962,16 @@
 - **API**: `get_all_monitors()`, screen information
 - **Used By**: Context menus, overlay targeting
 
+### Mouse Capture Coordination (`utils/mouse_capture_coordinator.py`)
+
+#### `MouseCaptureCoordinator`
+- **Purpose**: Centralized mouse capture management
+- **Concurrency**: Lock-free design with UI thread confinement (migrated 2024-12-28)
+- **Priority System**: Context menu > Window behavior > Default
+- **Stack Management**: Automatic capture restoration
+- **Resource Registration**: ✅ Registered with ResourceManager
+- **Used By**: Context menus, window drag/resize operations
+
 ---
 
 ## 🧪 Testing
@@ -624,12 +982,26 @@
 - **Purpose**: Pytest configuration and logging setup
 - **Logging**: Centralized rotating logs at `logs/tests/`
 - **Environment**: `SPQ_TEST_LOG_DIR` exported
-- **Status**: Deferred until Threading/Resource Manager complete
+- **Timeout**: Extended to 60 seconds for real integration tests
+- **Status**: Active with comprehensive real functionality testing
 
 #### Test Structure
-- **`core/`**: Core module tests
-- **`integration/`**: Integration tests
+- **`test_real_functionality.py`**: Comprehensive real integration tests (replaces mocked unit tests)
+  - **TestRealResourceManagement**: Manager registration and cleanup validation
+  - **TestRealSettingsManager**: Settings file I/O, fallback hierarchy, comprehensive defaults
+  - **TestRealEventSystem**: Event subscription, dispatch with Event objects, resource cleanup
+  - **TestRealBackendManagement**: Backend discovery and resource integration
+  - **TestRealWindowValidation**: Window API validation functions
+  - **TestRealCrossManagerInteractions**: Full system integration testing
+  - **TestRealImportIntegrity**: Module import validation across codebase
+- **`integration/`**: Legacy integration tests (deprecated in favor of real functionality tests)
 - **`fixtures/`**: Test fixtures and utilities
+
+#### Testing Philosophy
+- **Real Integration Tests**: Uses actual components without mocks to expose genuine system issues
+- **Two+ Way Testing**: Tests validate multiple components and interactions simultaneously
+- **Singleton Reset**: SettingsManager includes `_reset_for_testing()` for test isolation
+- **Resource Cleanup**: All tests validate proper ResourceManager integration
 
 ---
 

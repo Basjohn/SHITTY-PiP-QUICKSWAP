@@ -238,30 +238,37 @@ class IntegratedBorderCanvas(QWidget):
                 clip_path.addRoundedRect(self.rect(), logical_radius, logical_radius)
                 painter.setClipPath(clip_path)
             
-            # Render border using centralized renderer
+            # Render main border
             self._border_renderer.render_border(
                 painter, self.rect(), metrics.thickness, 
                 theme.get_border_color(), metrics.corner_radius
             )
             
-            # Render inner accent if enabled
+            # Render inner accent for depth effect using unified calculator
             try:
-                accent_thickness = theme.get_accent_thickness()
-                accent_inset = theme.get_accent_inset()
+                from .accent_calculator import get_accent_calculator
                 
-                # Apply DPI correction for fractional scaling (e.g., 150%)
-                dpi_corrected_inset = max(accent_inset, accent_inset * dpi_scale / 1.5)
+                # Get theme accent properties
+                base_accent_thickness = theme.get_accent_thickness()  # 1.0 from theme
+                base_accent_inset = theme.get_accent_inset()  # 3.0 from theme
+                
+                # Use unified accent calculator
+                calculator = get_accent_calculator()
+                accent_props = calculator.calculate_accent_properties(
+                    widget_rect=self.rect(),
+                    border_thickness=metrics.thickness,
+                    corner_radius=metrics.corner_radius,
+                    dpi_scale=dpi_scale,
+                    theme_base_thickness=base_accent_thickness,
+                    theme_base_inset=base_accent_inset
+                )
                 
                 self._border_renderer.render_inner_accent(
                     painter, self.rect(), theme.get_accent_color(), 
-                    accent_thickness, dpi_corrected_inset, metrics.corner_radius
+                    accent_props.thickness, accent_props.inset, accent_props.inner_radius
                 )
             except Exception:
                 pass  # Skip inner accent if theme methods fail
-                
-        except Exception as e:
-            logger = get_logger("IntegratedBorderCanvas")
-            logger.error(f"Paint failed: {e}")
         finally:
             painter.end()
 

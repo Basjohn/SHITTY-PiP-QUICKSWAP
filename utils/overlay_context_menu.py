@@ -195,10 +195,13 @@ class OverlayContextMenu:
             self._wire_action(hide_action, 'hide', 'close')
             self.menu.addAction(hide_action)
             self._actions['hide'] = hide_action
-            reset_action = QAction("Reset", self.menu)
-            self._wire_action(reset_action, 'reset', '_handle_reset_position')
+            reset_action = QAction("Reset Overlay", self.menu)
+            # Use callback instead of overlay method since _handle_recreate_overlay is on the context menu
+            reset_action.triggered.connect(self._handle_recreate_overlay)
             self.menu.addAction(reset_action)
             self._actions['reset'] = reset_action
+            
+            # Note: Recreate functionality consolidated into Reset action
             self.menu.addSeparator()
             quit_app_action = QAction("Quit Application", self.menu)
             self._wire_action(quit_app_action, 'quit', '_handle_quit_application')
@@ -924,6 +927,146 @@ class OverlayContextMenu:
         except Exception as e:
             self._logger.error(f"CTX_MENU: Error during detach_from_overlay: {e}")
             return False
+
+    def _handle_recreate_overlay(self) -> None:
+        """Recreate the overlay by destroying and recreating it via OverlayManager."""
+        try:
+            from core.graphics.overlay_manager import OverlayManager
+            from core.logging import get_logger
+            logger = get_logger("OverlayContextMenu")
+            
+            # Get overlay manager instance
+            om = OverlayManager()
+            if not om:
+                logger.error("OverlayManager instance not available for recreation")
+                return
+            
+            # Try to get overlay ID from the overlay widget
+            overlay_id = None
+            try:
+                if hasattr(self.overlay, 'id'):
+                    overlay_id = self.overlay.id
+                elif hasattr(self.overlay, 'identifier'):
+                    overlay_id = self.overlay.identifier
+                elif hasattr(self._overlay_widget, 'id'):
+                    overlay_id = self._overlay_widget.id
+                elif hasattr(self._overlay_widget, 'identifier'):
+                    overlay_id = self._overlay_widget.identifier
+            except Exception:
+                pass
+            
+            if not overlay_id:
+                logger.error("Could not determine overlay ID for recreation")
+                return
+            
+            logger.info(f"Recreating overlay: {overlay_id}")
+            
+            # Get current overlay configuration and source window before destroying
+            current_config = None
+            current_source_hwnd = None
+            try:
+                current_overlay = om.get_overlay(overlay_id)
+                if current_overlay and hasattr(current_overlay, 'get_config'):
+                    config_obj = current_overlay.get_config()
+                    # Convert OverlayConfig to dict manually
+                    current_config = {
+                        'overlay_type': config_obj.overlay_type,
+                        'position': config_obj.position,
+                        'size': config_obj.size,
+                        'opacity': config_obj.opacity,
+                        'title': config_obj.title,
+                        'properties': config_obj.properties
+                    }
+                    
+                    # Preserve current DWM source window
+                    if hasattr(current_overlay, 'get_source_hwnd'):
+                        current_source_hwnd = current_overlay.get_source_hwnd()
+                        logger.debug(f"Preserving source hwnd {current_source_hwnd} for overlay recreation")
+                        
+                        # Add source hwnd to properties for recreation
+                        if current_source_hwnd and current_config:
+                            if 'properties' not in current_config:
+                                current_config['properties'] = {}
+                            current_config['properties']['hwnd'] = current_source_hwnd
+                            
+            except Exception as e:
+                logger.debug(f"Could not preserve overlay config: {e}")
+            
+            # Destroy current overlay
+            try:
+                om.remove_overlay(overlay_id, bypass_lock=True)
+                logger.debug(f"Destroyed overlay: {overlay_id}")
+            except Exception as e:
+                logger.error(f"Failed to destroy overlay {overlay_id}: {e}")
+                return
+            
+            # Recreate overlay with same configuration
+            try:
+                from core.threading import ThreadManager
+                # Defer recreation slightly to allow cleanup to complete
+                ThreadManager.single_shot(100, lambda: self._recreate_overlay_delayed(overlay_id, current_config))
+            except Exception as e:
+                logger.error(f"Failed to schedule overlay recreation: {e}")
+                
+        except Exception as e:
+            from core.logging import get_logger
+            logger = get_logger("OverlayContextMenu")
+            logger.error(f"Overlay recreation failed: {e}", exc_info=True)
+
+    def _recreate_overlay_delayed(self, overlay_id: str, config: dict = None) -> None:
+        """Delayed overlay recreation to allow cleanup to complete."""
+        try:
+            from core.graphics.overlay_manager import OverlayManager
+            from core.logging import get_logger
+            logger = get_logger("OverlayContextMenu")
+            
+            om = OverlayManager()
+            if not om:
+                logger.error("OverlayManager not available for delayed recreation")
+                return
+            
+            # Create new overlay with preserved or default configuration
+            if not config:
+                config = {}
+            
+            # Convert config dict to proper parameters for create_overlay
+            from PySide6.QtCore import QRect, QPoint, QSize
+            
+            # Extract position and size from config, convert to QRect
+            position = config.get('position', QPoint(0, 0))
+            size = config.get('size', QSize(640, 360))
+            
+            # Handle position - could be QPoint or dict with x,y
+            if isinstance(position, dict):
+                position = QPoint(position.get('x', 0), position.get('y', 0))
+            elif not isinstance(position, QPoint):
+                position = QPoint(0, 0)
+            
+            # Handle size - could be QSize or dict with width,height  
+            if isinstance(size, dict):
+                size = QSize(size.get('width', 640), size.get('height', 360))
+            elif not isinstance(size, QSize):
+                size = QSize(640, 360)
+            
+            rect = QRect(position, size)
+            
+            new_overlay = om.create_overlay(
+                rect=rect,
+                overlay_type=config.get('overlay_type'),
+                opacity=config.get('opacity', 1.0),
+                title=config.get('title', ''),
+                properties=config.get('properties', {}),
+                bypass_lock=True
+            )
+            if new_overlay:
+                logger.info(f"Successfully recreated overlay: {overlay_id}")
+            else:
+                logger.error(f"Failed to recreate overlay: {overlay_id}")
+                
+        except Exception as e:
+            from core.logging import get_logger
+            logger = get_logger("OverlayContextMenu")
+            logger.error(f"Delayed overlay recreation failed: {e}", exc_info=True)
 
  
 

@@ -117,7 +117,7 @@ class TestZOrderManager(unittest.TestCase):
         self.zm.register_overlay(self.overlay_id, self.main_widget)
         setpos = self._patch_win32(is_window=True, setpos_return=True)
         # Make single_shot invoke callback immediately
-        with patch('core.threading.manager.ThreadManager.single_shot', side_effect=lambda ms, cb: cb()):
+        with patch('core.threading.ThreadManager.single_shot', side_effect=lambda ms, cb: cb()):
             ok = self.zm.enforce_z_order(self.overlay_id)
             self.assertTrue(ok)
         self.assertEqual(setpos.call_count, 1)

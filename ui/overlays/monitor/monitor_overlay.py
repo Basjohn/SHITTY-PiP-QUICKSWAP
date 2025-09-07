@@ -6,7 +6,7 @@ integrated_dwm_overlay but for monitor capture instead of window capture.
 """
 
 from typing import Optional, Dict, Any
-from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QSize, Signal, QEventLoop, QEvent
+from PySide6.QtCore import Qt, QRect, QRectF, Signal, QEventLoop, QEvent
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtGui import QMouseEvent, QWheelEvent, QResizeEvent, QMoveEvent, QPainterPath, QRegion
 
@@ -57,6 +57,9 @@ class MonitorOverlay(QWidget):
         # Overlay state
         self._target_monitor: Optional[Dict[str, Any]] = None
         self._is_capturing = False
+        
+        # Cached aspect ratio for consistent scaling during manual resize (from DWM overlay)
+        self._source_aspect: Optional[float] = None
         
         # Window behavior manager for drag/resize/snap
         # Expose as `_behavior` for IntegratedBorderCanvas delegation compatibility
@@ -230,6 +233,9 @@ class MonitorOverlay(QWidget):
                     logger.error("Failed to set target monitor in capture display")
                     return False
 
+            # Cache monitor aspect ratio for consistent scaling during resize (from DWM overlay logic)
+            self._cache_monitor_aspect(monitor_info)
+            
             # Propagate content aspect to integrated border canvas for proper letterbox/pillarbox
             try:
                 if self._border_canvas is not None:
@@ -314,14 +320,51 @@ class MonitorOverlay(QWidget):
         logger.error(f"Capture error: {error}")
         self.capture_error.emit(error)
     
-    def _on_hall_of_mirrors_changed(self, active: bool) -> None:
-        """Handle hall-of-mirrors detection change."""
-        self.hall_of_mirrors_changed.emit(active)
+    def _cache_monitor_aspect(self, monitor_info: Dict[str, Any]) -> None:
+        """Cache the monitor aspect ratio for consistent scaling during resize.
         
-        if active:
-            logger.warning("Hall-of-mirrors detected - overlay on capture monitor")
-        else:
-            logger.debug("Hall-of-mirrors cleared - overlay moved to different monitor")
+        Uses the same robust logic as DWM overlay for aspect ratio handling.
+        """
+        try:
+            if not monitor_info:
+                self._source_aspect = None
+                return
+            
+            # Get monitor dimensions
+            rect = monitor_info.get('rect')
+            if isinstance(rect, QRect):
+                src_w = rect.width()
+                src_h = rect.height()
+            else:
+                # Fallback to width/height keys
+                src_w = monitor_info.get('width', 0)
+                src_h = monitor_info.get('height', 0)
+            
+            if src_w > 0 and src_h > 0:
+                aspect = src_w / src_h
+                # Apply same bounds checking as DWM overlay
+                if 0.2 <= aspect <= 5.0:  # Between 1:5 and 5:1
+                    self._source_aspect = aspect
+                    logger.debug(
+                        f"Cached monitor aspect ratio: {self._source_aspect:.3f} ({src_w}x{src_h})"
+                    )
+                    return
+                else:
+                    logger.debug(
+                        f"Monitor aspect ratio out of bounds: {aspect:.3f} ({src_w}x{src_h}), using default"
+                    )
+            
+            # Fallback to default aspect ratio
+            self._source_aspect = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]
+            logger.debug(f"Using default aspect ratio: {self._source_aspect:.3f}")
+            
+        except Exception as e:
+            self._source_aspect = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]
+            logger.debug(f"Failed to cache monitor aspect, using default: {e}")
+
+    def _on_hall_of_mirrors_changed(self, detected: bool) -> None:
+        """Handle hall of mirrors detection change."""
+        self.hall_of_mirrors_changed.emit(detected)
     
     # Mouse event forwarding to WindowBehaviorManager (same as integrated_dwm_overlay)
     def mousePressEvent(self, event: QMouseEvent) -> None:

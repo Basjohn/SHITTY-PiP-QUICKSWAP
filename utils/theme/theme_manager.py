@@ -167,21 +167,34 @@ class ThemeManager(QObject):
     }
     
     # Singleton instance
-    _instance = None
+    _instance: Optional['ThemeManager'] = None
+    _initialized: bool = False
+    
+    def __new__(cls):
+        """Implement singleton pattern - lock-free via UI thread confinement."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     @classmethod
     def instance(cls, app_instance=None) -> 'ThemeManager':
         """Get or create the singleton instance."""
         if cls._instance is None:
-            cls._instance = cls(app_instance)
+            cls._instance = cls()
+            if app_instance:
+                cls._instance._app_ref = weakref.ref(app_instance)
         return cls._instance
     
     def __init__(self, app=None):
-        """Initialize the theme manager.
+        """Initialize the theme manager - idempotent.
         
         Args:
             app: Reference to the main application instance (weak reference will be stored)
         """
+        if self._initialized:
+            return
+            
         super().__init__()
         self._app_ref = weakref.ref(app) if app else None
         self._settings_manager = None
@@ -189,7 +202,7 @@ class ThemeManager(QObject):
         self._theme_colors = {}
         self._styles = {}
         self._assets = {}
-        self._initialized = False
+        self._initialized = True
         # Use ThreadManager instead of direct QTimer for consistent timing management
         self._pending_theme = None
         self._applying_theme = False
@@ -239,7 +252,15 @@ class ThemeManager(QObject):
     @property
     def app(self):
         """Get the application instance (or None if it no longer exists)."""
-        return self._app_ref() if self._app_ref else None
+        # Try weak reference first
+        if self._app_ref:
+            app = self._app_ref()
+            if app is not None:
+                return app
+        
+        # Fallback to QApplication.instance() if weak reference is invalid
+        from PySide6.QtWidgets import QApplication
+        return QApplication.instance()
     
     def _init_default_themes(self) -> None:
         """Initialize the default themes if they don't exist."""

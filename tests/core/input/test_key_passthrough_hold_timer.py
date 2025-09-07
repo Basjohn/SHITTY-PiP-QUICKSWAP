@@ -25,10 +25,10 @@ def controller(monkeypatch):
     ctrl._hold_initial_delay_ms = 123
     ctrl._hold_interval_ms = 45
 
-    # Fake focus state
+    # Fake focus state: overlay NOT focused so volume routing/holds are active
     class _FS:
         def is_overlay_focused(self):
-            return True
+            return False
     monkeypatch.setattr("core.input.key_passthrough_controller.get_focus_state", lambda: _FS())
 
     # Fake window validity and set target hwnd

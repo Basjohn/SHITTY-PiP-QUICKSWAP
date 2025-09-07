@@ -26,9 +26,15 @@ def qapp():
 def _expected_osd_pos(host: OverlayHost, osd: VolumeOSDWidget) -> QPoint:
     rect = host.rect()
     w, h = osd.width(), osd.height()
-    x = rect.x() + (rect.width() - w) // 2
-    y = rect.y() + rect.height() - h - 12
-    return QPoint(max(0, x), max(0, y))
+    x_local = rect.x() + (rect.width() - w) // 2
+    y_local = rect.y() + rect.height() - h - 12
+    base = QPoint(max(0, x_local), max(0, y_local))
+    # If OSD is a top-level window, its position is in global coordinates
+    if osd.parentWidget() is host:
+        return base
+    else:
+        top_left = host.mapToGlobal(QPoint(0, 0))
+        return top_left + base
 
 
 def test_volume_osd_integration_instantiates_and_positions(qapp):
@@ -40,9 +46,15 @@ def test_volume_osd_integration_instantiates_and_positions(qapp):
     # Allow event loop to settle
     QTest.qWait(50)
 
-    # Find the OSD by objectName and type
+    # Find the OSD by objectName and type. It may be a top-level window.
     osd = host.findChild(VolumeOSDWidget, "volumeOSD")
-    assert osd is not None, "VolumeOSDWidget should be created as a child of OverlayHost"
+    if osd is None:
+        # Search top-level widgets for the OSD window
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, VolumeOSDWidget) and getattr(w, "objectName", lambda: "")() == "volumeOSD":
+                osd = w
+                break
+    assert osd is not None, "VolumeOSDWidget should exist (child or top-level window)"
 
     # On creation it should be hidden; position should still be set deterministically
     osd.update_position()

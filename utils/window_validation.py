@@ -8,6 +8,7 @@ which windows should be included in window switching and overlay operations.
 import os
 import ctypes
 import ctypes.wintypes
+import logging
 from typing import Optional, Dict, Any
 
 # Windows API constants and types
@@ -86,17 +87,20 @@ _window_info_cache: Dict[int, Dict[str, Any]] = {}
 
 
 def is_window_visible(hwnd: int) -> bool:
-    """Check if a window is visible.
+    """
+    Check if a window is visible.
     
     Args:
-        hwnd: The window handle to check
+        hwnd: Window handle
         
     Returns:
-        bool: True if the window is visible, False otherwise
+        bool: True if window is visible, False otherwise
     """
     try:
         return bool(ctypes.windll.user32.IsWindowVisible(hwnd))
-    except Exception:
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"IsWindowVisible failed for hwnd={hwnd}: {e}")
         return False
 
 
@@ -113,60 +117,81 @@ def get_window_rect(hwnd: int) -> Optional[tuple[int, int, int, int]]:
         rect = ctypes.wintypes.RECT()
         if ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
             return (rect.left, rect.top, rect.right, rect.bottom)
-    except Exception:
-        pass
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"GetWindowRect failed for hwnd={hwnd}: {e}")
     return None
 
 
 def get_window_style(hwnd: int) -> int:
-    """Get the window style flags.
+    """
+    Get the window style flags.
     
     Args:
         hwnd: The window handle
         
     Returns:
-        int: The window style flags, or 0 on error
+        int: Window style flags, or 0 if failed
     """
     try:
         return ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-    except Exception:
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"GetWindowLongW failed for hwnd={hwnd}: {e}")
         return 0
 
 
-def get_window_title(hwnd: int) -> str:
-    """Get the title of a window.
+def get_window_text(hwnd: int) -> str:
+    """
+    Get the window title text.
     
     Args:
         hwnd: The window handle
         
     Returns:
-        str: The window title, or an empty string if failed
+        str: Window title, or empty string if failed
     """
     try:
         length = ctypes.windll.user32.GetWindowTextLengthW(hwnd) + 1
         buffer = ctypes.create_unicode_buffer(length)
         if ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length):
             return buffer.value
-    except Exception:
-        pass
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"GetWindowTextW failed for hwnd={hwnd}: {e}")
     return ""
 
 
-def get_window_class(hwnd: int) -> str:
-    """Get the window class name.
+def get_window_title(hwnd: int) -> str:
+    """
+    Get the window title text (alias for get_window_text for compatibility).
     
     Args:
         hwnd: The window handle
         
     Returns:
-        str: The window class name, or an empty string if failed
+        str: Window title, or empty string if failed
+    """
+    return get_window_text(hwnd)
+
+
+def get_window_class_name(hwnd: int) -> str:
+    """
+    Get the window class name.
+    
+    Args:
+        hwnd: The window handle
+        
+    Returns:
+        str: Window class name, or empty string if failed
     """
     try:
         buffer = ctypes.create_unicode_buffer(256)
         if ctypes.windll.user32.GetClassNameW(hwnd, buffer, 256):
             return buffer.value
-    except Exception:
-        pass
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"GetClassNameW failed for hwnd={hwnd}: {e}")
     return ""
 
 
@@ -194,8 +219,9 @@ def get_window_process_info(hwnd: int) -> tuple[int, str]:
                         return (process_id.value, exe_name)
                 finally:
                     ctypes.windll.kernel32.CloseHandle(process_handle)
-    except Exception:
-        pass
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"GetProcessImageFileNameW failed for hwnd={hwnd}: {e}")
     return (0, "")
 
 
@@ -214,8 +240,8 @@ def is_system_window(hwnd: int, our_pid: int) -> bool:
         return True
     
     # Get window information
-    title = get_window_title(hwnd)
-    window_class = get_window_class(hwnd)
+    title = get_window_text(hwnd)
+    window_class = get_window_class_name(hwnd)
     process_id, exe_name = get_window_process_info(hwnd)
     
     # Skip our own process windows
@@ -224,6 +250,12 @@ def is_system_window(hwnd: int, our_pid: int) -> bool:
     
     # Skip windows with no title (usually system windows)
     if not title.strip():
+        return True
+    
+    # Skip system tray overflow and other system UI windows
+    if ('System tray overflow' in title or 
+        'TopLevelWindowForOverflowXamlIsland' in window_class or
+        'NotifyIconOverflowWindow' in window_class):
         return True
     
     # Check against system window titles and classes
@@ -292,8 +324,8 @@ def is_media_player(hwnd: int) -> bool:
         bool: True if it's likely a media player, False otherwise
     """
     # Get window information
-    title = get_window_title(hwnd)
-    window_class = get_window_class(hwnd)
+    title = get_window_text(hwnd)
+    window_class = get_window_class_name(hwnd)
     _, exe_name = get_window_process_info(hwnd)
     
     # Check against known media player processes and classes
