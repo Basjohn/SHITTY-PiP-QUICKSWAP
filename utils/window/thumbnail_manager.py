@@ -238,9 +238,28 @@ class ThumbnailManager:
             )
             self.last_hresult = int(hr)
             if hr != 0:
+                # Downgrade benign failures during shutdown or transient hide paths
+                benign = False
                 try:
-                    self._logger.error(
-                        "DwmUpdateThumbnailProperties failed. hr=%s flags=0x%X dest=%s src=%s opacity=%s visible=%s client_only=%s",
+                    E_INVALIDARG = -2147024809
+                    if hr == E_INVALIDARG:
+                        # Consider benign when we're hiding or rectangles are degenerate
+                        dest_w = max(0, int(props.rcDestination.right - props.rcDestination.left))
+                        dest_h = max(0, int(props.rcDestination.bottom - props.rcDestination.top))
+                        src_w = max(0, int(props.rcSource.right - props.rcSource.left))
+                        src_h = max(0, int(props.rcSource.bottom - props.rcSource.top))
+                        is_hiding = bool(props.dwFlags & DWM_TNP_VISIBLE) and (not bool(props.fVisible))
+                        degenerate_rects = (dest_w == 0 or dest_h == 0 or src_w == 0 or src_h == 0)
+                        benign = is_hiding or degenerate_rects
+                except Exception:
+                    benign = False
+
+                try:
+                    log_fn = self._logger.debug if benign else self._logger.error
+                    suffix = " (benign during shutdown/hide)" if benign else ""
+                    log_fn(
+                        "DwmUpdateThumbnailProperties failed%s. hr=%s flags=0x%X dest=%s src=%s opacity=%s visible=%s client_only=%s",
+                        suffix,
                         hr,
                         props.dwFlags,
                         (props.rcDestination.left, props.rcDestination.top, props.rcDestination.right, props.rcDestination.bottom),
@@ -253,8 +272,13 @@ class ThumbnailManager:
                     pass
             
             # If successful and this was a visibility change, ensure we apply any pending composition attributes
+            # Only apply composition attributes once per HWND to prevent spam
             if hr == 0 and visible is not None and visible and hwnd in self._thumbnails:
-                self._ensure_thumbnail_composition(hwnd)
+                if not hasattr(self, '_composition_applied'):
+                    self._composition_applied = set()
+                if hwnd not in self._composition_applied:
+                    self._ensure_thumbnail_composition(hwnd)
+                    self._composition_applied.add(hwnd)
             
             return hr == 0  # S_OK
             
@@ -285,28 +309,28 @@ class ThumbnailManager:
             return False
             
         try:
-            # Constants for DWM composition
-            DWMWA_NCRENDERING_POLICY = 2
-            DWMWA_FORCE_ICONIC_REPRESENTATION = 7
-            DWMWA_HAS_ICONIC_BITMAP = 10
-            DWMWA_DISALLOW_PEEK = 11
-            DWMWA_EXCLUDED_FROM_PEEK = 12
-            DWMWA_CLOAK = 13
-            DWMWA_FREEZE_REPRESENTATION = 15
+            # Constants for DWM composition (underscore to avoid unused-const lints)
+            _DWMWA_NCRENDERING_POLICY = 2
+            _DWMWA_FORCE_ICONIC_REPRESENTATION = 7
+            _DWMWA_HAS_ICONIC_BITMAP = 10
+            _DWMWA_DISALLOW_PEEK = 11
+            _DWMWA_EXCLUDED_FROM_PEEK = 12
+            _DWMWA_CLOAK = 13
+            _DWMWA_FREEZE_REPRESENTATION = 15
             
             # Non-client rendering policies
-            DWMNCRP_USEWINDOWSTYLE = 0
-            DWMNCRP_DISABLED = 1
-            DWMNCRP_ENABLED = 2
+            _DWMNCRP_USEWINDOWSTYLE = 0
+            _DWMNCRP_DISABLED = 1
+            _DWMNCRP_ENABLED = 2
             
             # Apply consistent composition attributes to normalize rendering
             # These settings help ensure consistent rendering across different window types
             
             # Force standard non-client rendering (fixes color distortion in system apps)
-            value = ctypes.c_int(DWMNCRP_ENABLED)  # Force DWM rendering
+            value = ctypes.c_int(_DWMNCRP_ENABLED)  # Force DWM rendering
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_NCRENDERING_POLICY,
+                _DWMWA_NCRENDERING_POLICY,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -315,7 +339,7 @@ class ThumbnailManager:
             value = ctypes.c_int(0)  # 0 = disabled
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_FORCE_ICONIC_REPRESENTATION,
+                _DWMWA_FORCE_ICONIC_REPRESENTATION,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -323,7 +347,7 @@ class ThumbnailManager:
             # Disable iconic bitmap (can cause color distortion)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_HAS_ICONIC_BITMAP,
+                _DWMWA_HAS_ICONIC_BITMAP,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -331,7 +355,7 @@ class ThumbnailManager:
             # Disable freeze representation (can cause stale/distorted content)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_FREEZE_REPRESENTATION,
+                _DWMWA_FREEZE_REPRESENTATION,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -340,7 +364,7 @@ class ThumbnailManager:
             value = ctypes.c_int(1)  # 1 = enabled
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_DISALLOW_PEEK,
+                _DWMWA_DISALLOW_PEEK,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )
@@ -348,7 +372,7 @@ class ThumbnailManager:
             # Exclude from peek (additional protection)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.wintypes.HWND(hwnd),
-                DWMWA_EXCLUDED_FROM_PEEK,
+                _DWMWA_EXCLUDED_FROM_PEEK,
                 ctypes.byref(value),
                 ctypes.sizeof(value)
             )

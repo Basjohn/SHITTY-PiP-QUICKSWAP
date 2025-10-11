@@ -230,19 +230,34 @@ class ZOrderManager(QObject):
         self._tdebug_ctx(f"Context menu ended for overlay {overlay_id}, enforcement={success}")
         return success
     
+    def enforce_z_order_critical(self, overlay_id: str) -> bool:
+        """
+        Enforce z-order immediately for critical overlays (docking mode).
+        
+        Bypasses debouncing/coalescing for instant HWND_TOPMOST placement.
+        Use this for overlays that must never fall behind taskbar/other windows.
+        
+        Returns:
+            bool: True if enforcement succeeded, False otherwise
+        """
+        if overlay_id not in self._overlays:
+            self._logger.warning(f"Cannot enforce z-order for unregistered overlay {overlay_id}")
+            return False
+        return self._enforce_z_order_immediate(overlay_id, ZOrderPriority.CRITICAL)
+
     def enforce_z_order(self, overlay_id: str, priority: ZOrderPriority = ZOrderPriority.NORMAL) -> bool:
         """
         Request z-order enforcement with optional debouncing.
         
-        Context menu priority bypasses debouncing for immediate enforcement.
+        Context menu and critical priorities bypass debouncing for immediate enforcement.
         """
         # UI thread operation - no lock needed
         if overlay_id not in self._overlays:
             self._logger.warning(f"Cannot enforce z-order for unregistered overlay {overlay_id}")
             return False
         
-        # Context menu priority gets immediate enforcement
-        if priority == ZOrderPriority.CONTEXT_MENU:
+        # Context menu and critical priorities get immediate enforcement
+        if priority in (ZOrderPriority.CONTEXT_MENU, ZOrderPriority.CRITICAL):
             return self._enforce_z_order_immediate(overlay_id, priority)
         
         used_coalescer = False

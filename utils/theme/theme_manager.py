@@ -232,9 +232,15 @@ class ThemeManager(QObject):
         # Load any custom themes
         self._load_custom_themes()
         
-        # Connect to settings changes
-        if app:
+        # Connect to settings changes (always initialize; do not depend on app being passed)
+        try:
             ThreadManager.single_shot(0, self._initialize_settings_connection)
+        except Exception:
+            # Best-effort fallback
+            try:
+                self._initialize_settings_connection()
+            except Exception:
+                pass
 
         # Register ThemeManager with ResourceManager for deterministic cleanup
         try:
@@ -343,6 +349,13 @@ class ThemeManager(QObject):
             return
         
         # If we're in the middle of a settings change, queue this request
+        # Ensure settings manager exists so theme persists and settings-based listeners fire
+        if self._settings_manager is None:
+            try:
+                self._settings_manager = settings_manager.SettingsManager()
+            except Exception:
+                self._settings_manager = None
+
         if not from_settings and self._settings_manager and self._settings_manager.get('theme') != theme_name:
             self._pending_theme = theme_name
             # Use ThreadManager instead of direct QTimer for consistent timing management
@@ -758,11 +771,11 @@ class ThemeManager(QObject):
         try:
             # Apply the style to the application (propagates to all widgets)
             self.app.setStyleSheet(style_sheet)
-            logger.debug("Successfully applied stylesheet to application")
+            # Only log theme application at INFO level to reduce spam
             
             # Emit style changed signal
             self.style_changed.emit()
-            logger.debug("Emitted style_changed signal")
+            # Reduced debug spam - only log signal emission in verbose mode
             
         except Exception as e:
             error_msg = f"Failed to apply theme stylesheet: {str(e)}"
@@ -779,7 +792,9 @@ class ThemeManager(QObject):
                 self._icon_cache.clear()
                 self._pixmap_cache.clear()
                 self._font_cache.clear()
-                logger.debug(f"ThemeManager caches cleared (icons={icon_n}, pixmaps={pix_n}, fonts={font_n})")
+                # Only log cache clearing if there were items to clear
+                if icon_n > 0 or pix_n > 0 or font_n > 0:
+                    logger.debug(f"ThemeManager caches cleared (icons={icon_n}, pixmaps={pix_n}, fonts={font_n})")
             except Exception as e:
                 logger.debug(f"ThemeManager cache clear failed: {e}")
         try:

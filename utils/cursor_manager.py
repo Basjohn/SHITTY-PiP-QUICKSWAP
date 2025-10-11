@@ -56,6 +56,8 @@ class CursorManager:
         self._logger = get_logger(__name__)
         self._current_cursor: Optional[CursorRequest] = None
         self._cursor_stack: list[CursorRequest] = []
+        # Anti-spam signature for repeated identical set requests
+        self._last_set_signature: Optional[tuple] = None
         
         # Register with ResourceManager for deterministic cleanup
         try:
@@ -98,6 +100,15 @@ class CursorManager:
         # UI thread operation - no lock needed
         request = CursorRequest(requester, widget, cursor, priority, reason)
         
+        # Short-circuit: if the exact same cursor request is already active, do nothing
+        if (self._current_cursor is not None and
+            self._current_cursor.requester == requester and
+            self._current_cursor.widget is widget and
+            self._current_cursor.cursor == cursor and
+            self._current_cursor.priority == priority):
+            # Avoid logging spam for identical no-op
+            return True
+
         # Check if we can grant this request
         if self._current_cursor is None or priority.value >= self._current_cursor.priority.value:
             # Store previous cursor if we're overriding
@@ -107,10 +118,18 @@ class CursorManager:
             self._current_cursor = request
             widget.setCursor(cursor)
             
-            self._logger.debug(f"Cursor set by {requester} on {widget} to {cursor.name} (priority {priority.name})")
+            # Reduce spam: only log when signature changes
+            sig = (requester, id(widget), cursor, priority)
+            if self._last_set_signature != sig:
+                self._logger.debug(f"Cursor set by {requester} on {widget} to {cursor.name} (priority {priority.name})")
+                self._last_set_signature = sig
             return True
         else:
-            self._logger.debug(f"Cursor request denied for {requester} (priority {priority.name} < current {self._current_cursor.priority.name})")
+            # Reduce deny spam: only log when requester/priority changes
+            sig = ("DENY", requester, priority, self._current_cursor.requester, self._current_cursor.priority)
+            if self._last_set_signature != sig:
+                self._logger.debug(f"Cursor request denied for {requester} (priority {priority.name} < current {self._current_cursor.priority.name})")
+                self._last_set_signature = sig
             return False
     
     def unset_cursor(self, requester: str, widget: QWidget) -> bool:
@@ -126,8 +145,6 @@ class CursorManager:
         # UI thread operation - no lock needed
         if self._current_cursor is None:
             # Reduce cursor override logging spam
-            if not hasattr(self, '_last_cursor_log') or self._last_cursor_log != requester:
-                self._logger.debug(f"Cursor stack cleared for {requester}")
             return True
         
         if self._current_cursor.requester != requester:
@@ -143,7 +160,10 @@ class CursorManager:
         else:
             self._current_cursor = None
             widget.unsetCursor()
-            self._logger.debug(f"Cursor unset by {requester}, restored to default")
+            # Reduce spam: do not log default restoration repeatedly
+            if self._last_set_signature != ("DEFAULT",):
+                self._logger.debug("Cursor restored to default")
+                self._last_set_signature = ("DEFAULT",)
         
         return True
     

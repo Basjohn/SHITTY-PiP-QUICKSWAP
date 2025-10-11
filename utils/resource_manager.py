@@ -60,6 +60,9 @@ __all__ = [
     "register_gl_context",
     # Utilities
     "cleanup_via_temp_registration",
+    # Finders
+    "find_resource_by_description",
+    "find_resources_by_type",
 ]
 
 # --- Utilities ---------------------------------------------------------------
@@ -96,3 +99,43 @@ def cleanup_via_temp_registration(
         **metadata,
     )
     return rm.unregister(rid)
+
+# --- Finder helpers -----------------------------------------------------------
+def find_resource_by_description(description: str):
+    """Return the first live resource whose description matches exactly.
+
+    This is useful for retrieving singletons (e.g., "DockingOverlayManager")
+    without knowing their internal resource_id. Returns None if not found.
+    """
+    try:
+        rm = get_resource_manager()
+        infos = rm.list_resources()
+        for ri in infos:
+            try:
+                if getattr(ri, "description", "") == description:
+                    return rm.get(ri.resource_id)
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+def find_resources_by_type(resource_type):
+    """Return a list of live resources matching the given ResourceType or name.
+
+    resource_type can be a ResourceType enum or its string name.
+    """
+    try:
+        rm = get_resource_manager()
+        infos = rm.list_resources(resource_type)
+        results = []
+        for ri in infos:
+            try:
+                obj = rm.get(ri.resource_id)
+                if obj is not None:
+                    results.append(obj)
+            except Exception:
+                continue
+        return results
+    except Exception:
+        return []

@@ -105,7 +105,8 @@ if sys.platform == 'win32':
             return False, 0
 
 # Configuration constants
-DEFAULT_SNAP_DISTANCE = 35
+# Slightly stronger default snapping per user feedback
+DEFAULT_SNAP_DISTANCE = 40
 DEFAULT_RESIZE_MARGIN = 12  # Reduced margin to make resize handles only show near edges/corners
 MIN_WINDOW_SIZE = QSize(100, 50)
 
@@ -538,6 +539,8 @@ class WindowBehaviorManager:
         self._min_size = QSize(min_width, min_height)
         self._drag_state = DragState()
         self._logger = get_logger(__name__)
+        # Per-instance snap distance (configurable); default to module constant
+        self._snap_distance: int = int(DEFAULT_SNAP_DISTANCE)
         # Wheel batching state
         self._wheel_accum: float = 0.0
         self._pending_wheel_geo: Optional[QRect] = None
@@ -590,7 +593,7 @@ class WindowBehaviorManager:
         # Get mouse position
         pos = event.position().toPoint() if hasattr(event.position(), 'toPoint') else event.pos()
         global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
-        
+
         # Check if we're on a resize edge - with higher priority than dragging
         resize_edge = get_resize_edge_for_pos(pos, self._widget, restrict_to_bottom_right=restrict_to_bottom_right)
         
@@ -634,6 +637,37 @@ class WindowBehaviorManager:
             except Exception as e:
                 self._logger.error(f"Failed to request mouse capture for resize: {e}")
         else:
+            # Docking mode: for SECONDARY overlays, do not start a local drag; delegate group-drag to manager.
+            # This applies only when not on a resize edge.
+            try:
+                overlay = getattr(self._widget, '_parent_overlay', None)
+                if overlay is None:
+                    overlay = getattr(self._widget, '_backend_overlay', None)
+            except Exception:
+                overlay = None
+            if (not resize_edge) and (overlay and overlay.__class__.__name__ == 'DockingOverlay' and not getattr(overlay, '_is_main', False)):
+                try:
+                    mgr = getattr(overlay, '_manager', None)
+                    if mgr is not None:
+                        setattr(mgr, '_secondary_drag_active', True)
+                        setattr(mgr, '_secondary_drag_global_last', global_pos)
+                    # Set drag cursor via cursor manager for UX consistency
+                    try:
+                        from utils.cursor_manager import set_managed_cursor, CursorPriority
+                        set_managed_cursor(
+                            "window_behavior_drag",
+                            self._widget,
+                            Qt.SizeAllCursor,
+                            CursorPriority.WINDOW_BEHAVIOR,
+                            "dock_group_drag_secondary"
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                self._logger.debug("Docking secondary press: delegating drag to manager (no local drag)")
+                return
+
             allowed = (is_draggable_region is None or is_draggable_region(pos))
             self._logger.debug(f"Press: local={pos}, global={global_pos}, draggable={allowed}")
         
@@ -695,6 +729,16 @@ class WindowBehaviorManager:
         else:
             # Update cursor based on position
             self._update_cursor_for_position(pos, restrict_to_bottom_right)
+    
+    def set_snap_distance(self, pixels: int) -> None:
+        """Set the snap distance for this window behavior instance."""
+        try:
+            p = int(pixels)
+            if p > 0:
+                self._snap_distance = p
+                self._logger.debug(f"WindowBehaviorManager snap distance set to {p}")
+        except Exception as e:
+            self._logger.debug(f"Failed to set snap distance: {e}")
     
     def handle_double_click(self, event) -> bool:
         """Handle double-click events for window behavior.
@@ -789,6 +833,36 @@ class WindowBehaviorManager:
             except Exception as e:
                 self._logger.error(f"Failed to release mouse capture: {e}")
 
+            # If this was a delegated secondary drag, clear manager flag and cursor
+            try:
+                overlay = getattr(self._widget, '_parent_overlay', None)
+                if overlay is None:
+                    overlay = getattr(self._widget, '_backend_overlay', None)
+                if overlay and overlay.__class__.__name__ == 'DockingOverlay' and not getattr(overlay, '_is_main', False):
+                    mgr = getattr(overlay, '_manager', None)
+                    if mgr is not None and hasattr(mgr, '_secondary_drag_active'):
+                        try:
+                            setattr(mgr, '_secondary_drag_active', False)
+                        except Exception:
+                            pass
+                    try:
+                        from utils.cursor_manager import unset_managed_cursor
+                        unset_managed_cursor("window_behavior_drag", self._widget)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Opportunistic persistence for standalone overlays after drag/resize release
+            try:
+                overlay = getattr(self._widget, '_parent_overlay', None)
+                if overlay is None:
+                    overlay = getattr(self._widget, '_backend_overlay', None)
+                if overlay is not None and hasattr(overlay, '_persist_current_geometry'):
+                    overlay._persist_current_geometry()
+            except Exception:
+                pass
+
     # --- Qt-style event adapter methods (for widgets forwarding events) ---
     def mousePressEvent(self, event) -> None:
         """Qt adapter: forwards to handle_mouse_press."""
@@ -825,6 +899,20 @@ class WindowBehaviorManager:
             content_insets: Optional (ix, iy) DPI-aware per-side insets used to derive inner content rect
         """
         try:
+            # Docking mode guard: if this host belongs to a secondary docking overlay,
+            # do not perform host wheel-resize here. Let DockingOverlay intercept and scale the main.
+            try:
+                ov = getattr(self._widget, '_parent_overlay', None)
+                if ov is None:
+                    ov = getattr(self._widget, '_backend_overlay', None)
+                # Detect DockingOverlay without importing to avoid cycles
+                if ov is not None and ov.__class__.__name__ == 'DockingOverlay':
+                    is_main = bool(getattr(ov, '_is_main', False))
+                    if not is_main:
+                        return
+            except Exception:
+                pass
+
             # Extract wheel delta (Qt: 120 units per step)
             angle = event.angleDelta() if hasattr(event, 'angleDelta') else None
             if angle is None:
@@ -840,6 +928,8 @@ class WindowBehaviorManager:
             base_step_px = 28.0
             scale = 2.0 if self._wheel_accum >= 0 else 2.1
             px_delta = self._wheel_accum * base_step_px * scale
+            
+            self._logger.debug(f"WHEEL_RESIZE: accum={self._wheel_accum:.3f}, px_delta={px_delta:.1f}, direction={'grow' if px_delta > 0 else 'shrink'}")
 
             # Aspect handling
             aspect_ratio: Optional[float] = None
@@ -866,15 +956,18 @@ class WindowBehaviorManager:
             else:
                 union_rect = QRect(0, 0, 9999, 9999)
 
-            # Determine pinned edges relative to current screen work area
+            # Determine pinned edges relative to current screen work area AND full screen
             center = self._widget.frameGeometry().center()
             screen = QGuiApplication.screenAt(center) or QGuiApplication.primaryScreen()
             work = screen.availableGeometry() if screen else union_rect
+            full_screen = screen.geometry() if screen else union_rect
             PIN_THRESH = 30
             pinned_left = abs(cur_geo.left() - work.left()) <= PIN_THRESH
             pinned_right = abs(cur_geo.right() - work.right()) <= PIN_THRESH
             pinned_top = abs(cur_geo.top() - work.top()) <= PIN_THRESH
-            pinned_bottom = abs(cur_geo.bottom() - work.bottom()) <= PIN_THRESH
+            # Bottom can be pinned to either taskbar (work area) OR real screen bottom
+            pinned_bottom = (abs(cur_geo.bottom() - work.bottom()) <= PIN_THRESH or 
+                            abs(cur_geo.bottom() - full_screen.bottom()) <= PIN_THRESH)
 
             # Determine number of expanding sides per axis (1 if pinned on any side, else 2)
             width0, height0 = cur_geo.width(), cur_geo.height()
@@ -956,18 +1049,148 @@ class WindowBehaviorManager:
 
             new_rect = QRect(new_left, new_top, int(target_w), int(target_h))
 
-            # Clamp within union of monitors to avoid off-screen geometry
-            max_x = union_rect.right() - new_rect.width()
-            max_y = union_rect.bottom() - new_rect.height()
-            clamped = QRect(
-                max(union_rect.left(), min(new_rect.left(), max_x)),
-                max(union_rect.top(), min(new_rect.top(), max_y)),
-                new_rect.width(),
-                new_rect.height(),
-            )
+            # Clamp within the current monitor FULL geometry; adjust size if necessary to prevent escape
+            try:
+                screen_for_new = QGuiApplication.screenAt(new_rect.center()) or QGuiApplication.primaryScreen()
+                full_bounds = screen_for_new.geometry() if screen_for_new else union_rect
+
+                # If new size exceeds monitor, reduce while preserving AR/insets when provided
+                if new_rect.width() > full_bounds.width() or new_rect.height() > full_bounds.height():
+                    if aspect_ratio:
+                        ix2 = iy2 = 0
+                        if isinstance(content_insets, tuple) and len(content_insets) == 2:
+                            ix2, iy2 = content_insets
+                            ix2 = max(0, int(ix2))
+                            iy2 = max(0, int(iy2))
+                        max_outer_w = max(1, full_bounds.width())
+                        max_outer_h = max(1, full_bounds.height())
+                        # Compute inner limits and fit by the most constraining dimension
+                        max_inner_w = max(1, max_outer_w - 2 * ix2)
+                        max_inner_h = max(1, max_outer_h - 2 * iy2)
+                        # Candidate by width limit
+                        cand_inner_h_from_w = int(round(max_inner_w / aspect_ratio))
+                        # Candidate by height limit
+                        cand_inner_w_from_h = int(round(max_inner_h * aspect_ratio))
+                        # Choose the pair that fits within both limits
+                        if cand_inner_h_from_w <= max_inner_h:
+                            inner_w_fit = max_inner_w
+                            inner_h_fit = max(1, cand_inner_h_from_w)
+                        else:
+                            inner_h_fit = max_inner_h
+                            inner_w_fit = max(1, cand_inner_w_from_h)
+                        # Reconstruct outer target size
+                        target_w2 = inner_w_fit + 2 * ix2
+                        target_h2 = inner_h_fit + 2 * iy2
+                    else:
+                        target_w2 = min(new_rect.width(), full_bounds.width())
+                        target_h2 = min(new_rect.height(), full_bounds.height())
+
+                    # Recompute origin based on pinned edges
+                    dw2 = int(target_w2) - width0
+                    dh2 = int(target_h2) - height0
+                    if pinned_right and not pinned_left:
+                        new_left2 = cur_geo.left() - dw2
+                    elif pinned_left and not pinned_right:
+                        new_left2 = cur_geo.left()
+                    else:
+                        new_left2 = cur_geo.left() - dw2 // 2
+
+                    if pinned_bottom and not pinned_top:
+                        new_top2 = cur_geo.top() - dh2
+                    elif pinned_top and not pinned_bottom:
+                        new_top2 = cur_geo.top()
+                    else:
+                        new_top2 = cur_geo.top() - dh2 // 2
+
+                    new_rect = QRect(new_left2, new_top2, int(target_w2), int(target_h2))
+
+                # Finally, clamp position within full monitor bounds
+                max_xm = full_bounds.right() - new_rect.width()
+                max_ym = full_bounds.bottom() - new_rect.height()
+                clamped = QRect(
+                    max(full_bounds.left(), min(new_rect.left(), max_xm)),
+                    max(full_bounds.top(), min(new_rect.top(), max_ym)),
+                    new_rect.width(),
+                    new_rect.height(),
+                )
+            except Exception:
+                # Fallback to union clamp
+                max_x = union_rect.right() - new_rect.width()
+                max_y = union_rect.bottom() - new_rect.height()
+                clamped = QRect(
+                    max(union_rect.left(), min(new_rect.left(), max_x)),
+                    max(union_rect.top(), min(new_rect.top(), max_y)),
+                    new_rect.width(),
+                    new_rect.height(),
+                )
+
+            # Boundary smoothing: when we hit union bounds, apply smaller incremental step
+            # BUT: Skip smoothing if pinned edges are stable (window growing away from boundary, not into it)
+            try:
+                pinned_edges_stable = False
+                try:
+                    # Check if pinned edge positions are unchanged (growing away from boundary)
+                    if pinned_left and clamped.left() == new_rect.left() == cur_geo.left():
+                        pinned_edges_stable = True
+                    if pinned_right and clamped.right() == new_rect.right() == cur_geo.right():
+                        pinned_edges_stable = True
+                    if pinned_top and clamped.top() == new_rect.top() == cur_geo.top():
+                        pinned_edges_stable = True
+                    if pinned_bottom and clamped.bottom() == new_rect.bottom() == cur_geo.bottom():
+                        pinned_edges_stable = True
+                except Exception:
+                    pass
+                
+                if clamped != new_rect and abs(dx) > 1 and not pinned_edges_stable:
+                    step = max(1, min(abs(dx), 2))
+                    step_sign = 1 if dx > 0 else -1
+                    if aspect_ratio:
+                        # Adjust inner size by a tiny step while preserving AR and insets
+                        ix2 = iy2 = 0
+                        if isinstance(content_insets, tuple) and len(content_insets) == 2:
+                            ix2, iy2 = content_insets
+                            ix2 = max(0, int(ix2))
+                            iy2 = max(0, int(iy2))
+                        inner_w1 = max(1, (width0 - 2 * ix2) + sides_h * step_sign * step)
+                        inner_h1 = int(round(inner_w1 / aspect_ratio)) if aspect_ratio else (height0 + sides_v * step_sign * step)
+                        target_w2 = inner_w1 + 2 * ix2
+                        target_h2 = inner_h1 + 2 * iy2
+                    else:
+                        target_w2 = width0 + sides_h * step_sign * step
+                        target_h2 = height0 + sides_v * step_sign * step
+
+                    dw2 = target_w2 - width0
+                    dh2 = target_h2 - height0
+                    if pinned_right and not pinned_left:
+                        new_left2 = cur_geo.left() - dw2
+                    elif pinned_left and not pinned_right:
+                        new_left2 = cur_geo.left()
+                    else:
+                        new_left2 = cur_geo.left() - dw2 // 2
+
+                    if pinned_bottom and not pinned_top:
+                        new_top2 = cur_geo.top() - dh2
+                    elif pinned_top and not pinned_bottom:
+                        new_top2 = cur_geo.top()
+                    else:
+                        new_top2 = cur_geo.top() - dh2 // 2
+
+                    new_rect2 = QRect(new_left2, new_top2, int(target_w2), int(target_h2))
+                    clamped = QRect(
+                        max(union_rect.left(), min(new_rect2.left(), union_rect.right() - new_rect2.width())),
+                        max(union_rect.top(), min(new_rect2.top(), union_rect.bottom() - new_rect2.height())),
+                        new_rect2.width(),
+                        new_rect2.height(),
+                    )
+            except Exception:
+                pass
 
             # Store latest pending geometry for coalesced apply
             self._pending_wheel_geo = clamped
+            
+            old_size = f"{cur_geo.width()}x{cur_geo.height()}"
+            new_size = f"{clamped.width()}x{clamped.height()}"
+            self._logger.debug(f"WHEEL_RESIZE: {old_size} -> {new_size} (delta: {clamped.width()-cur_geo.width()}x{clamped.height()-cur_geo.height()})")
 
             # Coalesce timers: schedule once per burst via ThreadManager (UI-safe)
             if not hasattr(self, "_wheel_apply_scheduled") or not getattr(self, "_wheel_apply_scheduled"):
@@ -995,6 +1218,15 @@ class WindowBehaviorManager:
                 return
             self._widget.setGeometry(pending)
             self._widget.update()
+            # Opportunistic persistence for standalone DWM overlays after wheel-resize
+            try:
+                overlay = getattr(self._widget, '_parent_overlay', None)
+                if overlay is None:
+                    overlay = getattr(self._widget, '_backend_overlay', None)
+                if overlay is not None and hasattr(overlay, '_persist_current_geometry'):
+                    overlay._persist_current_geometry()
+            except Exception:
+                pass
         except Exception as e:
             self._logger.error(f"Failed to apply wheel geometry: {e}")
         finally:

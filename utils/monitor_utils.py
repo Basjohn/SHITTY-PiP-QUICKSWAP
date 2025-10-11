@@ -191,10 +191,7 @@ def get_all_monitors() -> List[Dict[str, Any]]:
                 if 'is_primary' not in monitor_info:
                     monitor_info['is_primary'] = (screen == QGuiApplication.primaryScreen())
                 monitors.append(monitor_info)
-                logger.debug(
-                    f"Added monitor {i}: {monitor_info.get('device_name', 'Unknown')} "
-                    f"at {monitor_info['position'].x()},{monitor_info['position'].y()}"
-                )
+                # Reduced debug spam - only log monitor changes, not repeated detections
             except Exception as e:
                 logger.error(f"Error processing screen {i}: {e}", exc_info=True)
         monitors.sort(key=lambda m: (m['position'].x(), m['position'].y()))

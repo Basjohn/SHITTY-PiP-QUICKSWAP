@@ -164,7 +164,7 @@ class OverlayContextMenu:
                     self.switch_to_monitor_menu = self.menu.addMenu("Switch To Monitor")
                     self.switch_to_monitor_menu.aboutToShow.connect(_populate_monitor_menu)
             self.menu.addSeparator()
-            # --- Lock Overlay (window overlays only) ---
+            # --- Lock Overlay ---
             if self.overlay_type == 'window':
                 self.lock_action = QAction("Lock Overlay", self.menu)
                 self.lock_action.setCheckable(True)
@@ -173,6 +173,9 @@ class OverlayContextMenu:
                 self.menu.addAction(self.lock_action)
                 self._actions['lock'] = self.lock_action
                 self.menu.addSeparator()
+            elif self.config.get('docking_mode'):
+                # Docking mode: no per-overlay lock in menu per SST/policy
+                pass
             # --- Settings, Subsettings ---
             show_settings_action = QAction("Main Window", self.menu)
             # Prefer injected callback if provided, otherwise use centralized handler
@@ -190,16 +193,128 @@ class OverlayContextMenu:
             self.menu.addAction(show_sub_settings_action)
             self._actions['show_sub_settings'] = show_sub_settings_action
             self.menu.addSeparator()
-            # --- Hide, Reset, Quit ---
-            hide_action = QAction("Hide", self.menu)
-            self._wire_action(hide_action, 'hide', 'close')
-            self.menu.addAction(hide_action)
-            self._actions['hide'] = hide_action
-            reset_action = QAction("Reset Overlay", self.menu)
-            # Use callback instead of overlay method since _handle_recreate_overlay is on the context menu
-            reset_action.triggered.connect(self._handle_recreate_overlay)
-            self.menu.addAction(reset_action)
-            self._actions['reset'] = reset_action
+            
+            # --- Docking-specific actions ---
+            if self.config.get('docking_mode'):
+                manager = self.config.get('manager')
+                overlay_id = self.config.get('overlay_id', 'unknown')
+                is_main_overlay = self.config.get('is_main_overlay', False)
+                
+                # Make Primary (for secondary overlays only)
+                if not is_main_overlay:
+                    make_primary_action = QAction("Make Primary", self.menu)
+                    make_primary_action.setToolTip("Place this window in the primary overlay (A/1)")
+                    if manager and hasattr(manager, 'swap_primary_with_secondary'):
+                        make_primary_action.triggered.connect(lambda: manager.swap_primary_with_secondary(overlay_id))
+                    else:
+                        make_primary_action.setEnabled(False)
+                    self.menu.addAction(make_primary_action)
+                    self._actions['make_primary'] = make_primary_action
+                
+                self.menu.addSeparator()
+                
+                # Hide All overlays
+                hide_all_action = QAction("Hide All", self.menu)
+                hide_all_action.setToolTip("Hide all docking overlays")
+                if manager and hasattr(manager, 'hide_all_overlays'):
+                    hide_all_action.triggered.connect(manager.hide_all_overlays)
+                else:
+                    hide_all_action.setEnabled(False)
+                self.menu.addAction(hide_all_action)
+                self._actions['hide_all'] = hide_all_action
+                
+                self.menu.addSeparator()
+                
+                # Reset Overlays (all overlays)
+                reset_all_action = QAction("Reset Overlays", self.menu)
+                reset_all_action.setToolTip("Reset all docking overlays to their default positions")
+                def _reset_all_docking():
+                    try:
+                        if manager:
+                            manager.reset_overlay('main')
+                            manager.reset_overlay('secondary_0') 
+                            manager.reset_overlay('secondary_1')
+                    except Exception as e:
+                        self._logger.error(f"Failed to reset overlays: {e}")
+                reset_all_action.triggered.connect(_reset_all_docking)
+                self.menu.addAction(reset_all_action)
+                self._actions['reset_all'] = reset_all_action
+                
+                self.menu.addSeparator()
+                
+                # Switch To Single Overlay (only when in docking mode)
+                switch_to_single_action = QAction("Switch To Single Overlay", self.menu)
+                switch_to_single_action.setToolTip("Switch to single overlay mode")
+                if 'switch_to_single_overlay' in self._callbacks:
+                    switch_to_single_action.triggered.connect(self._callbacks['switch_to_single_overlay'])
+                else:
+                    switch_to_single_action.setEnabled(False)
+                self.menu.addAction(switch_to_single_action)
+                self._actions['switch_to_single'] = switch_to_single_action
+                
+                self.menu.addSeparator()
+            
+            # --- Hide, Reset, Correct AR, Quit ---
+            if not self.config.get('docking_mode'):
+                hide_action = QAction("Hide", self.menu)
+                self._wire_action(hide_action, 'hide', 'close')
+                self.menu.addAction(hide_action)
+                self._actions['hide'] = hide_action
+            
+            if not self.config.get('docking_mode'):
+                # Individual reset only for non-docking overlays
+                reset_action = QAction("Reset Overlay", self.menu)
+                # Prefer explicit overlay reset handler if available; fallback to recreate
+                try:
+                    if hasattr(self.overlay, '_handle_reset_position') and callable(getattr(self.overlay, '_handle_reset_position')):
+                        reset_action.triggered.connect(self.overlay._handle_reset_position)
+                    else:
+                        reset_action.triggered.connect(self._handle_recreate_overlay)
+                except Exception:
+                    reset_action.triggered.connect(self._handle_recreate_overlay)
+                self.menu.addAction(reset_action)
+                self._actions['reset'] = reset_action
+                
+                self.menu.addSeparator()
+                
+                # Switch To Dock submenu (for single overlay mode only)
+                if 'switch_to_docking_normal' in self._callbacks or 'switch_to_docking_cycle' in self._callbacks:
+                    switch_to_dock_menu = self.menu.addMenu("Switch To Dock")
+                    switch_to_dock_menu.setToolTip("Switch to docking mode with multiple overlays")
+                    
+                    # Normal mode option
+                    dock_normal_action = QAction("Normal", self.menu)
+                    dock_normal_action.setToolTip("Sticky assignments - overlays maintain content")
+                    if 'switch_to_docking_normal' in self._callbacks:
+                        dock_normal_action.triggered.connect(self._callbacks['switch_to_docking_normal'])
+                    else:
+                        dock_normal_action.setEnabled(False)
+                    switch_to_dock_menu.addAction(dock_normal_action)
+                    self._actions['switch_to_docking_normal'] = dock_normal_action
+                    
+                    # Cycle mode option
+                    dock_cycle_action = QAction("Cycle", self.menu)
+                    dock_cycle_action.setToolTip("Dynamic MRU-based assignments - overlays update continuously")
+                    if 'switch_to_docking_cycle' in self._callbacks:
+                        dock_cycle_action.triggered.connect(self._callbacks['switch_to_docking_cycle'])
+                    else:
+                        dock_cycle_action.setEnabled(False)
+                    switch_to_dock_menu.addAction(dock_cycle_action)
+                    self._actions['switch_to_docking_cycle'] = dock_cycle_action
+
+            # Add Correct AR for all overlays (DWM and Docking)
+            correct_ar_action = QAction("Correct AR", self.menu)
+            try:
+                if hasattr(self.overlay, '_handle_correct_aspect') and callable(getattr(self.overlay, '_handle_correct_aspect')):
+                    correct_ar_action.triggered.connect(self.overlay._handle_correct_aspect)
+                elif hasattr(self.overlay, '_dwm_overlay') and hasattr(self.overlay._dwm_overlay, '_handle_correct_aspect'):
+                    correct_ar_action.triggered.connect(lambda: self.overlay._dwm_overlay._handle_correct_aspect())
+                else:
+                    correct_ar_action.setEnabled(False)
+            except Exception:
+                correct_ar_action.setEnabled(False)
+            self.menu.addAction(correct_ar_action)
+            self._actions['correct_ar'] = correct_ar_action
             
             # Note: Recreate functionality consolidated into Reset action
             self.menu.addSeparator()
@@ -492,200 +607,134 @@ class OverlayContextMenu:
     def populate_switch_to_window_menu(self):
         """Populate the Switch To Window submenu with available windows.
         
-        Uses the direct overlay method to ensure rich functionality is preserved.
-        No fallbacks are provided - we either succeed or fail clearly.
+        Prefers overlay-provided enumeration (works for docking and DWM). If empty,
+        falls back to app_instance cached list. As a last resort, lets the utility
+        populate a disabled state or shows a disabled item.
         """
         menu = self.switch_to_window_menu
         menu.clear()
         if debug_enabled:
             self._logger.debug("CTX_MENU: Populating window menu")
-        
-        # Primary centralized path: use window_menu_utils to populate from app_instance
-        try:
-            app_instance = getattr(self.overlay, 'app_instance', None)
-            if app_instance is None:
-                self._logger.error("CTX_MENU: App instance not available for window menu population")
-                disabled = menu.addAction("No application context available")
-                disabled.setEnabled(False)
-                return
-            if not hasattr(self.overlay, '_handle_swap_window'):
-                self._logger.error("CTX_MENU: Required method '_handle_swap_window' not found on overlay")
-                disabled = menu.addAction("Swap handler unavailable")
-                disabled.setEnabled(False)
-                return
-            # Use centralized utility (handles caching, icons, errors)
-            # Create wrapper to pass record_mru=True for context menu swaps
-            def context_menu_swap_handler(hwnd: int):
-                self.overlay._handle_swap_window(hwnd, True)
-            populate_window_switch_menu(menu, app_instance, context_menu_swap_handler)
-            return
-        except Exception as e:
-            # Do not crash the whole menu; show an error item and return
-            self._logger.error(f"CTX_MENU: Failed to populate window menu via utility: {e}")
-            menu.clear()
-            err = menu.addAction("Error loading windows")
-            err.setEnabled(False)
-            return
-        
+
+        # Robust swap invoker supporting optional record flag
+        def _invoke_swap(hwnd: int):
+            try:
+                if not hasattr(self.overlay, '_handle_swap_window'):
+                    raise AttributeError("_handle_swap_window missing on overlay")
+                try:
+                    self.overlay._handle_swap_window(hwnd, True)
+                except TypeError:
+                    self.overlay._handle_swap_window(hwnd)
+            except Exception as e:
+                self._logger.error(f"CTX_MENU: Swap invocation failed: {e}")
+
+        # Primary: overlay-provided enumeration
         windows_data = None
-        
-        # Legacy path (kept for uniqueness but will not be reached due to returns above)
-        if hasattr(self.overlay, 'app_instance') and hasattr(self.overlay.app_instance, 'get_menu_ready_windows'):
-            if debug_enabled:
-                self._logger.debug("CTX_MENU: Using app_instance.get_menu_ready_windows()")
-            windows_data = self.overlay.app_instance.get_menu_ready_windows()
-            
-        # Alternative source: overlay's own method
-        elif hasattr(self.overlay, 'get_menu_ready_windows'):
-            if debug_enabled:
-                self._logger.debug("CTX_MENU: Using overlay.get_menu_ready_windows()")
-            windows_data = self.overlay.get_menu_ready_windows()
-            
-        # Hard failure: required methods not available
-        else:
-            self._logger.error("CTX_MENU: Required method 'get_menu_ready_windows' not found")
-            raise AttributeError("Overlay or its app_instance must provide 'get_menu_ready_windows' method")
-        
-        # Hard failure: no window data
+        try:
+            if hasattr(self.overlay, 'get_menu_ready_windows'):
+                windows_data = self.overlay.get_menu_ready_windows()
+                if windows_data and debug_enabled:
+                    self._logger.debug(f"CTX_MENU: Using overlay.get_menu_ready_windows() -> {len(windows_data)} items")
+        except Exception as e:
+            self._logger.error(f"CTX_MENU: Overlay enumeration failed: {e}")
+            windows_data = None
+
+        # Secondary: centralized cache via app_instance
         if not windows_data:
-            self._logger.error("CTX_MENU: No windows data returned from get_menu_ready_windows")
-            raise RuntimeError("No window data available for context menu")
-            
+            app_instance = getattr(self.overlay, 'app_instance', None)
+            if app_instance is not None:
+                try:
+                    from utils.window_menu_utils import get_cached_window_list
+                    wl = get_cached_window_list(app_instance)
+                    if wl:
+                        windows_data = wl  # (hwnd,title,icon)
+                        if debug_enabled:
+                            self._logger.debug(f"CTX_MENU: Using app_instance cached list -> {len(windows_data)} items")
+                except Exception as e:
+                    self._logger.error(f"CTX_MENU: app_instance cache path failed: {e}")
+
+        # Last resort: let the utility handle disabled state or show disabled
+        if not windows_data:
+            app_instance = getattr(self.overlay, 'app_instance', None)
+            if app_instance is not None:
+                try:
+                    populate_window_switch_menu(menu, app_instance, lambda h: _invoke_swap(h))
+                    return
+                except Exception as e:
+                    self._logger.error(f"CTX_MENU: Utility population failed: {e}")
+            disabled = menu.addAction("No windows found")
+            disabled.setEnabled(False)
+            return
+
         if debug_enabled:
             self._logger.debug(f"CTX_MENU: Adding {len(windows_data)} windows to menu")
-        
-        # Add window entries to menu
-        for hwnd, title, icon in windows_data:
+
+        # Add window entries to menu (support both (hwnd,title,icon) and (hwnd,title))
+        for entry in windows_data:
+            try:
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    hwnd = entry[0]
+                    title = entry[1]
+                    icon = entry[2] if len(entry) >= 3 else None
+                else:
+                    continue
+            except Exception:
+                continue
             display_title = title.strip() if len(title.strip()) < 60 else title[:57] + "..."
             if not display_title:
                 display_title = f"[No Title] ({hwnd})"
-                
             action = QAction(display_title, menu)
             if icon and hasattr(icon, 'isNull') and not icon.isNull():
                 action.setIcon(icon)
             action.setData(hwnd)
-            
-            # Wire up the action
-            if hasattr(self.overlay, '_handle_swap_window'):
-                import functools
-                action.triggered.connect(functools.partial(self.overlay._handle_swap_window, hwnd, True))
-            else:
-                # Hard failure: required handler missing
-                self._logger.error("CTX_MENU: Required method '_handle_swap_window' not found on overlay")
-                raise AttributeError("Overlay must provide '_handle_swap_window' method")
-                
+            try:
+                action.triggered.connect(lambda checked=False, h=hwnd: _invoke_swap(h))
+            except Exception as e:
+                self._logger.error(f"CTX_MENU: Failed to wire swap for {hwnd}: {e}")
+                continue
             menu.addAction(action)
-
-    def _get_display_name(self, screen_obj, idx: int) -> str:
-        """Return a concise display name for a QScreen for menu labeling.
-
-        Format: "Display {n} — {name} ({w}x{h})"
-        Falls back gracefully if attributes are missing.
-        """
-        try:
-            disp_num = int(idx) + 1
-        except Exception:
-            disp_num = 1
-
-        # Name
-        try:
-            name = screen_obj.name() if hasattr(screen_obj, 'name') else None
-        except Exception:
-            name = None
-        if not name:
-            name = f"Display {disp_num}"
-
-        # Geometry
-        try:
-            g = screen_obj.geometry() if hasattr(screen_obj, 'geometry') else None
-            if g is not None:
-                w, h = g.width(), g.height()
-                return f"Display {disp_num} — {name} ({w}x{h})"
-        except Exception:
-            pass
-
-        return f"Display {disp_num} — {name}"
 
     def populate_switch_to_monitor_menu(self):
-        """Populate the Switch To Monitor submenu with available monitors and mode switch option.
+        """Populate the Switch To Monitor submenu with available monitors.
         
-        No fallbacks are provided - we either succeed or fail clearly.
+        Enumerates monitors via QGuiApplication and creates an action per screen.
+        Each action invokes `_handle_monitor_selection(screen)`.
         """
         menu = self.switch_to_monitor_menu
-        menu.clear()
-        if debug_enabled:
-            self._logger.debug("CTX_MENU: Populating monitor menu")
-        
-        # Add "Switch to Monitor Overlay" action if needed
-        if not hasattr(self.overlay, '_handle_switch_to_monitor_overlay'):
+        if not menu:
+            return
+        try:
+            menu.clear()
+            from PySide6.QtGui import QGuiApplication
+            screens = QGuiApplication.screens() or []
             if debug_enabled:
-                self._logger.debug("CTX_MENU: No monitor overlay switch handler available")
-        else:
-            if debug_enabled:
-                self._logger.debug("CTX_MENU: Adding monitor overlay switch option")
-            switch_action = QAction("Switch to Monitor Overlay", menu)
-            switch_action.triggered.connect(self.overlay._handle_switch_to_monitor_overlay)
-            menu.addAction(switch_action)
-            menu.addSeparator()
-        
-        # Get monitors using centralized utility
-        from utils.monitor_utils import get_all_monitors
-        monitors = get_all_monitors()
-        
-        if not monitors:
-            self._logger.error("CTX_MENU: No monitors returned from get_all_monitors")
-            raise RuntimeError("No monitors available for context menu")
-            
-        # Filter and extract screen objects
-        screen_objects = []
-        for monitor in monitors:
-            screen_obj = monitor.get("screen_object")
-            if not screen_obj:
-                continue
-                
-            # Skip current target screen if applicable
-            current_screen = None
-            if hasattr(self.overlay, "capture_target_screen"):
-                current_screen = self.overlay.capture_target_screen
-                
-            if current_screen and screen_obj == current_screen:
-                continue
-                
-            screen_objects.append(screen_obj)
-        
-        # Hard failure if no valid screens to switch to
-        if not screen_objects:
-            self._logger.error("CTX_MENU: No valid screens available for switching")
-            raise RuntimeError("No valid screens available for monitor menu")
-            
-        # Add each screen to the menu
-        seen_names = set()
-        for idx, screen_obj in enumerate(screen_objects):
-            if not hasattr(screen_obj, "name"):
-                self._logger.error(f"CTX_MENU: Screen object {idx} has no name attribute")
-                raise AttributeError(f"Screen object {idx} missing required 'name' attribute")
-                
-            name = screen_obj.name()
-            if name in seen_names:
-                continue
-                
-            seen_names.add(name)
-            display_name = self._get_display_name(screen_obj, len(seen_names) - 1)
-            
-            # Create and wire the action
-            action = QAction(display_name, menu)
-            action.setData(screen_obj)
-            
-            # Wire up the action
-            if hasattr(self.overlay, '_handle_switch_monitor'):
-                import functools
-                action.triggered.connect(functools.partial(self.overlay._handle_switch_monitor, screen_obj))
-            else:
-                # Hard failure: required handler missing
-                self._logger.error("CTX_MENU: Required method '_handle_switch_monitor' not found on overlay")
-                raise AttributeError("Overlay must provide '_handle_switch_monitor' method")
-                
-            menu.addAction(action)
+                self._logger.debug(f"CTX_MENU: Populating monitor menu with {len(screens)} screens")
+            if not screens:
+                disabled = menu.addAction("No monitors detected")
+                disabled.setEnabled(False)
+                return
+            # Build human-friendly titles
+            for idx, screen in enumerate(screens):
+                try:
+                    name = getattr(screen, 'name', lambda: f"Monitor {idx+1}")()
+                except Exception:
+                    name = f"Monitor {idx+1}"
+                try:
+                    geom = screen.geometry()
+                    res = f"{geom.width()}x{geom.height()}"
+                except Exception:
+                    res = ""
+                title = f"Monitor {idx+1} - {name} {f'({res})' if res else ''}".strip()
+                action = QAction(title, menu)
+                # Bind screen object into the callback
+                try:
+                    action.triggered.connect(lambda checked=False, s=screen: self._handle_monitor_selection(s))
+                except Exception as e:
+                    self._logger.error(f"CTX_MENU: Failed to wire monitor selection for {title}: {e}")
+                    continue
+                menu.addAction(action)
+        except Exception as e:
+            self._logger.error(f"CTX_MENU: Error populating monitor menu: {e}")
 
     def _handle_monitor_selection(self, screen_obj):
         """Handle selection of a monitor from the context menu."""
@@ -1016,10 +1065,20 @@ class OverlayContextMenu:
     def _recreate_overlay_delayed(self, overlay_id: str, config: dict = None) -> None:
         """Delayed overlay recreation to allow cleanup to complete."""
         try:
-            from core.graphics.overlay_manager import OverlayManager
             from core.logging import get_logger
             logger = get_logger("OverlayContextMenu")
             
+            # Check if docking mode is active - if so, skip recreation
+            try:
+                from core.graphics.overlay_manager import OverlayManager
+                om = OverlayManager()
+                if om and hasattr(om, '_docking_manager') and om._docking_manager and om._docking_manager._is_active:
+                    logger.info("Docking mode is active - skipping overlay recreation to prevent conflicts")
+                    return
+            except Exception as e:
+                logger.debug(f"Could not check docking mode status: {e}")
+            
+            from core.graphics.overlay_manager import OverlayManager
             om = OverlayManager()
             if not om:
                 logger.error("OverlayManager not available for delayed recreation")
@@ -1028,6 +1087,11 @@ class OverlayContextMenu:
             # Create new overlay with preserved or default configuration
             if not config:
                 config = {}
+            
+            # Ensure source window is preserved in properties to prevent "Invalid source window: 0"
+            properties = config.get('properties', {})
+            if not properties.get('hwnd'):
+                logger.warning(f"No source window preserved for overlay {overlay_id}, recreation may fail")
             
             # Convert config dict to proper parameters for create_overlay
             from PySide6.QtCore import QRect, QPoint, QSize
@@ -1055,11 +1119,11 @@ class OverlayContextMenu:
                 overlay_type=config.get('overlay_type'),
                 opacity=config.get('opacity', 1.0),
                 title=config.get('title', ''),
-                properties=config.get('properties', {}),
+                properties=properties,
                 bypass_lock=True
             )
             if new_overlay:
-                logger.info(f"Successfully recreated overlay: {overlay_id}")
+                logger.info(f"Successfully recreated overlay: {overlay_id} with hwnd {properties.get('hwnd', 'none')}")
             else:
                 logger.error(f"Failed to recreate overlay: {overlay_id}")
                 
