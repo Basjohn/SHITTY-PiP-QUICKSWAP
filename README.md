@@ -4,13 +4,17 @@
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://www.microsoft.com/windows/)
 
-Shitty Picture In Picture QuickSwap is a multiple overlay application allowing smart swapping of captured content with your current window and also has a worse monitor overlay for the lulz. And is a genuine alternative to alt-tab that obeys MRU. Features intelligent switching and routed media control.
+Shitty Picture In Picture QuickSwap is a multiple overlay application allowing smart swapping of captured content with your current window and also has a worse monitor overlay for the lulz. And is a genuine alternative to alt-tab that obeys MRU. Features intelligent switching, routed media control and now multioverlay docking is supported with full swap capabilities.
 
-<img width="600" alt="All sections exposed" src="https://github.com/user-attachments/assets/94f2d03a-8054-49f6-918b-a120aa6d04a5" />
+<img width="1272" height="695" alt="{7C387F2E-DCC7-4333-A301-2BEC66E6A929}" src="https://github.com/user-attachments/assets/057bbd95-0ba0-4de1-88ab-ffeccfd0dfc3" />
+
 
 
 
 ## Features
+
+#### NEWESTER
+Docking. Up to 5 simultaneous overlays can be made that sync together with your window usage, each other and allow targetted swaps into applications. Fully size adjustable and orientates to whatever corner you place it in.
 
 ### NEWEST
 Rebuilt from the ground up with new deep knowledge like files shouldn't import each other, there isn't a fragment of the old code remaining but many more functional features at far greater performance.
