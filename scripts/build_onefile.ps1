@@ -36,8 +36,8 @@ function Get-AppVersion {
 $ScriptDir   = Split-Path -Parent $PSCommandPath
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $ReleaseRoot = Join-Path $ProjectRoot 'release'
-$DistDir     = Join-Path $ReleaseRoot 'dist_single_av_safe'
-$LogPath     = Join-Path $ReleaseRoot 'build_single_nuitka_av_safe.log'
+$DistDir     = Join-Path $ReleaseRoot 'onefile'
+$LogPath     = Join-Path $ReleaseRoot 'build_onefile.log'
 
 if (-not (Test-Path (Join-Path $ProjectRoot 'main.py'))) { 
     Write-Err "main.py not found in project root: $ProjectRoot"; exit 1 
@@ -107,8 +107,8 @@ if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force 
 
 $IconPath = Join-Path $ProjectRoot 'resources/ShittyPIP.ico'
 
-# AV-safe Nuitka build with minimal flags
-Write-Info 'Starting AV-safe Nuitka build...'
+# Single EXE build (AV-safe baseline)
+Write-Info 'Starting single-file build (onefile)...'
 $nuArgs = @(
     '-m', 'nuitka',
     '--onefile',
@@ -141,8 +141,8 @@ $nuArgs += (Join-Path $ProjectRoot 'main.py')
 
 Write-Info "Nuitka command: $PythonExe $($nuArgs -join ' ')"
 
-$nuOut = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stdout.log'
-$nuErr = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stderr.log'
+$nuOut = Join-Path $ReleaseRoot 'nuitka_onefile_stdout.log'
+$nuErr = Join-Path $ReleaseRoot 'nuitka_onefile_stderr.log'
 foreach ($f in @($nuOut,$nuErr)) { if (Test-Path $f) { Remove-Item $f -Force } }
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -168,7 +168,7 @@ if (-not (Test-Path $exePath)) {
 }
 
 $sizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
-Write-Info "AV-safe build completed: $exePath (${sizeMB} MB)"
+Write-Info "Single-file build completed: $exePath (${sizeMB} MB)"
 
 if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
 exit 0

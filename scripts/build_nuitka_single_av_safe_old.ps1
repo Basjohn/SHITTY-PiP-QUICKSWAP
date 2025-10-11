@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
     [switch]$Clean,
-    [switch]$Console
+    [switch]$Console,
+    [switch]$BuildDebug,
+    [string]$CertPath = '',
+    [string]$CertPassword = '',
+    [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 Set-StrictMode -Version Latest
@@ -13,10 +17,7 @@ function Write-Err($msg)  { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 function Get-AppVersion {
     param([string]$VersionFile = "version.py")
     $versionPath = Join-Path $PSScriptRoot ".." $VersionFile
-    if (-not (Test-Path $versionPath)) {
-        Write-Warning "version.py not found, using fallback 2.1.0a"
-        return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' }
-    }
+    if (-not (Test-Path $versionPath)) { return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' } }
     try {
         $content = Get-Content $versionPath -Raw
         $major = if ($content -match 'VERSION_MAJOR\s*=\s*(\d+)') { [int]$Matches[1] } else { 2 }
@@ -27,9 +28,7 @@ function Get-AppVersion {
         $displayName = if ($content -match 'APP_DISPLAY_NAME\s*=\s*"([^"]*)"') { $Matches[1] } else { 'Shitty PiP QuickSwap' }
         $description = if ($content -match 'APP_DESCRIPTION\s*=\s*"([^"]*)"') { $Matches[1] } else { 'Overlays, too many fucking overlays.' }
         return @{ Win32="$major.$minor.$patch.0"; String="$major.$minor.$patch$suffix"; Company=$company; DisplayName=$displayName; Description=$description }
-    } catch {
-        return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' }
-    }
+    } catch { return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' } }
 }
 
 # Paths
@@ -55,6 +54,7 @@ try {
     Write-Err "Could not start transcript: $($_.Exception.Message)" 
 }
 
+Write-Info "PowerShell: $($PSVersionTable.PSVersion)"
 Write-Info "Project root: $ProjectRoot"
 Write-Info "Dist dir    : $DistDir"
 
@@ -64,51 +64,111 @@ if ($Clean) {
     Write-Info 'Cleanup complete.' 
 }
 
-# Python probe
+# Code signing setup
+$SigningEnabled = $false
+if ($CertPath -and (Test-Path $CertPath)) {
+    # Check for signtool.exe
+    $SignTool = $null
+    $WindowsKitsPath = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    if (Test-Path $WindowsKitsPath) {
+        $SignToolCandidates = Get-ChildItem -Path $WindowsKitsPath -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
+        if ($SignToolCandidates) {
+            $SignTool = $SignToolCandidates[0].FullName
+        }
+    }
+    
+    if ($SignTool -and (Test-Path $SignTool)) {
+        $SigningEnabled = $true
+        Write-Info "Code signing enabled with certificate: $CertPath"
+        Write-Info "Using signtool: $SignTool"
+    } else {
+        Write-Info "Certificate provided but signtool.exe not found - code signing will be skipped"
+    }
+} else {
+    Write-Info "signtool.exe not found - code signing will be skipped"
+}
+
+# Python setup with virtual environment for AV-safe build
+$VenvPath = Join-Path $ReleaseRoot '.venv_nuitka_safe'
+$PythonExe = Join-Path $VenvPath 'Scripts/python.exe'
+
+# Check base Python
 try {
-    $PythonExe = & python -c "import sys; print(sys.executable)" 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($PythonExe)) { 
+    $BasePython = & python -c "import sys; print(sys.executable)" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($BasePython)) { 
         throw "Python command failed" 
     }
-    $PythonExe = $PythonExe.Trim()
-    if (-not (Test-Path $PythonExe)) { 
-        throw "Python executable not found at: $PythonExe" 
+    $BasePython = $BasePython.Trim()
+    if (-not (Test-Path $BasePython)) { 
+        throw "Python executable not found at: $BasePython" 
     }
-    $PythonVersion = & "$PythonExe" -c "import sys; print('{}.{}.{}'.format(*sys.version_info[:3]))" 2>$null
-    Write-Info "Python: $PythonVersion at $PythonExe"
+    $PythonVersion = & "$BasePython" -c "import sys; print('{}.{}.{}'.format(*sys.version_info[:3]))" 2>$null
+    Write-Info "Base Python: $PythonVersion at $BasePython"
 } catch { 
     Write-Err "Python not found or invalid. Error: $($_.Exception.Message)"
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} } 
     exit 1 
 }
 
-# Verify Nuitka
+# Create/update virtual environment
+if (-not (Test-Path $PythonExe)) {
+    Write-Info "Creating virtual environment at $VenvPath"
+    & "$BasePython" -m venv "$VenvPath" --clear
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Failed to create virtual environment"
+        if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
+        exit 1
+    }
+}
+
+# Upgrade pip and install requirements
+Write-Info "Upgrading pip/setuptools/wheel and installing requirements + Nuitka"
+$RequirementsPath = Join-Path $ProjectRoot 'requirements.txt'
+if (Test-Path $RequirementsPath) {
+    & "$PythonExe" -m pip install --upgrade pip setuptools wheel
+    & "$PythonExe" -m pip install -r "$RequirementsPath"
+    & "$PythonExe" -m pip install nuitka
+} else {
+    Write-Err "requirements.txt not found at $RequirementsPath"
+    if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
+    exit 1
+}
+
+# Verify Nuitka installation
 try { 
     & "$PythonExe" -c "import nuitka" 2>$null
     if ($LASTEXITCODE -ne 0) { throw "Nuitka import failed" }
     $NuitkaVersion = (& "$PythonExe" -m nuitka --version 2>$null)
     if ($NuitkaVersion){ 
-        Write-Info ("Nuitka: " + $NuitkaVersion.Trim()) 
+        Write-Info $NuitkaVersion.Trim()
     } else { 
         Write-Info 'Nuitka validated' 
     } 
 } catch { 
-    Write-Err 'Nuitka not available. Install with: pip install nuitka'
+    Write-Err 'Nuitka not available in virtual environment'
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
-    exit 1
+    exit 1 
 }
 
-# Read version from version.py
-$version = Get-AppVersion
-Write-Info "Building version: $($version.String)"
+# Verify resources_rc.py exists
+$RcPyPath = Join-Path $ProjectRoot 'ui/resources_rc.py'
+if (-not (Test-Path $RcPyPath)) { 
+    Write-Err 'Missing ui/resources_rc.py. Generate with: pyside6-rcc resources.qrc -o ui/resources_rc.py'
+    if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
+    exit 1 
+}
 
 # Prepare output
 if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force | Out-Null }
 
 $IconPath = Join-Path $ProjectRoot 'resources/ShittyPIP.ico'
 
-# AV-safe Nuitka build with minimal flags
-Write-Info 'Starting AV-safe Nuitka build...'
+# Read version from version.py
+$version = Get-AppVersion
+Write-Info "Building version: $($version.String)"
+
+# Build Nuitka onefile with AV-safe configuration
+Write-Info 'Starting Nuitka build (AV-safe single-file)...'
 $nuArgs = @(
     '-m', 'nuitka',
     '--onefile',
@@ -116,13 +176,20 @@ $nuArgs = @(
     '--enable-plugin=pyside6',
     "--output-dir=$DistDir",
     '--output-filename=SPQ.exe',
-    '--onefile-no-compression',
     "--windows-company-name=`"$($version.Company)`"",
     "--windows-product-name=`"$($version.DisplayName)`"",
     "--windows-file-version=$($version.Win32)",
     "--windows-product-version=$($version.Win32)",
-    "--windows-file-description=`"$($version.Description)`""
+    "--windows-file-description=`"$($version.Description)`"",
+    '--onefile-no-compression',
+    '--onefile-tempdir-spec={TEMP}/SPQ_{PID}_{TIME}'
 )
+
+if ($BuildDebug) {
+    $nuArgs += '--show-scons'
+    $nuArgs += '--verbose'
+    Write-Info 'Debug build: verbose flags enabled'
+}
 
 if ($Console) { 
     $nuArgs += '--windows-console-mode=attach'
@@ -151,7 +218,7 @@ $sw.Stop()
 Write-Info ("Nuitka finished in {0:N1}s with exit code {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
 
 if ($proc.ExitCode -ne 0) { 
-    Write-Err "Nuitka build failed. See logs: $nuOut, $nuErr"
+    Write-Err "Nuitka onefile build failed. See logs: $nuOut, $nuErr"
     if (Test-Path $nuErr) {
         Write-Host "--- Error Log ---" -ForegroundColor Red
         Get-Content $nuErr | Write-Host -ForegroundColor Red
@@ -167,8 +234,43 @@ if (-not (Test-Path $exePath)) {
     exit 1 
 }
 
+# Code signing (if enabled)
+if ($SigningEnabled -and $SignTool -and $CertPath -and (Test-Path $exePath)) {
+    Write-Info "Signing executable: $exePath"
+    $signArgs = @(
+        'sign',
+        '/f', "$CertPath",
+        '/fd', 'SHA256',
+        '/tr', "$TimestampUrl",
+        '/td', 'SHA256',
+        "$exePath"
+    )
+    
+    if ($CertPassword) {
+        $signArgs = $signArgs[0..2] + @('/p', "$CertPassword") + $signArgs[3..($signArgs.Length-1)]
+    }
+    
+    try {
+        & "$SignTool" @signArgs
+        if ($LASTEXITCODE -eq 0) {
+            Write-Info "Code signing completed successfully"
+        } else {
+            Write-Err "Code signing failed with exit code $LASTEXITCODE"
+        }
+    } catch {
+        Write-Err "Code signing error: $($_.Exception.Message)"
+    }
+}
+
 $sizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
 Write-Info "AV-safe build completed: $exePath (${sizeMB} MB)"
+
+# Copy additional files if they exist
+$ReadmePath = Join-Path $ProjectRoot 'README.txt'
+if (Test-Path $ReadmePath) {
+    Copy-Item $ReadmePath $DistDir -Force
+    Write-Info "Copied README.txt to distribution"
+}
 
 if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
 exit 0

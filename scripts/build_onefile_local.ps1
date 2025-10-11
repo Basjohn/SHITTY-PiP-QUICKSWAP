@@ -36,8 +36,8 @@ function Get-AppVersion {
 $ScriptDir   = Split-Path -Parent $PSCommandPath
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $ReleaseRoot = Join-Path $ProjectRoot 'release'
-$DistDir     = Join-Path $ReleaseRoot 'dist_single_av_safe'
-$LogPath     = Join-Path $ReleaseRoot 'build_single_nuitka_av_safe.log'
+$DistDir     = Join-Path $ReleaseRoot 'onefile_local'
+$LogPath     = Join-Path $ReleaseRoot 'build_onefile_local.log'
 
 if (-not (Test-Path (Join-Path $ProjectRoot 'main.py'))) { 
     Write-Err "main.py not found in project root: $ProjectRoot"; exit 1 
@@ -56,7 +56,7 @@ try {
 }
 
 Write-Info "Project root: $ProjectRoot"
-Write-Info "Dist dir    : $DistDir"
+Write-Info "Output dir  : $DistDir"
 
 if ($Clean) { 
     Write-Info 'Cleaning previous build artifacts...'
@@ -71,28 +71,20 @@ try {
         throw "Python command failed" 
     }
     $PythonExe = $PythonExe.Trim()
-    if (-not (Test-Path $PythonExe)) { 
-        throw "Python executable not found at: $PythonExe" 
-    }
-    $PythonVersion = & "$PythonExe" -c "import sys; print('{}.{}.{}'.format(*sys.version_info[:3]))" 2>$null
-    Write-Info "Python: $PythonVersion at $PythonExe"
-} catch { 
-    Write-Err "Python not found or invalid. Error: $($_.Exception.Message)"
-    if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} } 
-    exit 1 
+    $PythonVer = & python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
+    Write-Info "Python: $PythonVer at $PythonExe"
+} catch {
+    Write-Err 'Python not available. Ensure python is in PATH.'
+    if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
+    exit 1
 }
 
-# Verify Nuitka
-try { 
-    & "$PythonExe" -c "import nuitka" 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Nuitka import failed" }
-    $NuitkaVersion = (& "$PythonExe" -m nuitka --version 2>$null)
-    if ($NuitkaVersion){ 
-        Write-Info ("Nuitka: " + $NuitkaVersion.Trim()) 
-    } else { 
-        Write-Info 'Nuitka validated' 
-    } 
-} catch { 
+# Nuitka check
+try {
+    $NuitkaVer = & python -m nuitka --version 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Nuitka command failed" }
+    Write-Info "Nuitka: $NuitkaVer"
+} catch {
     Write-Err 'Nuitka not available. Install with: pip install nuitka'
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
     exit 1
@@ -107,8 +99,8 @@ if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force 
 
 $IconPath = Join-Path $ProjectRoot 'resources/ShittyPIP.ico'
 
-# AV-safe Nuitka build with minimal flags
-Write-Info 'Starting AV-safe Nuitka build...'
+# Onefile build with persistent cache extraction (user cache directory)
+Write-Info 'Starting onefile build with local extraction (AV-safe)...'
 $nuArgs = @(
     '-m', 'nuitka',
     '--onefile',
@@ -117,6 +109,7 @@ $nuArgs = @(
     "--output-dir=$DistDir",
     '--output-filename=SPQ.exe',
     '--onefile-no-compression',
+    '--onefile-tempdir-spec={CACHE_DIR}/SPQ/runtime',
     "--windows-company-name=`"$($version.Company)`"",
     "--windows-product-name=`"$($version.DisplayName)`"",
     "--windows-file-version=$($version.Win32)",
@@ -134,21 +127,21 @@ if ($Console) {
 
 if (Test-Path $IconPath) { 
     $nuArgs += "--windows-icon-from-ico=$IconPath"
-    Write-Info "Using icon: $IconPath" 
+    Write-Info "Using icon: $IconPath"
 }
 
 $nuArgs += (Join-Path $ProjectRoot 'main.py')
 
 Write-Info "Nuitka command: $PythonExe $($nuArgs -join ' ')"
 
-$nuOut = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stdout.log'
-$nuErr = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stderr.log'
-foreach ($f in @($nuOut,$nuErr)) { if (Test-Path $f) { Remove-Item $f -Force } }
+# Run Nuitka
+$nuOut = Join-Path $ReleaseRoot 'nuitka_onefile_local_stdout.log'
+$nuErr = Join-Path $ReleaseRoot 'nuitka_onefile_local_stderr.log'
 
-$sw = [Diagnostics.Stopwatch]::StartNew()
-$proc = Start-Process -FilePath "$PythonExe" -ArgumentList $nuArgs -WorkingDirectory $ProjectRoot -NoNewWindow -PassThru -RedirectStandardOutput $nuOut -RedirectStandardError $nuErr -Wait
-$sw.Stop()
-Write-Info ("Nuitka finished in {0:N1}s with exit code {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
+$proc = Start-Process -FilePath $PythonExe -ArgumentList $nuArgs -NoNewWindow -PassThru -RedirectStandardOutput $nuOut -RedirectStandardError $nuErr -Wait
+
+$elapsed = $proc.ExitTime - $proc.StartTime
+Write-Info "Nuitka finished in $([math]::Round($elapsed.TotalSeconds, 1))s with exit code $($proc.ExitCode)"
 
 if ($proc.ExitCode -ne 0) { 
     Write-Err "Nuitka build failed. See logs: $nuOut, $nuErr"
@@ -160,15 +153,41 @@ if ($proc.ExitCode -ne 0) {
     exit $proc.ExitCode 
 }
 
+# Verify output
 $exePath = Join-Path $DistDir 'SPQ.exe'
-if (-not (Test-Path $exePath)) { 
-    Write-Err "Missing output: $exePath"
+if (-not (Test-Path $exePath)) {
+    Write-Err "Expected output not found: $exePath"
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
-    exit 1 
+    exit 1
 }
 
-$sizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
-Write-Info "AV-safe build completed: $exePath (${sizeMB} MB)"
+# Create accompanying subdirectories for cleaner structure
+Write-Info "Creating application folder structure..."
+New-Item -ItemType Directory -Path (Join-Path $DistDir 'data') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $DistDir 'logs') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $DistDir 'settings') -Force | Out-Null
+
+# Calculate size
+$exeSizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
+
+Write-Info ''
+Write-Info '==================================='
+Write-Info 'Onefile (persistent cache) build completed!'
+Write-Info '==================================='
+Write-Info "Output directory: $DistDir"
+Write-Info "Executable: SPQ.exe (${exeSizeMB} MB)"
+Write-Info ''
+Write-Info 'Structure:'
+Write-Info '  SPQ.exe          -> Main application (run this)'
+Write-Info '  data/            -> Application resources'
+Write-Info '  settings/        -> User configuration'
+Write-Info '  logs/            -> Runtime logs'
+Write-Info ''
+Write-Info 'Extraction behavior:'
+Write-Info '  - First launch: Extracts to %LOCALAPPDATA%\SPQ\runtime (~2-3s delay)'
+Write-Info '  - Subsequent launches: Uses cached extraction (instant)'
+Write-Info '  - Cache persists between sessions'
+Write-Info '  - Portable: Cache location moves with exe location'
 
 if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
 exit 0

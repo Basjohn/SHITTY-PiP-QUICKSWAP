@@ -1,0 +1,1 @@
+If using my shitty build scripts, pyinstaller standalone or nuitka single are the only ones that do not get incorrectly flagged by AV.

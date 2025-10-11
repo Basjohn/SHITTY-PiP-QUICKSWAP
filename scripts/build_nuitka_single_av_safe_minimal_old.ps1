@@ -10,28 +10,6 @@ $ErrorActionPreference = 'Stop'
 function Write-Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Write-Err($msg)  { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
-function Get-AppVersion {
-    param([string]$VersionFile = "version.py")
-    $versionPath = Join-Path $PSScriptRoot ".." $VersionFile
-    if (-not (Test-Path $versionPath)) {
-        Write-Warning "version.py not found, using fallback 2.1.0a"
-        return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' }
-    }
-    try {
-        $content = Get-Content $versionPath -Raw
-        $major = if ($content -match 'VERSION_MAJOR\s*=\s*(\d+)') { [int]$Matches[1] } else { 2 }
-        $minor = if ($content -match 'VERSION_MINOR\s*=\s*(\d+)') { [int]$Matches[1] } else { 1 }
-        $patch = if ($content -match 'VERSION_PATCH\s*=\s*(\d+)') { [int]$Matches[1] } else { 0 }
-        $suffix = if ($content -match 'VERSION_SUFFIX\s*=\s*"([^"]*)"') { $Matches[1] } else { '' }
-        $company = if ($content -match 'APP_COMPANY\s*=\s*"([^"]*)"') { $Matches[1] } else { 'Faecal Failures' }
-        $displayName = if ($content -match 'APP_DISPLAY_NAME\s*=\s*"([^"]*)"') { $Matches[1] } else { 'Shitty PiP QuickSwap' }
-        $description = if ($content -match 'APP_DESCRIPTION\s*=\s*"([^"]*)"') { $Matches[1] } else { 'Overlays, too many fucking overlays.' }
-        return @{ Win32="$major.$minor.$patch.0"; String="$major.$minor.$patch$suffix"; Company=$company; DisplayName=$displayName; Description=$description }
-    } catch {
-        return @{ Win32='2.1.0.0'; String='2.1.0a'; Company='Faecal Failures'; DisplayName='Shitty PiP QuickSwap'; Description='Overlays, too many fucking overlays.' }
-    }
-}
-
 # Paths
 $ScriptDir   = Split-Path -Parent $PSCommandPath
 $ProjectRoot = Split-Path -Parent $ScriptDir
@@ -95,12 +73,8 @@ try {
 } catch { 
     Write-Err 'Nuitka not available. Install with: pip install nuitka'
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
-    exit 1
+    exit 1 
 }
-
-# Read version from version.py
-$version = Get-AppVersion
-Write-Info "Building version: $($version.String)"
 
 # Prepare output
 if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force | Out-Null }
@@ -117,11 +91,11 @@ $nuArgs = @(
     "--output-dir=$DistDir",
     '--output-filename=SPQ.exe',
     '--onefile-no-compression',
-    "--windows-company-name=`"$($version.Company)`"",
-    "--windows-product-name=`"$($version.DisplayName)`"",
-    "--windows-file-version=$($version.Win32)",
-    "--windows-product-version=$($version.Win32)",
-    "--windows-file-description=`"$($version.Description)`""
+    '--windows-company-name=SPQ Development',
+    '--windows-product-name=SPQ Screen Capture',
+    '--windows-file-version=1.0.0.0',
+    '--windows-product-version=1.0.0',
+    '--windows-file-description=SPQ Screen Capture Application'
 )
 
 if ($Console) { 
@@ -137,7 +111,7 @@ if (Test-Path $IconPath) {
     Write-Info "Using icon: $IconPath" 
 }
 
-$nuArgs += (Join-Path $ProjectRoot 'main.py')
+$nuArgs += @((Join-Path $ProjectRoot 'main.py'))
 
 Write-Info "Nuitka command: $PythonExe $($nuArgs -join ' ')"
 

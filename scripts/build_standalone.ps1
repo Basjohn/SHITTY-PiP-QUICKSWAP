@@ -36,8 +36,9 @@ function Get-AppVersion {
 $ScriptDir   = Split-Path -Parent $PSCommandPath
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $ReleaseRoot = Join-Path $ProjectRoot 'release'
-$DistDir     = Join-Path $ReleaseRoot 'dist_single_av_safe'
-$LogPath     = Join-Path $ReleaseRoot 'build_single_nuitka_av_safe.log'
+$WorkDir     = Join-Path $ReleaseRoot 'work_standalone'
+$FinalDistDir = Join-Path $ReleaseRoot 'standalone'
+$LogPath     = Join-Path $ReleaseRoot 'build_standalone.log'
 
 if (-not (Test-Path (Join-Path $ProjectRoot 'main.py'))) { 
     Write-Err "main.py not found in project root: $ProjectRoot"; exit 1 
@@ -56,11 +57,13 @@ try {
 }
 
 Write-Info "Project root: $ProjectRoot"
-Write-Info "Dist dir    : $DistDir"
+Write-Info "Work dir    : $WorkDir"
+Write-Info "Output dir  : $FinalDistDir"
 
 if ($Clean) { 
     Write-Info 'Cleaning previous build artifacts...'
-    if (Test-Path $DistDir) { Remove-Item $DistDir -Recurse -Force }
+    if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
+    if (Test-Path $FinalDistDir) { Remove-Item $FinalDistDir -Recurse -Force }
     Write-Info 'Cleanup complete.' 
 }
 
@@ -103,20 +106,21 @@ $version = Get-AppVersion
 Write-Info "Building version: $($version.String)"
 
 # Prepare output
-if (!(Test-Path $DistDir)) { New-Item -ItemType Directory -Path $DistDir -Force | Out-Null }
+if (!(Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 
 $IconPath = Join-Path $ProjectRoot 'resources/ShittyPIP.ico'
 
-# AV-safe Nuitka build with minimal flags
-Write-Info 'Starting AV-safe Nuitka build...'
+# Standalone directory build (AV-safe baseline - MINIMAL FLAGS ONLY)
+Write-Info 'Starting standalone build (directory with dependencies)...'
 $nuArgs = @(
     '-m', 'nuitka',
-    '--onefile',
+    '--standalone',
     '--assume-yes-for-downloads',
     '--enable-plugin=pyside6',
-    "--output-dir=$DistDir",
-    '--output-filename=SPQ.exe',
-    '--onefile-no-compression',
+    '--include-module=ctypes',
+    '--follow-import-to=ctypes',
+    "--output-dir=$WorkDir",
+    '--output-filename=SPQCoreApp.exe',
     "--windows-company-name=`"$($version.Company)`"",
     "--windows-product-name=`"$($version.DisplayName)`"",
     "--windows-file-version=$($version.Win32)",
@@ -141,8 +145,8 @@ $nuArgs += (Join-Path $ProjectRoot 'main.py')
 
 Write-Info "Nuitka command: $PythonExe $($nuArgs -join ' ')"
 
-$nuOut = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stdout.log'
-$nuErr = Join-Path $ReleaseRoot 'nuitka_single_av_safe_stderr.log'
+$nuOut = Join-Path $ReleaseRoot 'nuitka_standalone_stdout.log'
+$nuErr = Join-Path $ReleaseRoot 'nuitka_standalone_stderr.log'
 foreach ($f in @($nuOut,$nuErr)) { if (Test-Path $f) { Remove-Item $f -Force } }
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -160,15 +164,76 @@ if ($proc.ExitCode -ne 0) {
     exit $proc.ExitCode 
 }
 
-$exePath = Join-Path $DistDir 'SPQ.exe'
-if (-not (Test-Path $exePath)) { 
-    Write-Err "Missing output: $exePath"
+# Nuitka creates a .dist folder for standalone builds - find it
+Write-Info "Looking for Nuitka output in: $WorkDir"
+$distFolders = @(Get-ChildItem -Path $WorkDir -Directory -Filter '*.dist' -ErrorAction SilentlyContinue)
+
+if ($distFolders.Count -eq 0) { 
+    Write-Err "No .dist folder found in $WorkDir"
+    Write-Err "Nuitka may have failed or created output elsewhere."
     if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
     exit 1 
 }
 
-$sizeMB = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
-Write-Info "AV-safe build completed: $exePath (${sizeMB} MB)"
+$CoreDistPath = $distFolders[0].FullName
+Write-Info "Found Nuitka output: $CoreDistPath"
+
+$coreExe = Join-Path $CoreDistPath 'SPQCoreApp.exe'
+if (-not (Test-Path $coreExe)) { 
+    Write-Err "Missing executable: $coreExe"
+    Write-Info "Contents of ${CoreDistPath}:"
+    Get-ChildItem $CoreDistPath | ForEach-Object { Write-Info "  $($_.Name)" }
+    if ($TranscriptStarted){ try{ Stop-Transcript|Out-Null }catch{} }
+    exit 1 
+}
+
+# Reorganize into clean structure: SPQ.exe in root, DLLs in data/
+Write-Info 'Reorganizing build output...'
+
+# Clean and create structure
+if (Test-Path $FinalDistDir) { Remove-Item $FinalDistDir -Recurse -Force }
+$DataDir = Join-Path $FinalDistDir 'data'
+New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+
+# Copy main exe to root and rename
+$coreExeOld = Join-Path $CoreDistPath 'SPQCoreApp.exe'
+$coreExeNew = Join-Path $FinalDistDir 'SPQ.exe'
+Copy-Item -Path $coreExeOld -Destination $coreExeNew -Force
+Write-Info "Copied and renamed SPQCoreApp.exe -> SPQ.exe (root)"
+
+# Copy all DLLs and dependencies to data/
+Write-Info "Copying DLLs and dependencies to data/..."
+Get-ChildItem -Path $CoreDistPath | Where-Object { $_.Name -ne 'SPQCoreApp.exe' } | Copy-Item -Destination $DataDir -Recurse -Force
+
+# Create subdirectories
+New-Item -ItemType Directory -Path (Join-Path $FinalDistDir 'logs') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $FinalDistDir 'settings') -Force | Out-Null
+Write-Info "Created clean structure: SPQ.exe in root, dependencies in data/"
+
+# Calculate total size
+$totalSizeMB = [math]::Round((Get-ChildItem $FinalDistDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+$dataFileCount = (Get-ChildItem $DataDir -File -Recurse | Measure-Object).Count
+$dllCount = (Get-ChildItem $DataDir -Filter '*.dll' -File -Recurse | Measure-Object).Count
+
+Write-Info ''
+Write-Info '==================================='
+Write-Info 'Standalone build completed!'
+Write-Info '==================================='
+Write-Info "Output directory: $FinalDistDir"
+Write-Info "Total size: ${totalSizeMB} MB"
+Write-Info "Main executable: SPQ.exe (root)"
+Write-Info "Dependencies: $dataFileCount files in data/ ($dllCount DLLs)"
+Write-Info ''
+Write-Info 'Structure (clean layout):'
+Write-Info '  SPQ.exe          -> Main application (run this)'
+Write-Info '  data/            -> All DLLs and dependencies'
+Write-Info '  settings/        -> User configuration'
+Write-Info '  logs/            -> Runtime logs'
+Write-Info ''
+Write-Info 'NOTE: All DLLs are in data/ subdirectory for clean root folder.'
+
+# Clean up temp files
+if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force -ErrorAction SilentlyContinue }
 
 if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
 exit 0
