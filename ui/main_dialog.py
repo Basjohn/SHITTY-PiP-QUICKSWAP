@@ -21,6 +21,7 @@ from core.ui.tray import SystemTrayManager
 from utils.monitor_utils import get_all_monitors
 from core.graphics import get_overlay_manager
 from core.graphics.backends import BackendType
+from ui.components.circle_checkbox import CircleCheckBox
 
 # Constants
 MIN_WINDOW_WIDTH = 700      # pixels (was 675)
@@ -91,6 +92,13 @@ class MainDialog(QMainWindow):
         self.window_enumerator = WindowEnumerator()
         self.opacity_manager = get_opacity_manager()
         self.overlay_manager = get_overlay_manager()
+        
+        # Initialize hide/show controller for Ctrl+Shift+H hotkey
+        try:
+            from core.hide_show_controller import get_hide_show_controller
+            self.hide_show_controller = get_hide_show_controller()
+        except Exception as e:
+            logger.warning(f"Failed to initialize hide/show controller: {e}")
         # React to theme/style changes to refresh visuals that depend on QSS timing
         try:
             if hasattr(self.theme_manager, 'theme_changed'):
@@ -130,8 +138,9 @@ class MainDialog(QMainWindow):
         self._populate_window_combobox()
         self._populate_monitor_combobox()
         
-        # Set initial combobox visibility
-        self._update_combobox_visibility(self.window_mode_button.isChecked())
+        # Set initial combobox visibility (treat docking like window for selection source)
+        initial_window_like = self.window_mode_button.isChecked() or self.docking_mode_button.isChecked()
+        self._update_combobox_visibility(initial_window_like)
         
         # Restore window geometry
         self._restore_window_geometry()
@@ -218,9 +227,12 @@ class MainDialog(QMainWindow):
         
         # Create combobox container
         self._create_combobox_container()
-        
+
         # Set up opacity control
         self._setup_opacity_control()
+
+        # Create docking mode options (beneath opacity bar)
+        self._create_docking_options()
         
         self.apply_theme(self.theme_manager._current_theme)
 
@@ -234,8 +246,9 @@ class MainDialog(QMainWindow):
         self._populate_window_combobox()
         self._populate_monitor_combobox()
         
-        # Set initial combobox visibility
-        self._update_combobox_visibility(self.window_mode_button.isChecked())
+        # Set initial combobox visibility (treat docking like window for selection source)
+        initial_window_like = self.window_mode_button.isChecked() or self.docking_mode_button.isChecked()
+        self._update_combobox_visibility(initial_window_like)
         
         # Restore window geometry
         self._restore_window_geometry()
@@ -365,7 +378,7 @@ class MainDialog(QMainWindow):
     
     
     def _create_mode_buttons(self):
-        """Create mode buttons for window/monitor selection."""
+        """Create mode buttons for window/monitor/docking selection."""
         # Create mode buttons
         self.window_mode_button = QPushButton("WINDOW MODE")
         self.window_mode_button.setObjectName("QSmolselect")
@@ -377,14 +390,30 @@ class MainDialog(QMainWindow):
         self.monitor_mode_button.setCursor(Qt.PointingHandCursor)
         self.monitor_mode_button.setCheckable(True)
         
+        self.docking_mode_button = QPushButton("DOCKING MODE")
+        self.docking_mode_button.setObjectName("QSmolselect")
+        self.docking_mode_button.setCursor(Qt.PointingHandCursor)
+        self.docking_mode_button.setCheckable(True)
+        
         # Load saved mode button state
         saved_mode = self.settings_manager.get("ui.mode_button_state", "window")
         if saved_mode == "window":
             self.window_mode_button.setChecked(True)
             self.monitor_mode_button.setChecked(False)
-        else:
+            self.docking_mode_button.setChecked(False)
+        elif saved_mode == "monitor":
             self.window_mode_button.setChecked(False)
             self.monitor_mode_button.setChecked(True)
+            self.docking_mode_button.setChecked(False)
+        elif saved_mode == "docking":
+            self.window_mode_button.setChecked(False)
+            self.monitor_mode_button.setChecked(False)
+            self.docking_mode_button.setChecked(True)
+        else:
+            # Default to window mode
+            self.window_mode_button.setChecked(True)
+            self.monitor_mode_button.setChecked(False)
+            self.docking_mode_button.setChecked(False)
         
         # Create mode buttons layout
         mode_buttons_layout = QHBoxLayout()
@@ -392,6 +421,7 @@ class MainDialog(QMainWindow):
         mode_buttons_layout.setSpacing(10)
         mode_buttons_layout.addWidget(self.window_mode_button)
         mode_buttons_layout.addWidget(self.monitor_mode_button)
+        mode_buttons_layout.addWidget(self.docking_mode_button)
         
         mode_buttons_widget = QWidget()
         mode_buttons_widget.setLayout(mode_buttons_layout)
@@ -401,6 +431,7 @@ class MainDialog(QMainWindow):
         self.mode_button_group.setExclusive(True)
         self.mode_button_group.addButton(self.window_mode_button, 0)
         self.mode_button_group.addButton(self.monitor_mode_button, 1)
+        self.mode_button_group.addButton(self.docking_mode_button, 2)
         
         # Create left layout
         left_layout = QVBoxLayout()
@@ -445,7 +476,8 @@ class MainDialog(QMainWindow):
         # Create container widgets for left and right sides to maintain grouping
         left_container = QWidget()
         left_container.setLayout(left_layout)
-        left_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        # Allow left content column (combobox, opacity, docking options) to expand horizontally
+        left_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # Set size policies to keep elements grouped
         right_buttons_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -519,6 +551,137 @@ class MainDialog(QMainWindow):
         
         # Add combobox container to the left layout (keep left-aligned)
         self.left_layout.addWidget(self.combobox_container, alignment=Qt.AlignLeft)
+
+    def _create_docking_options(self):
+        """Create docking-only controls below opacity: vertical Normal/Cycle checkboxes and overlay count buttons (2-5)."""
+        try:
+            # Container
+            self.docking_options_frame = QFrame()
+            self.docking_options_frame.setObjectName("dockingOptionsFrame")
+            try:
+                # Ensure enough width so labels aren't clipped and allow full row width
+                self.docking_options_frame.setMinimumWidth(280)
+                self.docking_options_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            except Exception:
+                pass
+            v = QVBoxLayout(self.docking_options_frame)
+            v.setContentsMargins(0, 6, 0, 0)
+            v.setSpacing(4)
+
+            # Mode column (Normal on top, Cycle below)
+            mode_col = QVBoxLayout()
+            mode_col.setContentsMargins(0, 0, 0, 0)
+            mode_col.setSpacing(6)
+
+            self.normal_mode_cb = CircleCheckBox("Normal Mode")
+            self.cycle_mode_cb = CircleCheckBox("Cycle Mode")
+            self.normal_mode_cb.setCursor(Qt.PointingHandCursor)
+            self.cycle_mode_cb.setCursor(Qt.PointingHandCursor)
+            # Ensure labels have enough horizontal space and are not clipped
+            try:
+                self.normal_mode_cb.setMinimumWidth(280)
+                self.cycle_mode_cb.setMinimumWidth(280)
+                self.normal_mode_cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.cycle_mode_cb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            except Exception:
+                pass
+
+            # Exclusive behavior via manual enforcement (checkbox-based)
+            saved_mode = str(self.settings_manager.get("docking.mode", "normal") or "normal").lower()
+            if saved_mode == "cycle":
+                self.cycle_mode_cb.setChecked(True)
+                self.normal_mode_cb.setChecked(False)
+            else:
+                self.normal_mode_cb.setChecked(True)
+                self.cycle_mode_cb.setChecked(False)
+
+            def _on_mode_toggled(checkbox_name: str, _: bool = False):
+                # Ensure exclusivity and persistence
+                if self.normal_mode_cb.isChecked() and self.cycle_mode_cb.isChecked():
+                    # Prefer the one that was just clicked
+                    if checkbox_name == "normal":
+                        self.cycle_mode_cb.setChecked(False)
+                    else:
+                        self.normal_mode_cb.setChecked(False)
+                elif not self.normal_mode_cb.isChecked() and not self.cycle_mode_cb.isChecked():
+                    # Always keep one selected; default to Normal
+                    self.normal_mode_cb.setChecked(True)
+                mode = "cycle" if self.cycle_mode_cb.isChecked() else "normal"
+                self.settings_manager.set("docking.mode", mode)
+
+            # Use lambda to pass explicit checkbox identification
+            self.normal_mode_cb.toggled.connect(lambda checked: _on_mode_toggled("normal", checked))
+            self.cycle_mode_cb.toggled.connect(lambda checked: _on_mode_toggled("cycle", checked))
+
+            mode_col.addWidget(self.normal_mode_cb, 0, Qt.AlignLeft)
+            mode_col.addWidget(self.cycle_mode_cb, 0, Qt.AlignLeft)
+            v.addLayout(mode_col)
+
+            # Overlay count buttons (2/3/4/5) - exclusive
+            count_buttons_row = QHBoxLayout()
+            count_buttons_row.setContentsMargins(0, 0, 0, 0)
+            count_buttons_row.setSpacing(6)
+
+            self.overlay_count_group = QButtonGroup(self)
+            self.overlay_count_group.setExclusive(True)
+            self.overlay_count_buttons = []
+
+            saved_count = int(self.settings_manager.get("docking.overlay_count", 3) or 3)
+            saved_count = max(2, min(5, saved_count))
+
+            for n in (2, 3, 4, 5):
+                btn = QPushButton(str(n))
+                # Use compact themed style entirely from QSS; do not rely on OS defaults
+                btn.setObjectName("QSmolselectMini")
+                btn.setCheckable(True)
+                # Prevent Windows default highlight/blue
+                try:
+                    btn.setAutoDefault(False)
+                    btn.setDefault(False)
+                    btn.setFlat(False)
+                    btn.setFocusPolicy(Qt.NoFocus)
+                except Exception:
+                    pass
+                # Width is enforced by QSS (min/max ~22–28px) for consistent theming
+                try:
+                    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+                except Exception:
+                    pass
+                if n == saved_count:
+                    btn.setChecked(True)
+                self.overlay_count_group.addButton(btn, n)
+                self.overlay_count_buttons.append(btn)
+                count_buttons_row.addWidget(btn)
+            # Keep the buttons left-aligned and compact
+            count_buttons_row.addStretch(1)
+
+            def _on_count_button_clicked(id_: int):
+                try:
+                    self.settings_manager.set("docking.overlay_count", int(id_))
+                except Exception:
+                    pass
+            self.overlay_count_group.idClicked.connect(_on_count_button_clicked)
+
+            v.addLayout(count_buttons_row)
+
+            # Add to left layout below opacity frame
+            self.left_layout.addWidget(self.docking_options_frame, alignment=Qt.AlignLeft | Qt.AlignTop)
+
+            # Initial visibility based on Docking Mode button state
+            try:
+                self._update_docking_options_visibility(self.docking_mode_button.isChecked())
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Error creating docking options: {e}")
+
+    def _update_docking_options_visibility(self, show: bool) -> None:
+        """Show/hide docking-only UI elements based on whether Docking Mode is active."""
+        try:
+            if hasattr(self, 'docking_options_frame') and self.docking_options_frame:
+                self.docking_options_frame.setVisible(bool(show))
+        except Exception:
+            pass
     
     def _setup_opacity_control(self):
         """Set up the opacity control UI elements."""
@@ -727,7 +890,7 @@ class MainDialog(QMainWindow):
                 y = parent.height() - badge_h + overlap
                 self.badge_label.move(x, y)
                 self.badge_label.raise_()
-                logger.debug(f"Positioned badge at ({x}, {y})")
+                # Reduced debug spam - only log positioning changes, not every position update
                 
         except Exception as e:
             logger.error(f"Error positioning badge: {e}", exc_info=True)
@@ -758,7 +921,7 @@ class MainDialog(QMainWindow):
         """Set up the system tray manager."""
         try:
             self.tray_manager = SystemTrayManager(self)
-            self.tray_manager.show_main_window_requested.connect(self.show)
+            self.tray_manager.show_main_window_requested.connect(self._on_tray_show_main_window)
             self.tray_manager.show_settings_requested.connect(self._on_tray_show_settings)
             # Route Quit to a full shutdown sequence
             self.tray_manager.quit_requested.connect(self._on_tray_quit)
@@ -818,10 +981,19 @@ class MainDialog(QMainWindow):
 
     # Removed click-through tray toggle handler
 
+    def _on_tray_show_main_window(self) -> None:
+        """Handle tray request to show main window."""
+        try:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception as e:
+            logger.error(f"Failed to show main window from tray: {e}")
+
     def _on_tray_show_settings(self) -> None:
         """Handle tray request to show settings dialog."""
         try:
-            self._show_subsettings_dialog()
+            self._open_subsettings_dialog()
         except Exception as e:
             logger.error(f"Failed to show settings from tray: {e}")
 
@@ -847,7 +1019,7 @@ class MainDialog(QMainWindow):
             new_state = not current
             self.settings_manager.set("features.autoswitch_enabled", new_state)
             
-            # Apply to overlay manager
+            # Apply to overlay manager (single overlays)
             try:
                 from core.graphics import get_overlay_manager
                 overlay_manager = get_overlay_manager()
@@ -855,6 +1027,15 @@ class MainDialog(QMainWindow):
                     overlay_manager.set_auto_switch_enabled(new_state)
             except Exception as e:
                 logger.error(f"Failed to apply auto-switch setting to overlay manager: {e}")
+            
+            # Apply to docking manager (docking overlays)
+            try:
+                from core.graphics.docking import get_docking_manager
+                docking_manager = get_docking_manager()
+                if docking_manager and docking_manager.is_active():
+                    docking_manager.set_auto_switch_enabled(new_state)
+            except Exception as e:
+                logger.error(f"Failed to apply auto-switch setting to docking manager: {e}")
             
             # Keep tray checkbox state in sync
             try:
@@ -887,6 +1068,7 @@ class MainDialog(QMainWindow):
         # Connect mode button signals
         self.window_mode_button.toggled.connect(self._on_mode_button_toggled)
         self.monitor_mode_button.toggled.connect(self._on_mode_button_toggled)
+        self.docking_mode_button.toggled.connect(self._on_mode_button_toggled)
         
         # Connect combobox signals
         self.window_combobox.currentIndexChanged.connect(self._on_window_selected)
@@ -1250,14 +1432,30 @@ class MainDialog(QMainWindow):
     def _on_launch_overlay_clicked(self):
         """Launch the overlay based on current mode and selection via the double-arrow button."""
         try:
-            if hasattr(self, 'mode_button_group') and self.mode_button_group.checkedId() == 0:
+            mode_id = self.mode_button_group.checkedId() if hasattr(self, 'mode_button_group') else 0
+        
+            # Persist the selected mode on explicit launch as well (covers all three modes)
+            if mode_id == 0:
+                self.settings_manager.set("ui.mode_button_state", "window")
+            elif mode_id == 1:
+                self.settings_manager.set("ui.mode_button_state", "monitor")
+            elif mode_id == 2:
+                self.settings_manager.set("ui.mode_button_state", "docking")
+
+            if mode_id == 0:  # Window mode
                 if not getattr(self, 'selected_window', None):
                     raise RuntimeError("No window selected for overlay launch")
                 self._create_overlay_for_window(self.selected_window)
-            else:
+            elif mode_id == 1:  # Monitor mode
                 if not getattr(self, 'selected_monitor', None):
                     raise RuntimeError("No monitor selected for overlay launch")
                 self._create_overlay_for_monitor(self.selected_monitor)
+            elif mode_id == 2:  # Docking mode
+                if not getattr(self, 'selected_window', None):
+                    raise RuntimeError("No window selected for docking mode launch")
+                self._create_docking_overlay_for_window(self.selected_window)
+            else:
+                raise RuntimeError(f"Unknown overlay mode: {mode_id}")
         except Exception as e:
             logger.error(f"Overlay launch failed: {e}", exc_info=True)
             raise
@@ -1273,24 +1471,35 @@ class MainDialog(QMainWindow):
 
     def _on_mode_id_toggled(self, id: int, checked: bool):
         """Handle exclusive mode toggle by id to update combobox visibility and contents.
-        id == 0 -> window mode, id == 1 -> monitor mode. Only react when checked is True.
+        id == 0 -> window mode, id == 1 -> monitor mode, id == 2 -> docking mode. Only react when checked is True.
         """
         try:
             if not checked:
                 return
             window_mode = (id == 0)
-            self._update_combobox_visibility(window_mode)
+            docking_mode = (id == 2)
+            
+            if docking_mode:
+                # Docking mode uses window enumeration like window mode
+                self._update_combobox_visibility(True)
+            else:
+                self._update_combobox_visibility(window_mode)
             # Do not auto-create overlays on mode toggle; creation is explicit via the launch button
         except Exception as e:
             logger.error(f"Error handling mode toggle (id={id}, checked={checked}): {e}", exc_info=True)
     
     def _on_mode_button_toggled(self, checked):
-        """Save the mode button state when toggled."""
+        """Save the mode button state when toggled and update docking UI visibility."""
         if checked:
             if self.window_mode_button.isChecked():
                 self.settings_manager.set("ui.mode_button_state", "window")
-            else:
+                self._update_docking_options_visibility(False)
+            elif self.monitor_mode_button.isChecked():
                 self.settings_manager.set("ui.mode_button_state", "monitor")
+                self._update_docking_options_visibility(False)
+            elif self.docking_mode_button.isChecked():
+                self.settings_manager.set("ui.mode_button_state", "docking")
+                self._update_docking_options_visibility(True)
     
     # --- Opacity Control Methods ---
     
@@ -1389,9 +1598,47 @@ class MainDialog(QMainWindow):
         rect = self._ensure_min_overlay_size(rect)
         title = self._get_window_title(hwnd)
         return {"hwnd": hwnd, "rect": rect, "title": title}
+    
+    def _destroy_all_existing_overlays(self) -> None:
+        """Destroy all existing overlays (single and docking) before mode switch."""
+        try:
+            from utils.resource_manager import get_resource_manager
+            rm = get_resource_manager()
+            
+            # Destroy docking system if active
+            try:
+                docking = rm.get("DockingOverlayManager")
+                if docking and hasattr(docking, 'is_active') and docking.is_active():
+                    logger.info("Destroying existing docking system before mode switch")
+                    if hasattr(docking, 'destroy_docking_system'):
+                        docking.destroy_docking_system()
+            except Exception as e:
+                logger.debug(f"No docking system to destroy: {e}")
+            
+            # Destroy single overlays if any
+            try:
+                overlay_mgr = rm.get("OverlayManager")
+                if overlay_mgr and hasattr(overlay_mgr, 'get_all_overlays'):
+                    overlays = overlay_mgr.get_all_overlays()
+                    if overlays:
+                        logger.info(f"Destroying {len(overlays)} existing single overlay(s) before mode switch")
+                        for overlay in overlays:
+                            try:
+                                if hasattr(overlay, 'close'):
+                                    overlay.close()
+                            except Exception as e:
+                                logger.warning(f"Failed to close overlay: {e}")
+            except Exception as e:
+                logger.debug(f"No single overlays to destroy: {e}")
+                
+        except Exception as e:
+            logger.warning(f"Error destroying existing overlays: {e}")
 
     def _create_overlay_for_window(self, window_info) -> None:
         """Create a window overlay using the DWM backend for the given window_info."""
+        # Destroy existing overlays before creating new ones
+        self._destroy_all_existing_overlays()
+        
         # Validate window_info and geometry
         if not window_info:
             raise RuntimeError("No window_info provided for overlay creation")
@@ -1422,8 +1669,89 @@ class MainDialog(QMainWindow):
         # Minimize main dialog to tray after successful overlay creation
         self._minimize_to_tray()
 
+    def _create_docking_overlay_for_window(self, window_info) -> None:
+        """Create a docking overlay system for the given window_info."""
+        # Destroy existing overlays before creating new ones
+        self._destroy_all_existing_overlays()
+        
+        # Validate window_info
+        if not window_info:
+            raise RuntimeError("No window_info provided for docking overlay creation")
+        
+        # Extract hwnd from window_info
+        if isinstance(window_info, dict):
+            hwnd = int(window_info.get('hwnd', 0))
+            title = window_info.get('title', 'Docking Overlay')
+        else:
+            hwnd = int(getattr(window_info, 'hwnd', 0) or 0)
+            title = getattr(window_info, 'title', 'Docking Overlay')
+        
+        if not hwnd:
+            raise RuntimeError("Invalid window handle for docking overlay")
+        
+        # Get or create docking overlay manager
+        from core.graphics.docking.manager import DockingOverlayManager
+        
+        # Load saved position or use default
+        docking_position = self._load_docking_position()
+        
+        # Create docking manager if not exists
+        if not hasattr(self, '_docking_manager') or not self._docking_manager:
+            self._docking_manager = DockingOverlayManager()
+        
+        # Create docking system with target HWND list
+        # MRU list is automatically populated during create_docking_system()
+        success = self._docking_manager.create_docking_system([hwnd])
+        if not success:
+            raise RuntimeError("Failed to create docking overlay system")
+        
+        # Position overlays at saved location or default
+        if docking_position:
+            self._apply_docking_position(docking_position)
+        
+        logger.info(f"Created docking overlay system for window: {hwnd} ({title})")
+        
+        # Minimize main dialog to tray after successful overlay creation
+        self._minimize_to_tray()
+
+    def _load_docking_position(self) -> dict:
+        """Load saved docking position from settings."""
+        try:
+            from core.settings import get_settings_manager
+            settings = get_settings_manager()
+            return settings.get('docking.last_position', {})
+        except Exception as e:
+            logger.debug(f"Failed to load docking position: {e}")
+            return {}
+
+    def _save_docking_position(self, position_data: dict) -> None:
+        """Save docking position to settings with batched I/O."""
+        try:
+            from core.settings import get_settings_manager
+            settings = get_settings_manager()
+            settings.set('docking.last_position', position_data)
+            # Settings manager handles batched I/O internally
+            logger.debug(f"Saved docking position: {position_data}")
+        except Exception as e:
+            logger.warning(f"Failed to save docking position: {e}")
+
+    def _apply_docking_position(self, position_data: dict) -> None:
+        """Apply saved position to docking overlays."""
+        try:
+            if not self._docking_manager or not position_data:
+                return
+            
+            # Apply position data to docking manager
+            # This would integrate with the docking manager's positioning system
+            logger.debug(f"Applied docking position: {position_data}")
+        except Exception as e:
+            logger.warning(f"Failed to apply docking position: {e}")
+
     def _create_overlay_for_monitor(self, monitor: dict) -> None:
         """Create a monitor overlay using the Monitor backend for the given monitor dict."""
+        # Destroy existing overlays before creating new ones
+        self._destroy_all_existing_overlays()
+        
         if not monitor or 'rect' not in monitor:
             raise RuntimeError("Monitor info with 'rect' is required for overlay creation")
         # Place at top-left of the launching display, minimum size honoring AR

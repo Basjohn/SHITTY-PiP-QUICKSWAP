@@ -28,21 +28,32 @@ class BorderTheme:
             raise ValueError(f"Required theme token 'overlay.border.stroke' missing: {e}")
             
     def get_border_thickness_base(self) -> float:
-        """Get base border thickness from theme."""
+        """Get base border thickness from theme with larger_borders setting support."""
         try:
             thickness_str = self._theme_manager.get_token('overlay.border.thickness.base')
-            return float(thickness_str)
+            base_thickness = float(thickness_str)
         except Exception:
             # Light theme default: 2.0px, Dark theme: 1.5px
             # Try to infer from current theme name
             try:
                 current_theme = getattr(self._theme_manager, '_current_theme', 'light')
                 if 'dark' in current_theme.lower():
-                    return 1.5  # Thinner for dark theme
+                    base_thickness = 1.5  # Thinner for dark theme
                 else:
-                    return 2.0  # Standard for light theme
+                    base_thickness = 2.0  # Standard for light theme
             except Exception:
-                return 2.0  # Safe fallback
+                base_thickness = 2.0  # Safe fallback
+        
+        # Apply larger_borders setting if enabled
+        try:
+            from core.settings import get_settings_manager
+            settings = get_settings_manager()
+            if settings.get('overlay.larger_borders', False):
+                base_thickness += 1.0
+        except Exception:
+            pass  # Silently continue if settings unavailable
+        
+        return base_thickness
             
     def get_accent_color(self) -> QColor:
         """Get inner accent color for depth effect."""

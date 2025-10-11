@@ -152,6 +152,7 @@ class SubSettingsDialog(QDialog):
         content_layout.setSpacing(14)
         content_layout.setContentsMargins(18, 18, 18, 18)
 
+        # ===== VISUAL SETTINGS =====
         # Theme
         theme_label = QLabel("Theme:")
         theme_label.setObjectName("SubSettingsSectionLabel")
@@ -161,68 +162,19 @@ class SubSettingsDialog(QDialog):
         content_layout.addWidget(theme_label)
         content_layout.addWidget(self.theme_combo)
 
-        # Opacity hotkey section
-        opacity_label = QLabel("Opacity Hotkeys:")
-        opacity_label.setObjectName("SubSettingsSectionLabel")
-        content_layout.addWidget(opacity_label)
-        opacity_hotkey_layout = QHBoxLayout()
-        self.opacity_hotkeys_checkbox = CircleCheckBox("Enable Opacity Hotkeys")
-        self.opacity_hotkeys_checkbox.setObjectName("SettingsCheckBox")
-        opacity_hotkey_layout.addWidget(self.opacity_hotkeys_checkbox)
-        content_layout.addLayout(opacity_hotkey_layout)
-        decrease_label = QLabel("Decrease Opacity:")
-        decrease_label.setObjectName("SubSettingsSectionLabel")
-        self.decrease_hotkey_edit = QKeySequenceEdit()
-        self.decrease_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
-        content_layout.addWidget(decrease_label)
-        content_layout.addWidget(self.decrease_hotkey_edit)
-        increase_label = QLabel("Increase Opacity:")
-        increase_label.setObjectName("SubSettingsSectionLabel")
-        self.increase_hotkey_edit = QKeySequenceEdit()
-        # Use unified object name for consistent QSS styling
-        self.increase_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
-        content_layout.addWidget(increase_label)
-        content_layout.addWidget(self.increase_hotkey_edit)
+        # Rounded Borders toggle
+        self.rounded_borders_checkbox = CircleCheckBox("Rounded Borders")
+        self.rounded_borders_checkbox.setObjectName("RoundedBordersCheckBox")
+        self.rounded_borders_checkbox.setToolTip("Pretty, but oh does it bleed.")
+        content_layout.addWidget(self.rounded_borders_checkbox)
+        
+        # Larger Borders toggle
+        self.larger_borders_checkbox = CircleCheckBox("Larger Borders")
+        self.larger_borders_checkbox.setObjectName("LargerBordersCheckBox")
+        self.larger_borders_checkbox.setToolTip("Increase border thickness by 1px for better visibility")
+        content_layout.addWidget(self.larger_borders_checkbox)
 
-        # Quickswitch hotkey
-        # Enable/Disable toggle for Quickswitch
-        self.quickswitch_checkbox = CircleCheckBox("Enable Quickswitch Hotkey")
-        self.quickswitch_checkbox.setObjectName("QuickswitchCheckBox")
-        content_layout.addWidget(self.quickswitch_checkbox)
-
-        # Quickswitch key selection
-        quickswitch_label = QLabel("Quickswitch Hotkey:")
-        quickswitch_label.setObjectName("SubSettingsSectionLabel")
-        self.quickswitch_hotkey_edit = QKeySequenceEdit()
-        # Use the same selector for all key sequence edits in subsettings
-        self.quickswitch_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
-        content_layout.addWidget(quickswitch_label)
-        content_layout.addWidget(self.quickswitch_hotkey_edit)
-
-        # Autoswitch and Keypassthrough checkboxes
-        self.autoswitch_checkbox = CircleCheckBox("Enable Autoswitch")
-        self.autoswitch_checkbox.setObjectName("AutoswitchCheckBox")
-        content_layout.addWidget(self.autoswitch_checkbox)
-        self.keypassthrough_checkbox = CircleCheckBox("Enable Keypassthrough")
-        self.keypassthrough_checkbox.setObjectName("KeypassthroughCheckBox")
-        # Themed tooltip text; styling handled by QSS theme stylesheets
-        self.keypassthrough_checkbox.setToolTip("Just use Media Control instead, it's completely safe.")
-        content_layout.addWidget(self.keypassthrough_checkbox)
-
-        # Display Locked Switching
-        self.display_locked_checkbox = CircleCheckBox("Display Locked Switching")
-        self.display_locked_checkbox.setObjectName("DisplayLockedSwitchingCheckBox")
-        self.display_locked_checkbox.setToolTip("When enabled, QuickSwitch and Autoswitch only consider windows on the same monitor as the overlay's current content.")
-        content_layout.addWidget(self.display_locked_checkbox)
-
-        # Media Control toggle
-        self.media_control_checkbox = CircleCheckBox("Media Control")
-        self.media_control_checkbox.setObjectName("MediaControlCheckBox")
-        self.media_control_checkbox.setToolTip("Route media keys (play/pause, next, previous, stop) to active media applications.")
-        content_layout.addWidget(self.media_control_checkbox)
-
-        # Removed click-through toggle - incompatible with overlay architecture
-
+        # ===== PERFORMANCE SETTINGS =====
         # Capture FPS selection
         fps_label = QLabel("Monitor Capture FPS:")
         fps_label.setObjectName("SubSettingsSectionLabel")
@@ -233,12 +185,79 @@ class SubSettingsDialog(QDialog):
         content_layout.addWidget(fps_label)
         content_layout.addWidget(self.capture_fps_combo)
 
-        # Rounded Borders toggle
-        self.rounded_borders_checkbox = CircleCheckBox("Rounded Borders")
-        self.rounded_borders_checkbox.setObjectName("RoundedBordersCheckBox")
-        # Themed tooltip text; styling handled by QSS
-        self.rounded_borders_checkbox.setToolTip("Pretty, but oh does it bleed.")
-        content_layout.addWidget(self.rounded_borders_checkbox)
+        # ===== HOTKEYS (PRIMARY CONTROLS) =====
+        # Quickswitch hotkey
+        self.quickswitch_checkbox = CircleCheckBox("Enable Quickswitch Hotkey")
+        self.quickswitch_checkbox.setObjectName("QuickswitchCheckBox")
+        content_layout.addWidget(self.quickswitch_checkbox)
+
+        quickswitch_label = QLabel("Quickswitch Hotkey:")
+        quickswitch_label.setObjectName("SubSettingsSectionLabel")
+        self.quickswitch_hotkey_edit = QKeySequenceEdit()
+        self.quickswitch_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
+        content_layout.addWidget(quickswitch_label)
+        content_layout.addWidget(self.quickswitch_hotkey_edit)
+
+        # Hide/Show Overlays hotkey
+        self.hideshow_checkbox = CircleCheckBox("Enable Hide/Show Hotkey")
+        self.hideshow_checkbox.setObjectName("HideShowCheckBox")
+        content_layout.addWidget(self.hideshow_checkbox)
+        
+        hideshow_label = QLabel("Hide/Show All Overlays:")
+        hideshow_label.setObjectName("SubSettingsSectionLabel")
+        self.hideshow_hotkey_edit = QKeySequenceEdit()
+        self.hideshow_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
+        self.hideshow_hotkey_edit.setToolTip("Hotkey to toggle visibility of all overlays (default: Ctrl+Shift+H)")
+        content_layout.addWidget(hideshow_label)
+        content_layout.addWidget(self.hideshow_hotkey_edit)
+
+        # Opacity hotkey section
+        opacity_label = QLabel("Opacity Hotkeys:")
+        opacity_label.setObjectName("SubSettingsSectionLabel")
+        content_layout.addWidget(opacity_label)
+        opacity_hotkey_layout = QHBoxLayout()
+        self.opacity_hotkeys_checkbox = CircleCheckBox("Enable Opacity Hotkeys")
+        self.opacity_hotkeys_checkbox.setObjectName("SettingsCheckBox")
+        opacity_hotkey_layout.addWidget(self.opacity_hotkeys_checkbox)
+        content_layout.addLayout(opacity_hotkey_layout)
+        
+        decrease_label = QLabel("Decrease Opacity:")
+        decrease_label.setObjectName("SubSettingsSectionLabel")
+        self.decrease_hotkey_edit = QKeySequenceEdit()
+        self.decrease_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
+        content_layout.addWidget(decrease_label)
+        content_layout.addWidget(self.decrease_hotkey_edit)
+        
+        increase_label = QLabel("Increase Opacity:")
+        increase_label.setObjectName("SubSettingsSectionLabel")
+        self.increase_hotkey_edit = QKeySequenceEdit()
+        self.increase_hotkey_edit.setObjectName("SettingsKeySequenceEdit")
+        content_layout.addWidget(increase_label)
+        content_layout.addWidget(self.increase_hotkey_edit)
+
+        # ===== FEATURE TOGGLES =====
+        # Autoswitch
+        self.autoswitch_checkbox = CircleCheckBox("Enable Autoswitch")
+        self.autoswitch_checkbox.setObjectName("AutoswitchCheckBox")
+        content_layout.addWidget(self.autoswitch_checkbox)
+        
+        # Media Control toggle
+        self.media_control_checkbox = CircleCheckBox("Media Control")
+        self.media_control_checkbox.setObjectName("MediaControlCheckBox")
+        self.media_control_checkbox.setToolTip("Route media keys (play/pause, next, previous, stop) to active media applications.")
+        content_layout.addWidget(self.media_control_checkbox)
+
+        # Display Locked Switching
+        self.display_locked_checkbox = CircleCheckBox("Display Locked Switching")
+        self.display_locked_checkbox.setObjectName("DisplayLockedSwitchingCheckBox")
+        self.display_locked_checkbox.setToolTip("When enabled, QuickSwitch and Autoswitch only consider windows on the same monitor as the overlay's current content.")
+        content_layout.addWidget(self.display_locked_checkbox)
+
+        # Keypassthrough (last - discouraged in favor of Media Control)
+        self.keypassthrough_checkbox = CircleCheckBox("Enable Keypassthrough")
+        self.keypassthrough_checkbox.setObjectName("KeypassthroughCheckBox")
+        self.keypassthrough_checkbox.setToolTip("Just use Media Control instead, it's completely safe.")
+        content_layout.addWidget(self.keypassthrough_checkbox)
 
         # Create scroll area and embed the content
         scroll_area = QScrollArea()
@@ -302,6 +321,17 @@ class SubSettingsDialog(QDialog):
         quickswitch_enabled = bool(self.settings_manager.get("hotkeys.quickswitch_enabled", False))
         self.quickswitch_checkbox.setChecked(quickswitch_enabled)
 
+        # Hide/Show enable (default off)
+        hideshow_enabled = bool(self.settings_manager.get("hotkeys.hide_show_enabled", False))
+        self.hideshow_checkbox.setChecked(hideshow_enabled)
+        
+        # Hide/Show hotkey
+        hideshow_key = self.settings_manager.get("hotkeys.hide_show_overlays", "ctrl+shift+h")
+        if not hideshow_key or hideshow_key.lower() in ("",):
+            hideshow_key = "ctrl+shift+h"
+            self.settings_manager.set("hotkeys.hide_show_overlays", hideshow_key)
+        self.hideshow_hotkey_edit.setKeySequence(QKeySequence(hideshow_key))
+
         # Feature toggles (stubbed)
         autoswitch_enabled = self.settings_manager.get("features.autoswitch_enabled", False)
         self.autoswitch_checkbox.setChecked(bool(autoswitch_enabled))
@@ -332,6 +362,10 @@ class SubSettingsDialog(QDialog):
         rounded_enabled = bool(self.settings_manager.get("overlay.rounded_borders", False))
         self.rounded_borders_checkbox.setChecked(rounded_enabled)
         # Integrated system listens to SettingsManager; no direct overlay calls
+        
+        # Larger borders (default off)
+        larger_borders_enabled = bool(self.settings_manager.get("overlay.larger_borders", False))
+        self.larger_borders_checkbox.setChecked(larger_borders_enabled)
 
 
     def _save_settings(self):
@@ -365,6 +399,16 @@ class SubSettingsDialog(QDialog):
         self.settings_manager.set("hotkeys.quickswitch_enabled", quickswitch_enabled, save_immediately=False)
         logger.debug(f"Saved hotkeys.quickswitch_enabled={quickswitch_enabled}")
 
+        # Hide/Show enable toggle
+        hideshow_enabled = self.hideshow_checkbox.isChecked()
+        self.settings_manager.set("hotkeys.hide_show_enabled", hideshow_enabled, save_immediately=False)
+        logger.debug(f"Saved hotkeys.hide_show_enabled={hideshow_enabled}")
+        
+        # Hide/Show hotkey
+        hideshow_key = self.hideshow_hotkey_edit.keySequence().toString()
+        self.settings_manager.set("hotkeys.hide_show_overlays", hideshow_key, save_immediately=False)
+        logger.debug(f"Saved hotkeys.hide_show_overlays='{hideshow_key}'")
+
         # Feature toggles
         autoswitch_enabled = self.autoswitch_checkbox.isChecked()
         self.settings_manager.set("features.autoswitch_enabled", autoswitch_enabled, save_immediately=False)
@@ -391,6 +435,11 @@ class SubSettingsDialog(QDialog):
         self.settings_manager.set("overlay.rounded_borders", rounded_enabled, save_immediately=False)
         logger.debug(f"Saved overlay.rounded_borders={rounded_enabled}")
         
+        # Larger borders
+        larger_borders_enabled = self.larger_borders_checkbox.isChecked()
+        self.settings_manager.set("overlay.larger_borders", larger_borders_enabled, save_immediately=False)
+        logger.debug(f"Saved overlay.larger_borders={larger_borders_enabled}")
+        
         # Single batched save at the end
         self.settings_manager.save()
         
@@ -415,6 +464,17 @@ class SubSettingsDialog(QDialog):
             logger.debug(f"Rounded borders toggled to {enabled} (integrated update via SettingsManager)")
         except Exception as e:
             logger.error(f"Error toggling rounded borders: {e}", exc_info=True)
+    
+    def _on_larger_borders_changed(self, state):
+        """Handle larger borders toggle: apply live and persist immediately."""
+        try:
+            enabled = self.larger_borders_checkbox.isChecked()
+            # Persist immediately
+            self.settings_manager.set("overlay.larger_borders", enabled)
+            # Integrated overlays update via settings change handlers
+            logger.debug(f"Larger borders toggled to {enabled} (integrated update via SettingsManager)")
+        except Exception as e:
+            logger.error(f"Error toggling larger borders: {e}", exc_info=True)
 
     def _on_opacity_hotkeys_changed(self, state):
         """Handle opacity hotkeys enable/disable."""
@@ -447,6 +507,21 @@ class SubSettingsDialog(QDialog):
             logger.debug(f"Changed hotkeys.opacity_quickswitch to '{key}' and updated QuickSwitch hotkey")
         except Exception as e:
             logger.error(f"Failed to update QuickSwitch hotkey live: {e}", exc_info=True)
+    
+    def _on_hideshow_hotkey_changed(self, key_sequence):
+        """Handle hide/show hotkey change."""
+        key = self.hideshow_hotkey_edit.keySequence().toString()
+        self.settings_manager.set("hotkeys.hide_show_overlays", key)
+        try:
+            # Update HideShowController live
+            from core.hide_show_controller import get_hide_show_controller
+            controller = get_hide_show_controller()
+            # Unregister old hotkey and register new one
+            if hasattr(controller, 'update_hotkey'):
+                controller.update_hotkey(key)
+            logger.debug(f"Changed hotkeys.hide_show_overlays to '{key}'")
+        except Exception as e:
+            logger.error(f"Failed to update Hide/Show hotkey live: {e}", exc_info=True)
 
     def _on_quickswitch_enabled_changed(self, state):
         """Handle quickswitch enable/disable toggle."""
@@ -458,15 +533,40 @@ class SubSettingsDialog(QDialog):
             logger.debug(f"Quickswitch enabled toggled to {enabled} and applied")
         except Exception as e:
             logger.error(f"Failed to apply quickswitch enable setting: {e}")
+    
+    def _on_hideshow_enabled_changed(self, state):
+        """Handle hide/show enable/disable toggle."""
+        enabled = self.hideshow_checkbox.isChecked()
+        self.settings_manager.set("hotkeys.hide_show_enabled", enabled)
+        try:
+            from core.hide_show_controller import get_hide_show_controller
+            get_hide_show_controller().update_hotkeys()
+            logger.debug(f"Hide/Show enabled toggled to {enabled} and applied")
+        except Exception as e:
+            logger.error(f"Failed to apply hide/show enable setting: {e}")
 
     def _on_autoswitch_changed(self, state):
-        """Handle autoswitch toggle (feature stub)."""
+        """Handle autoswitch toggle: persist and apply to all managers."""
         enabled = self.autoswitch_checkbox.isChecked()
         self.settings_manager.set("features.autoswitch_enabled", enabled)
         try:
-            from core.switching.autoswitch_controller import get_autoswitch_controller
-            get_autoswitch_controller().apply_settings()
-            logger.debug(f"Autoswitch toggled to {enabled} and applied")
+            # Apply to foreground-based autoswitch controller
+            from core.switching.autoswitch_controller import get_foreground_autoswitch_controller
+            get_foreground_autoswitch_controller().apply_settings()
+            
+            # Apply to window-monitor autoswitch (single overlays)
+            from core.graphics import get_overlay_manager
+            overlay_manager = get_overlay_manager()
+            if overlay_manager:
+                overlay_manager.set_auto_switch_enabled(enabled)
+            
+            # Apply to docking manager (docking overlays)
+            from core.graphics.docking import get_docking_manager
+            docking_manager = get_docking_manager()
+            if docking_manager and docking_manager.is_active():
+                docking_manager.set_auto_switch_enabled(enabled)
+            
+            logger.debug(f"Autoswitch toggled to {enabled} and applied to all managers")
         except Exception as e:
             logger.error(f"Failed to apply autoswitch setting: {e}", exc_info=True)
 
@@ -476,8 +576,8 @@ class SubSettingsDialog(QDialog):
         self.settings_manager.set("features.display_locked_switching", enabled)
         try:
             # No heavy re-init required; controllers read the setting on use. Call applies for audit/logging.
-            from core.switching.autoswitch_controller import get_autoswitch_controller
-            get_autoswitch_controller().apply_settings()
+            from core.switching.autoswitch_controller import get_foreground_autoswitch_controller
+            get_foreground_autoswitch_controller().apply_settings()
         except Exception as e:
             logger.error(f"Failed to notify autoswitch after display_locked change: {e}")
         try:
@@ -547,12 +647,15 @@ class SubSettingsDialog(QDialog):
         self.decrease_hotkey_edit.keySequenceChanged.connect(self._on_decrease_hotkey_changed)
         self.increase_hotkey_edit.keySequenceChanged.connect(self._on_increase_hotkey_changed)
         self.quickswitch_hotkey_edit.keySequenceChanged.connect(self._on_quickswitch_hotkey_changed)
+        self.hideshow_hotkey_edit.keySequenceChanged.connect(self._on_hideshow_hotkey_changed)
         self.quickswitch_checkbox.stateChanged.connect(self._on_quickswitch_enabled_changed)
+        self.hideshow_checkbox.stateChanged.connect(self._on_hideshow_enabled_changed)
         self.autoswitch_checkbox.stateChanged.connect(self._on_autoswitch_changed)
         self.keypassthrough_checkbox.stateChanged.connect(self._on_keypassthrough_changed)
         self.media_control_checkbox.stateChanged.connect(self._on_media_control_changed)
         # Removed click-through signal connection
         self.rounded_borders_checkbox.stateChanged.connect(self._on_rounded_borders_changed)
+        self.larger_borders_checkbox.stateChanged.connect(self._on_larger_borders_changed)
         self.display_locked_checkbox.stateChanged.connect(self._on_display_locked_switching_changed)
         self.capture_fps_combo.currentTextChanged.connect(self._on_capture_fps_changed)
 
@@ -562,6 +665,15 @@ class SubSettingsDialog(QDialog):
     # See the mousePressEvent, mouseMoveEvent, mouseReleaseEvent, and leaveEvent methods
     # defined earlier in this class
 
+    def showEvent(self, event):
+        """Reset cursor when dialog is shown to fix horizontal arrow cursor bug."""
+        super().showEvent(event)
+        # Reset cursor to default arrow to prevent stuck resize cursor
+        self.setCursor(Qt.ArrowCursor)
+        # Also ensure window behavior manager resets its state
+        if hasattr(self, 'window_behavior'):
+            self.window_behavior.handle_leave()
+    
     def keyPressEvent(self, event):
         """Close the subsettings dialog on ESC."""
         try:

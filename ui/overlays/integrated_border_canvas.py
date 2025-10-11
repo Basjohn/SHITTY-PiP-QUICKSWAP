@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QPaintEvent, QResizeEvent, QColor, QPainterPath, QRegion
 
@@ -99,6 +99,7 @@ class IntegratedBorderCanvas(QWidget):
             
             # Register for live updates
             settings.register_change_handler('overlay.rounded_borders', self._on_border_settings_changed)
+            settings.register_change_handler('overlay.larger_borders', self._on_border_settings_changed)
             settings.register_change_handler('theme', self._on_theme_changed)
             
         except Exception as e:
@@ -106,12 +107,13 @@ class IntegratedBorderCanvas(QWidget):
             logger.warning(f"Settings monitoring setup failed: {e}")
 
     def _on_border_settings_changed(self, key: str, value: object) -> None:
-        """Handle border settings changes."""
+        """Handle border settings changes (rounded, larger, etc)."""
         if key == 'overlay.rounded_borders':
             self._rounded_enabled = bool(value)
-            self._border_geometry.clear_cache()
-            self._border_metrics = None
-            self.update()
+        # For larger_borders or any border-affecting setting, invalidate cached metrics
+        self._border_geometry.clear_cache()
+        self._border_metrics = None
+        self.update()
 
     def _on_theme_changed(self, *args) -> None:
         """Handle theme changes from ThemeManager and SettingsManager.

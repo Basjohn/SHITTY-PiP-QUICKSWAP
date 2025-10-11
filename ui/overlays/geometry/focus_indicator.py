@@ -125,6 +125,36 @@ class FocusIndicatorWidget(QWidget):
                 logger.info("FOCUS_AUDIT: Hiding focus indicator")
                 self.hide()
 
+    def set_visible_no_focus(self, visible: bool) -> None:
+        """Show/hide indicator without mutating the global FocusState.
+
+        This is intended for non-focusable secondary overlays (docking B/C) so they
+        can display the indicator and handle lock toggles without affecting the
+        global overlay-focused flag used by controllers.
+        """
+        from core.logging import get_logger
+        logger = get_logger("FocusIndicator")
+        new_state = bool(visible)
+        if new_state != self._has_focus:
+            self._has_focus = new_state
+            if self._has_focus:
+                logger.info("FOCUS_AUDIT: set_visible_no_focus -> showing indicator")
+                try:
+                    self.update_position()
+                except Exception:
+                    pass
+                self.raise_()
+                self.show()
+                try:
+                    from utils.resource_manager import get_resource_manager
+                    rm = get_resource_manager()
+                    rm.bring_child_to_front(self)
+                except Exception:
+                    pass
+            else:
+                logger.info("FOCUS_AUDIT: set_visible_no_focus -> hiding indicator")
+                self.hide()
+
     def flash_block(self, duration_ms: int = 300) -> None:
         """Temporarily force the indicator to render black for the given duration.
 
@@ -454,11 +484,20 @@ class FocusIndicatorWindow(FocusIndicatorWidget):
         logger = get_logger("FocusIndicator")
         if bool(has_focus) != self._has_focus:
             self._has_focus = bool(has_focus)
-            # Update centralized focus state (thread-safe)
+            # For non-focusable hosts (secondary docking overlays), do NOT update global FocusState
+            suppress_global = False
             try:
-                get_focus_state().set_overlay_focused(self._has_focus)
+                host = self._host_ref
+                if host is not None:
+                    flags = host.windowFlags()
+                    suppress_global = bool(flags & Qt.WindowDoesNotAcceptFocus)
             except Exception:
-                pass
+                suppress_global = False
+            if not suppress_global:
+                try:
+                    get_focus_state().set_overlay_focused(self._has_focus)
+                except Exception:
+                    pass
             if self._has_focus:
                 self.update_position()
                 self.raise_()

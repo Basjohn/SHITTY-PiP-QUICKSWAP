@@ -47,9 +47,9 @@ class VolumeOSDWidget(QWidget):
         # When volume level is unavailable, show a textual indicator
         self._text_override: str = ""
 
-        # Sizing
-        self._width_px = 260
-        self._height_px = 36
+        # Sizing (lean defaults; further clamped at runtime)
+        self._width_px = 200
+        self._height_px = 18
         self.resize(self.sizeHint())
         self.hide()  # start hidden
 
@@ -102,6 +102,54 @@ class VolumeOSDWidget(QWidget):
             self._logger.debug(f"ResourceManager.register failed for VolumeOSD: {e}")
             self._resource_id = None
 
+    def _should_display_for_event(self, data: Optional[Dict[str, Any]]) -> bool:
+        """Return True only if this OSD belongs to the active overlay or matches the event hwnd.
+
+        This prevents all overlays from showing the OSD simultaneously in docking mode.
+        """
+        try:
+            host = getattr(self, "_host_ref", None)
+            if host is None:
+                return True  # No host context; allow by default
+            # Prefer active host gating
+            try:
+                if host.isActiveWindow():
+                    return True
+            except Exception:
+                pass
+
+            # Fallback: match event hwnd to this overlay's source hwnd
+            target_hwnd = 0
+            try:
+                if isinstance(data, dict) and data.get("hwnd"):
+                    target_hwnd = int(data.get("hwnd") or 0)
+            except Exception:
+                target_hwnd = 0
+            if not target_hwnd:
+                return False
+
+            ov = getattr(host, "_backend_overlay", None) or getattr(host, "_parent_overlay", None)
+            src_hwnd = 0
+            if ov is not None:
+                for attr in ("_source_hwnd", "_captured_hwnd"):
+                    if hasattr(ov, attr):
+                        try:
+                            src_hwnd = int(getattr(ov, attr) or 0)
+                        except Exception:
+                            src_hwnd = 0
+                        if src_hwnd:
+                            break
+                if not src_hwnd:
+                    try:
+                        cfg = getattr(ov, "_config", None)
+                        props = dict(getattr(cfg, "properties", {}) or {}) if cfg is not None else {}
+                        src_hwnd = int(props.get("hwnd") or 0)
+                    except Exception:
+                        src_hwnd = 0
+            return bool(src_hwnd and target_hwnd and src_hwnd == target_hwnd)
+        except Exception:
+            return False
+
     # --- QWidget overrides ----------------------------------------------------
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(self._width_px, self._height_px)
@@ -111,47 +159,82 @@ class VolumeOSDWidget(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
 
-        rect = self.rect()
-        # Background
-        bg = QColor("#000000")
-        bg.setAlpha(160)
-        painter.setBrush(QBrush(bg))
-        painter.setPen(Qt.NoPen)
-        radius = 8
-        painter.drawRoundedRect(rect, radius, radius)
+            rect = self.rect()
+            # Conservative metrics; slightly leaner on secondary overlays
+            try:
+                _sec_fn = getattr(self, "_is_secondary", None)
+                is_sec = bool(_sec_fn()) if callable(_sec_fn) else False
+            except Exception:
+                is_sec = False
+            if is_sec:
+                radius = max(2, min(5, int(rect.height() * 0.18)))
+                pad = max(2, min(5, int(rect.height() * 0.14)))
+            else:
+                radius = max(3, min(6, int(rect.height() * 0.20)))
+                pad = max(3, min(6, int(rect.height() * 0.16)))
+            # Background
+            bg = QColor("#000000")
+            bg.setAlpha(160)
+            painter.setBrush(QBrush(bg))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect, radius, radius)
 
-        # Volume fill bar
-        inner = rect.adjusted(10, 10, -10, -10)
-        track_color = QColor("#666666")
-        track_color.setAlpha(180)
-        painter.setBrush(QBrush(track_color))
-        painter.drawRoundedRect(inner, 5, 5)
+            # Volume fill bar
+            inner = rect.adjusted(pad, pad, -pad, -pad)
+            track_color = QColor("#666666")
+            track_color.setAlpha(180)
+            painter.setBrush(QBrush(track_color))
+            painter.drawRoundedRect(inner, max(3, min(6, int(radius * 0.6))), max(3, min(6, int(radius * 0.6))))
 
-        vol = max(0.0, min(1.0, float(self._volume)))
-        fill_w = int(inner.width() * vol)
-        if fill_w > 0:
-            fill_rect = QRect(inner.x(), inner.y(), fill_w, inner.height())
-            fill_color = QColor("#000000")  # black fill
-            fill_color.setAlpha(230)  # ~90% opacity
-            painter.setBrush(QBrush(fill_color))
-            painter.drawRoundedRect(fill_rect, 5, 5)
+            vol = max(0.0, min(1.0, float(self._volume)))
+            fill_w = int(inner.width() * vol)
+            if fill_w > 0:
+                fill_rect = QRect(inner.x(), inner.y(), fill_w, inner.height())
+                fill_color = QColor("#000000")  # black fill
+                fill_color.setAlpha(230)  # ~90% opacity
+                painter.setBrush(QBrush(fill_color))
+                painter.drawRoundedRect(fill_rect, 5, 5)
 
-        # Text: app name and percent
-        painter.setPen(QPen(QColor("#FFFFFF")))
-        font = painter.font()
-        font.setPointSizeF(max(8.0, font.pointSizeF()))
-        font.setBold(True)
-        painter.setFont(font)
-        percent = int(round(vol * 100))
-        label = ((self._app_name or "")[:24]).upper()
-        if self._text_override:
-            text = f"{label}  {self._text_override}".strip().upper()
-        else:
-            text = f"{label}  {percent}%".strip().upper()
-        # Place text centered vertically, with left padding
-        painter.drawText(inner.adjusted(8, 0, -8, 0), Qt.TextSingleLine, text)
+            # Text: app name and percent
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            font = painter.font()
+            # Scale font using pixels to avoid clipping regardless of DPI
+            try:
+                target_px = max(8, min(12, int(inner.height() - 3)))
+                if is_sec:
+                    target_px = max(8, min(11, target_px))
+                font.setPixelSize(int(target_px))
+            except Exception:
+                font.setPointSizeF(9.0)
+            # Only bold on primary or when we have enough vertical space
+            font.setBold(False if is_sec else bool(target_px >= 11))
+            painter.setFont(font)
+            percent = int(round(vol * 100))
+            label = ((self._app_name or "")[:24]).upper()
+            if is_sec:
+                # Secondary overlays: percent only to keep OSD compact
+                text = f"{percent}%"
+            else:
+                if self._text_override:
+                    text = f"{label}  {self._text_override}".strip().upper()
+                else:
+                    text = f"{label}  {percent}%".strip().upper()
+            # Place text vertically centered with left padding and elide if needed
+            text_rect = inner.adjusted(8, 0, -8, 0)
+            try:
+                fm = painter.fontMetrics()
+                text = fm.elidedText(text, Qt.ElideRight, text_rect.width())
+            except Exception:
+                pass
+            painter.drawText(text_rect, int(Qt.AlignVCenter) | int(Qt.AlignLeft), text)
+        finally:
+            try:
+                painter.end()
+            except Exception:
+                pass
 
     # --- Public API -----------------------------------------------------------
     def update_position(self, target_rect: Optional[QRect] = None) -> None:
@@ -163,9 +246,32 @@ class VolumeOSDWidget(QWidget):
         if not p:
             return
         rect = target_rect if target_rect is not None else p.rect()
+        # Clamp OSD size to host size to avoid overflow on small secondary overlays
+        try:
+            try:
+                _sec_fn = getattr(self, "_is_secondary", None)
+                _is_sec = bool(_sec_fn()) if callable(_sec_fn) else False
+            except Exception:
+                _is_sec = False
+            max_w_ratio = 0.60 if _is_sec else 0.70
+            max_w = max(60, int(rect.width() * max_w_ratio))
+            # Keep OSD lean: cap to 14% height, min 12px, max 18px
+            max_h = min(18, max(12, int(rect.height() * 0.14)))
+            target_w = min(self._width_px, max_w)
+            target_h = min(self._height_px, max_h)
+            if target_w != self.width() or target_h != self.height():
+                self.resize(QSize(int(target_w), int(target_h)))
+        except Exception:
+            pass
         w, h = self.width(), self.height()
         x = rect.x() + (rect.width() - w) // 2
-        y = rect.y() + rect.height() - h - 12
+        try:
+            _sec_fn = getattr(self, "_is_secondary", None)
+            _is_sec = bool(_sec_fn()) if callable(_sec_fn) else False
+        except Exception:
+            _is_sec = False
+        bottom_margin = 8 if _is_sec else 12
+        y = rect.y() + rect.height() - h - bottom_margin
         self.move(QPoint(max(0, x), max(0, y)))
         self.raise_()
 
@@ -175,7 +281,16 @@ class VolumeOSDWidget(QWidget):
         try:
             data: Dict[str, Any] = evt.data or {}
             self._hwnd = data.get("hwnd")
-            self._app_name = data.get("app_name") or data.get("session") or ""
+            # Prefer actual window title for display name; fallback to provided app name
+            provided_app = data.get("app_name") or data.get("session") or ""
+            title_name = ""
+            try:
+                if self._hwnd:
+                    import win32gui  # type: ignore
+                    title_name = (win32gui.GetWindowText(int(self._hwnd)) or "").strip()
+            except Exception:
+                title_name = ""
+            self._app_name = title_name or provided_app or ""
             # Volume can be provided as 'volume' or 'level' in 0.0-1.0 or 0-100 scales
             raw = data.get("volume")
             if raw is None:
@@ -212,6 +327,20 @@ class VolumeOSDWidget(QWidget):
         except Exception as e:
             self._logger.error(f"Invalid media.volume.changed payload: {e}")
             return
+
+        # Docking-mode filter: only the focused overlay (or matching source hwnd) should show the OSD
+        try:
+            if hasattr(self, "_should_display_for_event"):
+                if not self._should_display_for_event({
+                    "hwnd": self._hwnd,
+                    "source": self._source,
+                    "reason": self._reason,
+                }):
+                    self._vlog("filtered: host not active and hwnd doesn't match; ignoring OSD event")
+                    return
+        except Exception:
+            # Never block OSD due to filter errors
+            pass
 
         # Coalesce UI updates
         self._coalescer.submit(self._apply_state_and_repaint)
@@ -330,10 +459,33 @@ class VolumeOSDWindow(VolumeOSDWidget):
         # Determine host content rect
         rect = target_rect if target_rect is not None else host.rect()
 
-        # Compute local position: bottom-center with 12px margin
+        # Compute local position: bottom-center with margin
+        # Clamp OSD size to host size to avoid overflow on small secondary overlays
+        try:
+            try:
+                _sec_fn = getattr(self, "_is_secondary", None)
+                _is_sec = bool(_sec_fn()) if callable(_sec_fn) else False
+            except Exception:
+                _is_sec = False
+            max_w_ratio = 0.60 if _is_sec else 0.70
+            max_w = max(60, int(rect.width() * max_w_ratio))
+            # Keep OSD lean: cap to 14% height, min 12px, max 18px
+            max_h = min(18, max(12, int(rect.height() * 0.14)))
+            target_w = min(self._width_px, max_w)
+            target_h = min(self._height_px, max_h)
+            if target_w != self.width() or target_h != self.height():
+                self.resize(QSize(int(target_w), int(target_h)))
+        except Exception:
+            pass
         w, h = self.width(), self.height()
         x_local = (rect.width() - w) // 2
-        y_local = rect.height() - h - 12
+        try:
+            _sec_fn = getattr(self, "_is_secondary", None)
+            _is_sec = bool(_sec_fn()) if callable(_sec_fn) else False
+        except Exception:
+            _is_sec = False
+        bottom_margin = 8 if _is_sec else 12
+        y_local = rect.height() - h - bottom_margin
         if rect.width() - w < 0:
             x_local = 0
         if rect.height() - h < 0:
