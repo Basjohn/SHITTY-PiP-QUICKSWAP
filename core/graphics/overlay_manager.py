@@ -31,7 +31,7 @@ class OverlayManager:
     """Manages the lifecycle of overlay instances with MRU and locking support."""
     
     # Maximum number of items to keep in MRU list
-    MAX_MRU_ITEMS = 10
+    MAX_MRU_ITEMS = 12  # Expanded for docking mode support
     
     _instance: Optional['OverlayManager'] = None
     _initialized: bool = False
@@ -73,8 +73,8 @@ class OverlayManager:
         # Set via set_app_instance_provider() by the composition root (ApplicationCore)
         self._app_instance_provider: Optional[Callable[[], object]] = None
         
-        # Auto-switch manager for handling window closures
-        self._auto_switch_manager = None
+        # Closed-window switch manager for handling window closures
+        self._closed_window_switch_manager = None
         
         # Register with ResourceManager for deterministic cleanup
         try:
@@ -102,8 +102,8 @@ class OverlayManager:
         else:
             self._logger.warning("No overlay backends available")
             
-        # Initialize auto-switch manager
-        self._initialize_auto_switch()
+        # Initialize closed-window switch manager
+        self._initialize_closed_window_switch()
         
         # Apply initial auto-switch setting from configuration
         self._apply_initial_auto_switch_setting()
@@ -178,6 +178,64 @@ class OverlayManager:
         overlays = [self._overlays[oid] for oid in self._mru_overlays 
                   if oid in self._overlays]
         return overlays[:limit] if limit > 0 else overlays
+
+    def get_mru_window_list(self, limit: int = 0) -> List[int]:
+        """Get MRU window HWNDs from centralized MRUManager (SINGLE SOURCE OF TRUTH).
+        
+        Args:
+            limit: Maximum number of HWNDs to return (0 = all)
+            
+        Returns:
+            List of window HWNDs sorted by most recently used
+            
+        Note: This now reads directly from MRUManager instead of overlay tracking.
+        MRUManager is updated by FocusTracker and is the authoritative source.
+        """
+        try:
+            from core.switching.mru_manager import get_mru_manager
+            mru_mgr = get_mru_manager()
+            # Get from centralized MRU (FocusTracker keeps this updated)
+            return mru_mgr.get_recent(limit=limit if limit > 0 else None)
+        except Exception as e:
+            self._logger.warning(f"Failed to get MRU from centralized manager: {e}")
+            return []
+
+    def update_mru_from_hwnd_list(self, hwnd_list: List[int]) -> None:
+        """Update MRU tracking from a list of HWNDs.
+        
+        Updates BOTH:
+        1. Centralized MRUManager (window HWND MRU)
+        2. Local overlay ID MRU (UI interaction tracking)
+        
+        Args:
+            hwnd_list: List of HWNDs in desired MRU order
+        """
+        # Update centralized MRUManager (SINGLE SOURCE OF TRUTH for window HWNDs)
+        try:
+            from core.switching.mru_manager import get_mru_manager
+            mru_mgr = get_mru_manager()
+            for hwnd in hwnd_list:
+                if hwnd:
+                    mru_mgr.record(hwnd)
+        except Exception as e:
+            self._logger.warning(f"Failed to update centralized MRU: {e}")
+        
+        # Update local overlay ID MRU (for UI interaction tracking)
+        new_mru_order = []
+        for hwnd in hwnd_list:
+            for overlay_id, overlay in self._overlays.items():
+                if hasattr(overlay, 'get_source_hwnd') and overlay.get_source_hwnd() == hwnd:
+                    if overlay_id not in new_mru_order:
+                        new_mru_order.append(overlay_id)
+                    break
+        
+        # Add any existing overlays not in the HWND list
+        for overlay_id in self._mru_overlays:
+            if overlay_id not in new_mru_order:
+                new_mru_order.append(overlay_id)
+        
+        self._mru_overlays = new_mru_order[:self.MAX_MRU_ITEMS]
+        self._logger.debug(f"Updated both centralized MRU and overlay MRU: {len(self._mru_overlays)} overlay IDs")
     
     # Core Overlay Management Methods
     def create_overlay(self, 
@@ -311,11 +369,12 @@ class OverlayManager:
             self._logger.error("Failed to create overlay")
             return None
         
-        # Inject the application instance into DWM overlays before initialization.
+        # Inject the application instance into DWM and Monitor overlays before initialization.
         # Enables centralized OverlayContextMenu population and strict wiring.
         try:
             # Local import to avoid circular dependency at module import time
             from .backends.dwm.integrated_dwm_backend import IntegratedDWMOverlay as _DWMOverlay
+            from .backends.monitor.monitor_backend import MonitorBackend as _MonitorBackend
 
             if isinstance(overlay, _DWMOverlay):
                 # Require overlay attributes for safe switching
@@ -338,10 +397,23 @@ class OverlayManager:
 
                 overlay.app_instance = app_instance
                 self._logger.debug("Injected app_instance into DWMOverlay for context menu window switching")
+            
+            elif isinstance(overlay, _MonitorBackend):
+                # MonitorBackend needs app_instance for context menu monitor switching
+                if self._app_instance_provider is not None:
+                    try:
+                        app_instance = self._app_instance_provider()
+                        # Store on backend - will be propagated to host widget after initialization
+                        overlay._app_instance_for_host = app_instance
+                        self._logger.debug("Stored app_instance for MonitorBackend host widget")
+                    except Exception as prov_e:
+                        self._logger.warning("app_instance provider failed for MonitorBackend: %s", prov_e)
         except Exception as e:
-            # Enforce strict no-fallback policy
-            self._logger.error("Failed to prepare DWMOverlay injection: %s", str(e))
-            return None
+            # Enforce strict no-fallback policy for DWM, log warning for Monitor
+            self._logger.error("Failed to prepare overlay injection: %s", str(e))
+            # Check if overlay is DWM type (strict failure) - use duck typing to avoid undefined variable
+            if backend == BackendType.DWM:
+                return None
 
         # Ensure window-mode features are lazily initialized when creating window overlays
         try:
@@ -392,9 +464,14 @@ class OverlayManager:
             def _register_after_stable():
                 if main_widget.isVisible() and main_widget.winId():
                     # Register with unified z-order manager
-                    from utils.resource_manager import get_resource_manager
-                    rm = get_resource_manager()
-                    rm.register_overlay(overlay_id, main_widget)
+                    try:
+                        from utils.resource_manager import get_resource_manager
+                        rm = get_resource_manager()
+                        ok = rm.register_overlay(overlay_id, main_widget)
+                        if not ok:
+                            logger.debug(f"Z-order registration returned False for {overlay_id}")
+                    except Exception as zex:
+                        logger.error(f"Z-order registration failed for {overlay_id}: {zex}")
             
             # Register after a short delay to ensure window handle stability
             ThreadManager.single_shot(50, _register_after_stable)
@@ -681,15 +758,15 @@ class OverlayManager:
         except Exception as e:
             self._logger.error(f"Error during OverlayManager cleanup: {e}")
     
-    def _initialize_auto_switch(self) -> None:
-        """Initialize the auto-switch manager."""
+    def _initialize_closed_window_switch(self) -> None:
+        """Initialize the closed-window switch manager."""
         try:
-            from .window_monitor import initialize_auto_switch_manager
-            self._auto_switch_manager = initialize_auto_switch_manager(self)
-            self._logger.debug("Auto-switch manager initialized")
+            from .window_monitor import initialize_closed_window_switch_manager
+            self._closed_window_switch_manager = initialize_closed_window_switch_manager(self)
+            self._logger.debug("Closed-window switch manager initialized")
         except Exception as e:
-            self._logger.warning(f"Failed to initialize auto-switch manager: {e}")
-            self._auto_switch_manager = None
+            self._logger.warning(f"Failed to initialize closed-window switch manager: {e}")
+            self._closed_window_switch_manager = None
     
     def set_auto_switch_enabled(self, enabled: bool) -> None:
         """Enable or disable auto-switching when windows close.
@@ -697,11 +774,11 @@ class OverlayManager:
         Args:
             enabled: Whether to enable auto-switching
         """
-        if self._auto_switch_manager:
-            self._auto_switch_manager.set_auto_switch_enabled(enabled)
-            self._logger.info(f"Auto-switch {'enabled' if enabled else 'disabled'}")
+        if self._closed_window_switch_manager:
+            self._closed_window_switch_manager.set_auto_switch_enabled(enabled)
+            self._logger.info(f"Closed-window switching {'enabled' if enabled else 'disabled'}")
         else:
-            self._logger.warning("Auto-switch manager not available")
+            self._logger.warning("Closed-window switch manager not available")
     
     def _register_overlay_window(self, overlay_id: str, hwnd: int) -> None:
         """Register an overlay's source window for auto-switch monitoring.
@@ -710,8 +787,8 @@ class OverlayManager:
             overlay_id: ID of the overlay
             hwnd: Source window handle
         """
-        if self._auto_switch_manager and hwnd:
-            self._auto_switch_manager.register_overlay_window(overlay_id, hwnd)
+        if self._closed_window_switch_manager and hwnd:
+            self._closed_window_switch_manager.register_overlay_window(overlay_id, hwnd)
     
     def _unregister_overlay_window(self, overlay_id: str) -> None:
         """Unregister an overlay from auto-switch monitoring.
@@ -719,16 +796,22 @@ class OverlayManager:
         Args:
             overlay_id: ID of the overlay
         """
-        if self._auto_switch_manager:
-            self._auto_switch_manager.unregister_overlay(overlay_id)
+        if self._closed_window_switch_manager:
+            self._closed_window_switch_manager.unregister_overlay(overlay_id)
     
     def _apply_initial_auto_switch_setting(self) -> None:
         """Apply the initial auto-switch setting from configuration."""
         try:
-            from utils.settings_manager import get_settings_manager
+            from core.settings import get_settings_manager
             settings_manager = get_settings_manager()
             if settings_manager:
-                auto_switch_enabled = bool(settings_manager.get("behavior.auto_switch", True))
+                # Prefer canonical feature flag; fall back to legacy key for backward compatibility
+                auto_switch_enabled = bool(
+                    settings_manager.get(
+                        "features.autoswitch_enabled",
+                        settings_manager.get("behavior.auto_switch", True),
+                    )
+                )
                 self.set_auto_switch_enabled(auto_switch_enabled)
                 self._logger.debug(f"Applied initial auto-switch setting: {auto_switch_enabled}")
         except Exception as e:
@@ -738,14 +821,14 @@ class OverlayManager:
 
     def shutdown(self):
         """Explicit shutdown method."""
-        # Shutdown auto-switch manager
-        if self._auto_switch_manager:
+        # Shutdown closed-window switch manager
+        if self._closed_window_switch_manager:
             try:
-                from .window_monitor import shutdown_auto_switch_manager
-                shutdown_auto_switch_manager()
-                self._auto_switch_manager = None
+                from .window_monitor import shutdown_closed_window_switch_manager
+                shutdown_closed_window_switch_manager()
+                self._closed_window_switch_manager = None
             except Exception as e:
-                self._logger.warning(f"Failed to shutdown auto-switch manager: {e}")
+                self._logger.warning(f"Failed to shutdown closed-window switch manager: {e}")
         
         if hasattr(self, '_resource_id') and self._resource_id and hasattr(self, '_resource_manager') and self._resource_manager:
             try:

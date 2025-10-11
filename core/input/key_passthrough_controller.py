@@ -6,7 +6,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 from core.threading import ThreadManager
 from core.media import get_media_controller
 from utils.state.focus_state import get_focus_state
@@ -86,7 +86,7 @@ class KeyPassthroughController(QObject):
             return
         super().__init__()
         self._logger = get_logger("KEYPASS")
-        self._settings = SettingsManager()
+        self._settings = get_settings_manager()
 
         # State
         self._enabled: bool = bool(self._settings.get("features.keypassthrough_enabled", False))
@@ -211,7 +211,10 @@ class KeyPassthroughController(QObject):
                 target_hwnd = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
                 if target_hwnd:
                     media_controller.handle_volume_key_release(int(target_hwnd))
-                    return True
+                else:
+                    # If target disappeared, stop any MC loops to avoid ghost behavior
+                    media_controller.stop_all_continuous_volume_adjustments()
+                return True
             except Exception as e:
                 self._logger.debug(f"Failed to handle volume key release: {e}")
                 
@@ -230,27 +233,21 @@ class KeyPassthroughController(QObject):
         except Exception:
             return False
         
-        # Route media keys to MediaController if enabled
+        # Route media keys to MediaController only when overlay is focused
         if self._media_routing_enabled and vk_int in _MEDIA_KEYS:
-            # Suppress global media keys while overlay is focused to avoid duplicates
             try:
-                if get_focus_state().is_overlay_focused():
-                    return self._block("media-key-overlay-focused", extra={"vk": int(vk_int)})
+                if not get_focus_state().is_overlay_focused():
+                    return self._block("media-key-overlay-not-focused", extra={"vk": int(vk_int)})
             except Exception:
-                # Be conservative on failure and block to prevent duplicate handling
+                # Be conservative on failure and block to prevent unintended global handling
                 return self._block("media-key-focus-check-failed", extra={"vk": int(vk_int)})
             return self._route_media_key(vk_int)
 
-        # Route system volume keys (hardware VKs) when enabled
-        # IMPORTANT: perform overlay-focus gating BEFORE mapping arrows to volume
+        # Route system volume keys (hardware VKs) when our app is receiving keys.
+        # Consistent with spacebar policy: do not enforce overlay-focus gating here.
+        # Mapping of arrows to volume happens after this check; actual gating occurs via target hwnd.
         if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN, _VK_VOLUME_MUTE):
-            # If overlay is focused, ignore hardware volume keys to avoid duplicate changes
-            try:
-                if get_focus_state().is_overlay_focused():
-                    return self._block("volume-key-overlay-focused", extra={"vk": int(vk_int)})
-            except Exception:
-                # Be conservative on failure and block to prevent duplicate handling
-                return self._block("volume-key-focus-check-failed", extra={"vk": int(vk_int)})
+            pass
         
         # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down (local mapping)
         if self._media_routing_enabled and vk_int in (_VK_UP, _VK_DOWN):
@@ -279,11 +276,11 @@ class KeyPassthroughController(QObject):
                     if vk_int == _VK_VOLUME_UP:
                         if now_ms - self._last_vol_up_ts < float(self._vol_suppress_ms):
                             return True
-                            self._last_vol_up_ts = now_ms
-                        else:  # _VK_VOLUME_DOWN
-                            if now_ms - self._last_vol_down_ts < float(self._vol_suppress_ms):
-                                return True
-                            self._last_vol_down_ts = now_ms
+                        self._last_vol_up_ts = now_ms
+                    else:
+                        if now_ms - self._last_vol_down_ts < float(self._vol_suppress_ms):
+                            return True
+                        self._last_vol_down_ts = now_ms
 
                 if vk_int == _VK_VOLUME_UP:
                     # Use new continuous volume adjustment for key hold support
@@ -486,13 +483,10 @@ class KeyPassthroughController(QObject):
         except Exception:
             return False
         
-        # If this is a hardware volume key and overlay is focused, ignore to avoid duplicate changes
+        # Do not enforce overlay-focus gating for hardware volume keys here.
+        # Keys are only processed when our app is active; target hwnd gating occurs below.
         if self._media_routing_enabled and vk_int in (_VK_VOLUME_UP, _VK_VOLUME_DOWN):
-            try:
-                if get_focus_state().is_overlay_focused():
-                    return self._block("volume-press-overlay-focused", extra={"vk": int(vk_int)})
-            except Exception:
-                return self._block("volume-press-focus-check-failed", extra={"vk": int(vk_int)})
+            pass
 
         # When Media Control is ON, treat Arrow Up/Down as Volume Up/Down (local mapping)
         if self._media_routing_enabled and vk_int in (_VK_UP, _VK_DOWN):
@@ -506,15 +500,7 @@ class KeyPassthroughController(QObject):
 
             # Immediate step for responsiveness
             self.passthrough_key(_VK_VOLUME_UP if vk_int == _VK_VOLUME_UP else _VK_VOLUME_DOWN)
-            # Start hold timer
-            try:
-                if self._vol_verbose:
-                    self._logger.debug(
-                        f"VOL_HOLD: press start is_up={vk_int == _VK_VOLUME_UP} initial_delay={self._hold_initial_delay_ms}ms interval={self._hold_interval_ms}ms hwnd={int(target_hwnd)}"
-                    )
-            except Exception:
-                pass
-            self._start_volume_hold(is_up=(vk_int == _VK_VOLUME_UP))
+            # MediaController manages the hold loop; do not start local KPC timer
             return True
 
         return self.passthrough_key(vk_int)
@@ -532,6 +518,17 @@ class KeyPassthroughController(QObject):
             self._stop_volume_hold(is_up=True)
         elif vk_int in (_VK_VOLUME_DOWN, _VK_DOWN):
             self._stop_volume_hold(is_up=False)
+        # Always stop MediaController-managed hold as well
+        try:
+            mc = get_media_controller()
+            target_hwnd = self._target_hwnd if (_WIN_AVAILABLE and self._target_hwnd and _is_window(self._target_hwnd)) else None
+            if target_hwnd:
+                mc.handle_volume_key_release(int(target_hwnd))
+            else:
+                # If target is gone (handoff), stop all to prevent ghost loops
+                mc.stop_all_continuous_volume_adjustments()
+        except Exception:
+            pass
         return
 
     # Volume hold helpers -------------------------------------------------

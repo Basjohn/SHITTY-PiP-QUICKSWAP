@@ -400,6 +400,13 @@ class ThreadManager:
             timeout: Maximum time to wait for shutdown
         """
         logger.info("Shutting down thread manager...")
+        try:
+            # Pre-shutdown diagnostics
+            info = self.get_pool_info()
+            logger.debug(f"[TM] Pre-shutdown pool info: {info}")
+            logger.debug(f"[TM] Active tasks before shutdown: {list(self._active_tasks.keys())}")
+        except Exception:
+            pass
         current_thread = threading.current_thread()
         
         # Lock-free: Atomic check and set shutdown state
@@ -413,6 +420,18 @@ class ThreadManager:
         executors = list(self._executors.items())
         resource_id = getattr(self, "_resource_id", None)
         
+        # Attempt to proactively stop HotkeyManager message loop to unblock IO pool
+        try:
+            from core.hotkeys.manager import HotkeyManager  # local import to avoid cycles
+            try:
+                hk = HotkeyManager()
+                hk.shutdown()
+                logger.debug("[TM] Proactively shut down HotkeyManager prior to executor shutdown")
+            except Exception as e:
+                logger.debug(f"[TM] HotkeyManager pre-shutdown failed or not present: {e}")
+        except Exception:
+            pass
+
         # Now perform potentially blocking operations without holding the lock
         # Proactively stop ResourceManager's IO-pool mutation worker to avoid pool shutdown hangs
         try:
@@ -471,6 +490,14 @@ class ThreadManager:
             except Exception:
                 # Best-effort cleanup; do not mask shutdown path
                 pass
+
+        # Post-shutdown diagnostics
+        try:
+            info2 = self.get_pool_info()
+            logger.debug(f"[TM] Post-executor-shutdown pool info: {info2}")
+            logger.debug(f"[TM] Active tasks after shutdown: {list(self._active_tasks.keys())}")
+        except Exception:
+            pass
 
     # Internal: stats publisher ------------------------------------------------
     def _gather_stats(self) -> Dict[str, Dict[str, Any]]:
@@ -625,6 +652,47 @@ class ThreadManager:
             inv.invoke.emit(func, args, kwargs or {})
         except Exception as e:
             logger.exception("run_on_ui_thread dispatch failed: %s", e)
+
+    def run_in_main_thread(self, func: Callable, *args, **kwargs):
+        """Execute callable on Qt main thread and return its result.
+
+        Behavior:
+        - If no Q(Core)Application exists (e.g., unit tests), executes inline.
+        - If already on UI thread, executes inline.
+        - Otherwise, dispatches to UI thread and blocks until completion.
+        """
+        try:
+            app = QCoreApplication.instance()
+            if app is None:
+                # In tests or early bootstrap without Qt, execute inline
+                return func(*args, **(kwargs or {}))
+            if QThread.currentThread() is app.thread():
+                return func(*args, **(kwargs or {}))
+
+            # Cross-thread: dispatch and wait
+            done = threading.Event()
+            box: Dict[str, Any] = {}
+
+            def _invoke():
+                try:
+                    box['result'] = func(*args, **(kwargs or {}))
+                except Exception as e:
+                    box['error'] = e
+                finally:
+                    done.set()
+
+            ThreadManager.run_on_ui_thread(_invoke)
+            done.wait()
+            if 'error' in box:
+                raise box['error']
+            return box.get('result', None)
+        except Exception as e:
+            logger.exception("run_in_main_thread failed: %s", e)
+            # Best-effort fallback: try inline to avoid complete failure in production
+            try:
+                return func(*args, **(kwargs or {}))
+            except Exception:
+                raise
 
     @staticmethod
     def single_shot(delay_ms: int, func: Callable, *args, **kwargs) -> None:

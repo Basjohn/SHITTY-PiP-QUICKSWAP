@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 from typing import Optional
+import time
 
 from PySide6.QtCore import QRect, QSize
 from core.logging import get_logger
+from core.threading import ThreadManager
+from core.settings import get_settings_manager
 from ...overlay import Overlay as OverlayBase
 from ...types import OverlayConfig
 from ...overlay_host import OverlayHost
 from utils import window_validation as winval
 from utils.window.thumbnail_manager import ThumbnailManager
-from core.threading import ThreadManager
 from ...dwm_composition_manager import get_dwm_composition_manager
 from utils.resource_manager import get_resource_manager, ResourceType
 from utils.window.overlay_constants import (
     OVERLAY_MIN_WIDTH,
     OVERLAY_MIN_HEIGHT,
     DEFAULT_ASPECT,
+)
+from utils.window.monitors import (
+    get_available_geometry_for_monitor,
+    ensure_within_available_desktop,
+)
+from utils.window.overlay_persistence import (
+    nearest_corner_state_from_rect,
+    geometry_from_state,
 )
 
 
@@ -32,6 +42,14 @@ class IntegratedDWMOverlay(OverlayBase):
     - Better performance
     - Direct double-click support
     """
+    
+    # Aspect ratio bounds: chosen to prevent extreme distortions while allowing reasonable window shapes
+    # MIN: 2.5:1 portrait (e.g., vertical phone screens)
+    # MAX: 3:1 ultrawide (common ultrawide monitors)
+    # Bounds chosen to avoid overlap with border/accent decorations on extreme ARs
+    MIN_REASONABLE_AR = 0.4  # 2.5:1 portrait
+    MAX_REASONABLE_AR = 3.0  # 3:1 ultrawide
+    SAFE_FALLBACK_AR = 16.0 / 9.0  # 1.778 (standard widescreen)
     
     def get_config(self):
         """Get the current configuration of this overlay."""
@@ -65,6 +83,8 @@ class IntegratedDWMOverlay(OverlayBase):
         self._is_visible = False
         self._opacity = float(getattr(config, "opacity", 1.0) or 1.0)
         self._has_revealed = False
+        # Transient override used during animations (e.g., crossfade on swap)
+        self._visual_opacity: Optional[float] = None
         
         # Cached aspect ratio for consistent scaling during manual resize
         self._source_aspect: Optional[float] = None
@@ -72,6 +92,7 @@ class IntegratedDWMOverlay(OverlayBase):
         # Swap management
         self._swap_in_flight = False
         self._pending_swap_hwnd: Optional[int] = None
+        self._pending_swap_record_mru: bool = False
 
         # Lock state for focus indicator
         self._is_window_locked: bool = False
@@ -144,6 +165,13 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 pass
 
+            # Coalesce geometry changes and persist on idle (standalone DWM only)
+            try:
+                if not self._is_docking_overlay() and hasattr(self._host, 'geometryChanged'):
+                    self._host.geometryChanged.connect(self._on_host_geometry_changed)
+            except Exception:
+                pass
+
             # Set content aspect ratio for proper DWM thumbnail scaling (16:9 default)
             try:
                 source_rect = winval.get_window_rect(self._source_hwnd)
@@ -181,12 +209,19 @@ class IntegratedDWMOverlay(OverlayBase):
                         self._logger.debug(f"Failed to introspect ThreadManager in coalescer init: {_log_e}")
 
                     if hasattr(tm, 'create_ui_coalescer'):
-                        self._thumb_coalescer = tm.create_ui_coalescer(
-                            name=f"dwm_thumb_{id(self)}",
-                            capacity=128,
-                            window_ms=7,
-                        )
-                        self._logger.info("DWM thumbnail UI coalescer initialized (window=7ms, cap=128)")
+                        try:
+                            self._thumb_coalescer = tm.create_ui_coalescer(
+                                name=f"dwm_thumb_{id(self)}",
+                                capacity=128,
+                                window_ms=7,
+                            )
+                            if self._thumb_coalescer:
+                                self._logger.info("DWM thumbnail UI coalescer initialized (window=7ms, cap=128)")
+                            else:
+                                self._logger.error("UI coalescer creation returned None")
+                        except Exception as coalescer_e:
+                            self._thumb_coalescer = None
+                            self._logger.error(f"Failed to create UI coalescer: {coalescer_e}")
                     else:
                         # Explicit diagnostic when attribute is missing
                         try:
@@ -244,8 +279,9 @@ class IntegratedDWMOverlay(OverlayBase):
             # Get host window handle for DWM operations
             self._target_hwnd = int(self._host.winId())
 
-            # Apply initial geometry and positioning
-            self._apply_initial_geometry()
+            # Apply initial geometry and positioning (try persisted first)
+            if not self._apply_persisted_geometry():
+                self._apply_initial_geometry()
 
             # Set up context menu (no border overlay needed)
             self._setup_context_menu()
@@ -256,6 +292,14 @@ class IntegratedDWMOverlay(OverlayBase):
             # Apply window masking for rounded corners (preserves mouse events)
             self._apply_window_masking()
             
+            # Deferred AR correction to eliminate minor initial gap without manual resize
+            # Skip for docking overlays - DockingOverlayManager controls their geometry
+            try:
+                if not self._is_docking_overlay():
+                    ThreadManager.single_shot(15, self._handle_correct_aspect)
+            except Exception:
+                pass
+
             self._logger.info(f"Integrated DWM overlay initialized for window {self._source_hwnd}")
         except Exception as e:
             # Re-raise to make base Overlay.set_state -> ERROR and emit signals
@@ -339,50 +383,57 @@ class IntegratedDWMOverlay(OverlayBase):
                 # Get client rect which excludes window decorations
                 client_rect = ctypes.wintypes.RECT()
                 if ctypes.windll.user32.GetClientRect(self._source_hwnd, ctypes.byref(client_rect)):
-                    src_w = max(0, client_rect.right - client_rect.left)
-                    src_h = max(0, client_rect.bottom - client_rect.top)
+                    cw = max(0, client_rect.right - client_rect.left)
+                    ch = max(0, client_rect.bottom - client_rect.top)
+                    if cw > 0 and ch > 0:
+                        # Clamp to reasonable bounds to avoid wild distortion
+                        if cw > 0 and ch > 0:
+                            self._source_aspect = cw / ch
+                            if self._source_aspect < self.MIN_REASONABLE_AR or self._source_aspect > self.MAX_REASONABLE_AR:
+                                self._logger.debug(
+                                    f"Discarding out-of-bounds client aspect: {self._source_aspect:.3f} (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
+                                )
+                            else:
+                                self._logger.debug(
+                                    f"Cached source aspect ratio from client rect: {self._source_aspect:.3f} ({cw}x{ch})"
+                                )
+                                # Propagate fresh content aspect to canvas for correct letterbox/pillarbox
+                                try:
+                                    if self._canvas and hasattr(self._canvas, 'set_content_aspect'):
+                                        self._canvas.set_content_aspect(int(cw), int(ch))
+                                except Exception:
+                                    pass
+                                return
+            except Exception:
+                # Ignore client-rect failures and fall back to window rect
+                pass
+
+            # Fallback: use full window rectangle when client rect is unavailable
+            try:
+                rect = winval.get_window_rect(self._source_hwnd)
+                if rect and len(rect) >= 4:
+                    src_w = max(0, int(rect[2] - rect[0]))
+                    src_h = max(0, int(rect[3] - rect[1]))
                     if src_w > 0 and src_h > 0:
-                        aspect = src_w / src_h
-                        # More restrictive thresholds - many apps have problematic client rects
-                        too_small = src_w < 200 or src_h < 150 or (src_w * src_h) < 30000
-                        out_of_bounds = aspect < 0.5 or aspect > 3.0  # Tighter bounds
-                        # Additional check for suspiciously thin windows (like minimized or collapsed)
-                        suspicious_dimensions = src_h < 100 or src_w < 300
-                        
-                        if not too_small and not out_of_bounds and not suspicious_dimensions:
-                            self._source_aspect = aspect
+                        self._source_aspect = src_w / src_h
+                        if self._source_aspect < self.MIN_REASONABLE_AR or self._source_aspect > self.MAX_REASONABLE_AR:
                             self._logger.debug(
-                                f"Cached source aspect ratio from client area: {self._source_aspect:.3f} ({src_w}x{src_h})"
+                                f"Discarding out-of-bounds window aspect: {self._source_aspect:.3f} (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
                             )
-                            return
                         else:
                             self._logger.debug(
-                                f"Client rect suspicious ({src_w}x{src_h}, ar={aspect:.3f}); falling back to window rect (too_small={too_small}, out_of_bounds={out_of_bounds}, suspicious_dims={suspicious_dimensions})"
+                                f"Cached source aspect ratio from window rect: {self._source_aspect:.3f} ({src_w}x{src_h})"
                             )
-            except Exception as e:
-                self._logger.debug(f"Failed to get client rect, falling back to window rect: {e}")
-            
-            # Fallback to window rect if client rect fails
-            source_rect = winval.get_window_rect(self._source_hwnd)
-            if source_rect and len(source_rect) >= 4 and source_rect[2] > source_rect[0] and source_rect[3] > source_rect[1]:
-                # rect format: (left, top, right, bottom) - calculate width/height properly
-                src_w = source_rect[2] - source_rect[0]
-                src_h = source_rect[3] - source_rect[1]
-                if src_w > 0 and src_h > 0:
-                    aspect = src_w / src_h
-                    # Clamp to reasonable bounds to avoid wild distortion
-                    clamped = max(0.2, min(5.0, aspect))
-                    self._source_aspect = clamped
-                    if clamped != aspect:
-                        self._logger.debug(
-                            f"Cached source aspect ratio from window rect (clamped): {self._source_aspect:.3f} (raw={aspect:.3f}, {src_w}x{src_h})"
-                        )
-                    else:
-                        self._logger.debug(
-                            f"Cached source aspect ratio from window rect: {self._source_aspect:.3f} ({src_w}x{src_h})"
-                        )
-                    return
-            
+                            # Propagate fresh content aspect to canvas for correct letterbox/pillarbox
+                            try:
+                                if self._canvas and hasattr(self._canvas, 'set_content_aspect'):
+                                    self._canvas.set_content_aspect(int(src_w), int(src_h))
+                            except Exception:
+                                pass
+                        return
+            except Exception:
+                pass
+
             self._source_aspect = None
             self._logger.debug("Could not determine source aspect ratio")
         except Exception as e:
@@ -408,13 +459,18 @@ class IntegratedDWMOverlay(OverlayBase):
             # Use cached aspect ratio for consistent scaling during manual resize
             source_aspect = self._source_aspect
             # Sanity clamp to avoid extreme distortions
-            if source_aspect is not None and not (0.2 <= source_aspect <= 5.0):
-                self._logger.debug(f"Clamping source aspect {source_aspect:.3f} to bounds [0.2, 5.0]")
-                source_aspect = max(0.2, min(5.0, source_aspect))
+            if source_aspect is not None and not (self.MIN_REASONABLE_AR <= source_aspect <= self.MAX_REASONABLE_AR):
+                self._logger.debug(f"Clamping source aspect {source_aspect:.3f} to bounds [{self.MIN_REASONABLE_AR:.1f}, {self.MAX_REASONABLE_AR:.1f}]")
+                source_aspect = max(self.MIN_REASONABLE_AR, min(self.MAX_REASONABLE_AR, source_aspect))
             
             # Calculate aspect-ratio preserving destination rect (pillarbox OR letterbox, never both)
             dest_rect = content_rect
-            if source_aspect is not None and source_aspect > 0:
+            
+            # Skip aspect ratio adjustment for docking overlays to prevent double boxing
+            # Docking overlays handle aspect ratio at geometry level in sync_overlay_properties()
+            is_docking_overlay = self._is_docking_overlay()
+            
+            if not is_docking_overlay and source_aspect is not None and source_aspect > 0:
                 content_w = content_rect.width()
                 content_h = content_rect.height()
                 
@@ -435,15 +491,26 @@ class IntegratedDWMOverlay(OverlayBase):
                             new_w = max(1, int(content_h * source_aspect))
                             x_offset = (content_w - new_w) // 2
                             dest_rect = QRect(content_rect.x() + x_offset, content_rect.y(), new_w, content_h)
+            elif is_docking_overlay:
+                # Reduce debug spam - only log once per overlay instance
+                if not hasattr(self, '_logged_docking_detection'):
+                    self._logger.debug("Docking overlay detected: skipping thumbnail-level aspect ratio adjustment")
+                    self._logged_docking_detection = True
             
+            # Determine current visual opacity (animation override takes precedence)
+            current_opacity = self._visual_opacity if self._visual_opacity is not None else self._opacity
+
             # Apply DWM thumbnail clipping with proper z-order handling
             if self._canvas and hasattr(self._canvas, '_border_metrics') and self._canvas._border_metrics:
                 border_metrics = self._canvas._border_metrics
                 corner_radius = border_metrics.corner_radius
                 if corner_radius > 0:
-                    # Ensure content rect is inset to prevent overlap
-                    content_inset = max(1, int(corner_radius * 0.1))
-                    dest_rect = dest_rect.adjusted(content_inset, content_inset, -content_inset, -content_inset)
+                    # Docking overlays already compute tight content_rect on the canvas (with border/accent margins).
+                    # Avoid a second inset here to prevent excessive blank space around content.
+                    if not is_docking_overlay:
+                        # Non-docking overlays: apply a small safety inset to prevent overlap/escape
+                        content_inset = max(1, int(corner_radius * 0.1))
+                        dest_rect = dest_rect.adjusted(content_inset, content_inset, -content_inset, -content_inset)
                     
                     # Convert to physical pixels for DWM (DPI-aware scaling)
                     dpi_scale = self._host.devicePixelRatioF() if self._host else 1.0
@@ -459,18 +526,22 @@ class IntegratedDWMOverlay(OverlayBase):
                     self._thumbnail_manager.update_thumbnail(
                         self._target_hwnd,
                         dest_rect=(left_px, top_px, right_px, bottom_px),
-                        opacity=self._opacity,
+                        opacity=current_opacity,
                         visible=self._is_visible,
-                        source_client_area_only=True,
+                        source_client_area_only=False,  # Capture full window to fix modern Windows apps
                     )
                     
-                    aspect_str = f"{source_aspect:.3f}" if source_aspect is not None else "None"
-                    self._logger.debug(
-                        f"Updated thumbnail properties with aspect ratio: "
-                        f"source_aspect={aspect_str}, logical_rect={dest_rect.getRect()}, "
-                        f"physical_rect=({left_px},{top_px},{right_px},{bottom_px}), "
-                        f"dpi_scale={dpi_scale:.2f}, opacity={self._opacity}"
-                    )
+                    # Suppress thumbnail property debug spam - only log during initialization or errors
+                    if not hasattr(self, '_thumbnail_props_logged') or getattr(self, '_force_log_thumbnail_props', False):
+                        aspect_str = f"{source_aspect:.3f}" if source_aspect is not None else "None"
+                        self._logger.debug(
+                            f"Updated thumbnail properties with aspect ratio: "
+                            f"source_aspect={aspect_str}, logical_rect={dest_rect.getRect()}, "
+                            f"physical_rect=({left_px},{top_px},{right_px},{bottom_px}), "
+                            f"dpi_scale={dpi_scale:.2f}, opacity={self._opacity}"
+                        )
+                        self._thumbnail_props_logged = True
+                        self._force_log_thumbnail_props = False
                     # Ensure focus indicator stays above after updates
                     self._ensure_focus_indicator_z_order()
                     return
@@ -493,9 +564,9 @@ class IntegratedDWMOverlay(OverlayBase):
             self._thumbnail_manager.update_thumbnail(
                 self._target_hwnd,
                 dest_rect=(left_px, top_px, right_px, bottom_px),
-                opacity=self._opacity,
+                opacity=current_opacity,
                 visible=self._is_visible,
-                source_client_area_only=True,
+                source_client_area_only=False,  # Capture full window to fix modern Windows apps
             )
             
             # Only log scaling info when aspect ratio changes significantly
@@ -535,7 +606,9 @@ class IntegratedDWMOverlay(OverlayBase):
             from utils.resource_manager import get_resource_manager
             rm = get_resource_manager()
             success = rm.bring_child_to_front(focus_indicator)
-            self._logger.debug(f"DWM post-update focus indicator z-order: {success}")
+            # Suppress debug spam - only log failures
+            if not success:
+                self._logger.debug("DWM post-update focus indicator z-order failed")
         except Exception as e:
             self._logger.debug(f"Focus indicator raise failed: {e}")
 
@@ -602,7 +675,7 @@ class IntegratedDWMOverlay(OverlayBase):
             if src_h > 0:
                 aspect = src_w / src_h
                 # Clamp aspect ratio to reasonable bounds
-                aspect = max(0.2, min(5.0, aspect))  # Between 1:5 and 5:1
+                aspect = max(self.MIN_REASONABLE_AR, min(self.MAX_REASONABLE_AR, aspect))  # Between 2.5:1 portrait and 3:1 ultrawide
             else:
                 aspect = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]
                 
@@ -664,17 +737,263 @@ class IntegratedDWMOverlay(OverlayBase):
         except Exception as e:
             self._logger.error(f"Initial geometry setup failed: {e}")
 
+    def _apply_persisted_geometry(self) -> bool:
+        """Restore last saved nearest-corner geometry if available (standalone DWM only).
+        Returns True if applied, else False.
+        """
+        try:
+            self._logger.debug("[DWM_PERSIST] Checking for persisted geometry")
+            
+            if self._is_docking_overlay():
+                self._logger.debug("[DWM_PERSIST] Skipping - detected as docking overlay")
+                return False
+                
+            if not self._host:
+                self._logger.debug("[DWM_PERSIST] Skipping - no host available")
+                return False
+                
+            settings = get_settings_manager()
+            # Standalone DWM overlays use overlays.dwm.last_state
+            state = settings.get("overlays.dwm.last_state", None)
+            self._logger.debug("[DWM_PERSIST] Checking overlays.dwm.last_state for standalone overlay")
+            
+            if not isinstance(state, dict):
+                self._logger.debug(f"[DWM_PERSIST] No valid state data found - got {type(state)}")
+                return False
+                
+            if not state:
+                self._logger.debug("[DWM_PERSIST] State data is empty")
+                return False
+                
+            self._logger.debug(f"[DWM_PERSIST] Found state data: {state}")
+            mon_idx = int(state.get("monitor_index", 0))
+            avail = get_available_geometry_for_monitor(mon_idx)
+            # Gather aspect and insets similar to initial geometry
+            min_size = QSize(OVERLAY_MIN_WIDTH, OVERLAY_MIN_HEIGHT)
+            # Aspect
+            src_w, src_h = DEFAULT_ASPECT
+            try:
+                if self._source_hwnd:
+                    rect = winval.get_window_rect(self._source_hwnd)
+                    if rect and len(rect) >= 4 and rect[2] > rect[0] and rect[3] > rect[1]:
+                        src_w, src_h = int(rect[2] - rect[0]), int(rect[3] - rect[1])
+            except Exception:
+                pass
+            aspect = (src_w / src_h) if src_h else (DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1])
+            # Insets from canvas
+            ix = iy = 0
+            try:
+                if self._canvas and hasattr(self._canvas, 'get_content_insets'):
+                    cx, cy = self._canvas.get_content_insets()
+                    ix = max(0, int(cx))
+                    iy = max(0, int(cy))
+            except Exception:
+                ix = iy = 0
+
+            rect_out = geometry_from_state(state, avail, min_size, aspect=aspect, insets=(ix, iy))
+            if rect_out is None:
+                return False
+            # Clamp within available desktop to be safe
+            pos = ensure_within_available_desktop(rect_out.topLeft(), rect_out.size())
+            self._host.setGeometry(QRect(pos, rect_out.size()))
+            # Success log for diagnostics
+            try:
+                self._logger.info("[DWM_PERSIST] Applied persisted DWM geometry")
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            self._logger.debug(f"Apply persisted geometry failed: {e}")
+            return False
+
+    # Note: _persist_current_geometry is defined later in the file with logging and docking guard
+
+    def _handle_quit_application(self) -> None:
+        """Quit the application cleanly (wired from context menu)."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+            else:
+                self._logger.error("Quit requested but no QApplication instance available")
+        except Exception as e:
+            self._logger.error(f"Error quitting application: {e}")
+
+    def _handle_reset_position(self) -> None:
+        """Reset overlay geometry to default top-left and default sizing.
+
+        This ignores any persisted geometry and re-applies the initial geometry logic,
+        including AR and canvas insets. This is the safety reset used by context menus.
+        """
+        try:
+            if not self._host:
+                return
+            # Apply initial default geometry (top-left of primary, default sizing with AR)
+            self._apply_initial_geometry()
+            # Update thumbnail properties to reflect the change
+            self._update_thumbnail_properties()
+            self._logger.info("Overlay position reset to default (top-left, default size)")
+        except Exception as e:
+            self._logger.error(f"Reset position failed: {e}")
+
+    def _handle_correct_aspect(self) -> None:
+        """Correct aspect ratio/framing and adjust borders to tightly fit content.
+
+        This refreshes the cached source aspect, resizes the overlay window to
+        eliminate gaps between content and borders (tight framing), updates
+        thumbnail properties, and reapplies window masking.
+        """
+        try:
+            if not self._host:
+                return
+            
+            # Refresh source aspect and propagate to canvas if available
+            try:
+                self._cache_source_aspect()
+            except Exception:
+                pass
+            
+            # For docking overlays, trigger a full sync to recompute tight sizing
+            if self._is_docking_overlay():
+                try:
+                    # Get the docking manager and trigger a full sync
+                    from core.graphics.docking.manager import DockingOverlayManager
+                    import gc
+                    for obj in gc.get_objects():
+                        if isinstance(obj, DockingOverlayManager):
+                            if self._is_managed_by_docking(obj):
+                                # Trigger sync which will recompute all overlay sizes with tight framing
+                                obj.sync_overlay_properties()
+                                self._logger.info("[AR] Corrected aspect/framing for docking system (triggered full sync)")
+                                return
+                except Exception as e:
+                    self._logger.debug(f"Docking sync failed, falling back to standalone logic: {e}")
+            
+            # For standalone overlays: resize to tightly fit content
+            try:
+                if self._canvas and self._source_aspect and self._source_aspect > 0:
+                    # Get canvas insets (border + corner + accent margins)
+                    ix, iy = 0, 0
+                    if hasattr(self._canvas, 'get_content_insets'):
+                        ix, iy = self._canvas.get_content_insets()
+                    
+                    # Get current screen for bounds checking
+                    screen = self._host.screen()
+                    if screen:
+                        screen_rect = screen.availableGeometry()
+                        max_w = screen_rect.width()
+                        max_h = screen_rect.height()
+                        
+                        # Start with current inner content dimensions
+                        current_outer = self._host.geometry()
+                        current_inner_w = max(1, current_outer.width() - 2 * ix)
+                        
+                        # Calculate ideal inner dimensions that respect the aspect ratio
+                        # We keep the width and adjust height, or vice versa
+                        target_inner_w = current_inner_w
+                        target_inner_h = max(1, int(target_inner_w / self._source_aspect))
+                        
+                        # If resulting height exceeds screen, constrain by height instead
+                        potential_outer_h = target_inner_h + 2 * iy
+                        if potential_outer_h > max_h:
+                            target_inner_h = max(1, max_h - 2 * iy)
+                            target_inner_w = max(1, int(target_inner_h * self._source_aspect))
+                        
+                        # Convert inner to outer by adding insets
+                        target_w = target_inner_w + 2 * ix
+                        target_h = target_inner_h + 2 * iy
+                        
+                        # Apply minimum size constraints
+                        from utils.window.overlay_constants import OVERLAY_MIN_WIDTH, OVERLAY_MIN_HEIGHT
+                        target_w = max(target_w, OVERLAY_MIN_WIDTH)
+                        target_h = max(target_h, OVERLAY_MIN_HEIGHT)
+                        
+                        # Clamp to screen bounds
+                        target_w = min(target_w, max_w)
+                        target_h = min(target_h, max_h)
+                        
+                        # Resize the host (preserves position)
+                        self._host.resize(target_w, target_h)
+                        self._logger.info(f"[AR] Adjusted borders to fit content: {target_w}x{target_h} (inner: {target_inner_w}x{target_inner_h}, insets: {ix},{iy})")
+            except Exception as e:
+                self._logger.debug(f"Border adjustment failed, updating properties only: {e}")
+            
+            # Recompute thumbnail destination rects with current canvas/content aspect
+            self._update_thumbnail_properties()
+            
+            # Ensure border mask aligns with current geometry/aspect
+            try:
+                self._apply_window_masking()
+            except Exception:
+                pass
+            
+        except Exception as e:
+            self._logger.error(f"Correct AR failed: {e}")
+
+    def _on_host_geometry_changed(self) -> None:
+        """Coalesce geometry changes if needed. We avoid frequent writes; actual persist happens on hide/close."""
+        # Intentionally no-op to minimize I/O; placeholder for future heuristics.
+        return
+
+    def _persist_current_geometry(self) -> None:
+        """Persist current geometry to settings for standalone DWM overlays.
+
+        Writes nearest-corner state to key 'overlays.dwm.last_state'. Docking overlays
+        are excluded by design and should rely on DockingOverlayManager persistence.
+        """
+        try:
+            # Do not persist for docking overlays; manager owns persistence there
+            try:
+                if self._is_docking_overlay():
+                    return
+            except Exception:
+                pass
+            if not self._host:
+                return
+            rect = self._host.geometry()
+            if not rect or rect.isEmpty():
+                return
+            state = nearest_corner_state_from_rect(rect)
+            if not state:
+                return
+            sm = get_settings_manager()
+            sm.set("overlays.dwm.last_state", state)
+            try:
+                self._logger.info("[DWM_PERSIST] Saved DWM geometry")
+            except Exception:
+                pass
+        except Exception as e:
+            self._logger.debug(f"[DWM_PERSIST] Save failed: {e}")
+
     def _setup_context_menu(self) -> None:
         """Set up context menu for the integrated overlay."""
         try:
-            # Use the existing context menu system
+            # Check if this overlay is being used in docking mode
+            # For docking mode, let docking overlays handle their own context menu setup
+            # Don't block context menu creation entirely - just the standard OverlayContextMenu
+            if self._is_docking_overlay():
+                self._logger.debug("Docking mode detected - docking overlays will handle context menu setup")
+                return
+                
+            # Use the existing context menu system for regular DWM overlays
             from utils.overlay_context_menu import OverlayContextMenu
-            
+
+            # Provide callbacks to enable docking mode switching from context menu
+            actions = {
+                'switch_to_docking': getattr(self, '_switch_to_docking', None),
+                'switch_to_docking_normal': getattr(self, '_switch_to_docking_normal', None),
+                'switch_to_docking_cycle': getattr(self, '_switch_to_docking_cycle', None),
+            }
+            config = {
+                'actions': {k: v for k, v in actions.items() if callable(v)}
+            }
+
             # Create context menu handler (integrated border approach)
             self._context_menu = OverlayContextMenu(
-                self._host, 
-                overlay_type='dwm'
-                # No border_overlay parameter needed with integrated approach
+                self._host,
+                overlay_type='dwm',
+                config=config
             )
             
             # Attach to host (OverlayContextMenu.attach_to_overlay accepts a single overlay/widget)
@@ -696,6 +1015,137 @@ class IntegratedDWMOverlay(OverlayBase):
         except Exception as e:
             self._logger.error(f"Context menu setup failed: {e}")
 
+    # --- Context menu callbacks: switch to docking from standalone DWM overlay ---
+    def _switch_to_docking(self) -> None:
+        """Switch to docking mode preserving current source window and current mode setting."""
+        self._switch_to_docking_impl(None)
+
+    def _switch_to_docking_normal(self) -> None:
+        """Switch to docking mode and set docking.mode to 'normal' before creating."""
+        self._switch_to_docking_impl('normal')
+
+    def _switch_to_docking_cycle(self) -> None:
+        """Switch to docking mode and set docking.mode to 'cycle' before creating."""
+        self._switch_to_docking_impl('cycle')
+
+    def _switch_to_docking_impl(self, mode: Optional[str]) -> None:
+        try:
+            hwnd = int(self.get_source_hwnd() or 0)
+            if not hwnd:
+                self._logger.warning("Switch to docking aborted: no source hwnd")
+                return
+
+            # Optionally set desired docking mode
+            if mode in ('normal', 'cycle'):
+                try:
+                    get_settings_manager().set('docking.mode', mode)
+                except Exception as e:
+                    self._logger.debug(f"Failed to set docking.mode to {mode}: {e}")
+
+            # Destroy existing single overlay(s) cleanly via OverlayManager
+            try:
+                from core.graphics.overlay_manager import OverlayManager
+                OverlayManager().clear_all()
+            except Exception as e:
+                self._logger.debug(f"Failed to clear existing overlays before docking switch: {e}")
+
+            # Create docking system targeting current window
+            try:
+                from core.graphics.docking.manager import DockingOverlayManager
+                dom = DockingOverlayManager()
+                ok = dom.create_docking_system([hwnd])
+                if not ok:
+                    self._logger.error("Failed to create docking overlay system from context menu")
+            except Exception as e:
+                self._logger.error(f"Docking creation error: {e}")
+        except Exception as e:
+            self._logger.error(f"Unhandled error switching to docking: {e}")
+
+    def _is_docking_overlay(self) -> bool:
+        """Check if this DWM overlay is being used in docking mode.
+        
+        Returns:
+            bool: True if this is a docking mode overlay, False otherwise
+        """
+        try:
+            # Fast-path: detect via config overlay_type to avoid expensive scans and false negatives
+            try:
+                overlay_type = getattr(self._config, 'overlay_type', None)
+                if overlay_type is not None:
+                    # Compare by name to avoid enum import cycles
+                    name = str(getattr(overlay_type, 'name', overlay_type)).upper()
+                    if name == 'DOCKING':
+                        return True
+            except Exception:
+                pass
+            
+            # Check if THIS specific overlay is actually managed by a docking system
+            from core.graphics.docking.manager import DockingOverlayManager
+            
+            # Try to access the global docking manager instance
+            try:
+                from core.application.core import get_app_core
+                app_core = get_app_core()
+                if app_core and hasattr(app_core, '_docking_manager'):
+                    docking_manager = getattr(app_core, '_docking_manager', None)
+                    if docking_manager and self._is_managed_by_docking(docking_manager):
+                        return True
+            except Exception:
+                pass
+            
+            # Enhanced fallback: check if any DockingOverlayManager manages this overlay
+            import gc
+            for obj in gc.get_objects():
+                if isinstance(obj, DockingOverlayManager):
+                    if self._is_managed_by_docking(obj):
+                        return True
+            
+            return False
+        except Exception as e:
+            self._logger.debug(f"Docking detection failed: {e}")
+            return False
+
+    def _is_managed_by_docking(self, docking_manager) -> bool:
+        """Check if this overlay is managed by the given docking manager."""
+        try:
+            if not docking_manager:
+                return False
+            
+            # First check if this overlay is actually in the docking manager's collection
+            overlays = getattr(docking_manager, '_overlays', {})
+            if not overlays:
+                return False
+            
+            # Look for this DWM overlay within the docking overlay wrappers
+            found_in_collection = False
+            for docking_overlay in overlays.values():
+                if hasattr(docking_overlay, '_dwm_overlay') and docking_overlay._dwm_overlay is self:
+                    found_in_collection = True
+                    break
+            
+            if not found_in_collection:
+                return False
+            
+            # Only return True if this overlay is in the collection AND the docking manager is active
+            is_active = getattr(docking_manager, '_is_active', False)
+            is_initializing = getattr(docking_manager, '_is_initializing', False)
+            
+            if is_active or is_initializing:
+                # Only log once per overlay instance to prevent debug spam
+                if not hasattr(self, '_logged_docking_detection'):
+                    self._logger.debug("Detected as docking-managed overlay")
+                    self._logged_docking_detection = True
+                return True
+            else:
+                # Found in collection but docking is not active - this is a standalone overlay
+                if not hasattr(self, '_logged_standalone_detection'):
+                    self._logger.debug("Found in docking collection but docking not active - treating as standalone")
+                    self._logged_standalone_detection = True
+                return False
+            
+        except Exception:
+            return False
+
     def _apply_dwm_attributes(self) -> None:
         """Apply DWM composition attributes."""
         try:
@@ -710,6 +1160,58 @@ class IntegratedDWMOverlay(OverlayBase):
             
         except Exception as e:
             self._logger.error(f"DWM attributes application failed: {e}")
+
+    # --- Overlay base hooks (required by OverlayBase) ---
+    def _render_impl(self) -> None:
+        """DWM integrates rendering via thumbnails; nothing to render per-frame."""
+        return
+
+    def _config_updated(self, old_config: dict, new_config: dict) -> None:
+        """Apply configuration changes to the running overlay (opacity, geometry, source)."""
+        try:
+            # Opacity changes
+            try:
+                old_op = float(old_config.get("opacity", 1.0) or 1.0)
+                new_op = float(new_config.get("opacity", 1.0) or 1.0)
+            except Exception:
+                old_op = 1.0
+                new_op = 1.0
+            if new_op != old_op:
+                self.set_opacity(new_op)
+
+            # Geometry updates
+            if self._host is not None:
+                pos_changed = old_config.get("position") != new_config.get("position")
+                size_changed = old_config.get("size") != new_config.get("size")
+                if pos_changed or size_changed:
+                    pos = new_config.get("position")
+                    size = new_config.get("size")
+                    try:
+                        if pos and size:
+                            self._host.setGeometry(QRect(pos, size))
+                        elif pos:
+                            g = self._host.geometry()
+                            self._host.setGeometry(QRect(pos, g.size()))
+                        elif size:
+                            g = self._host.geometry()
+                            self._host.setGeometry(QRect(g.topLeft(), size))
+                    finally:
+                        self._update_thumbnail_properties()
+
+            # Source hwnd swap via properties
+            try:
+                old_props = dict(old_config.get("properties") or {})
+                new_props = dict(new_config.get("properties") or {})
+                old_hwnd = int(old_props.get("hwnd") or 0)
+                new_hwnd = int(new_props.get("hwnd") or 0)
+            except Exception:
+                old_hwnd = 0
+                new_hwnd = 0
+            if new_hwnd and new_hwnd != old_hwnd:
+                self._handle_swap_window(new_hwnd)
+        except Exception as e:
+            self._logger.error(f"Config update failed: {e}")
+            raise
 
     def _apply_window_masking(self) -> None:
         """Apply window-level masking for rounded corners while preserving mouse events."""
@@ -758,6 +1260,14 @@ class IntegratedDWMOverlay(OverlayBase):
             if not self._host:
                 raise RuntimeError("Overlay host not created")
 
+        
+            # Apply persisted geometry on show for standalone DWM overlays (hide/restore)
+            try:
+                if not self._is_docking_overlay():
+                    self._apply_persisted_geometry()
+            except Exception:
+                pass
+
             # Show host window first so native HWND is valid for DWM APIs
             self._host.show()
             self._host.raise_()
@@ -775,23 +1285,30 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 pass
 
+            # Prepare zero-opacity state and keep invisible until after first property push
+            try:
+                self._visual_opacity = 0.0
+                if self._canvas:
+                    self._canvas.set_opacity(0.0)
+            except Exception:
+                pass
+            self._is_visible = False
+
             # Attempt immediate registration; if it fails, schedule background retries without failing show
             if not self._register_thumbnail():
                 self._logger.warning(
                     "Initial DWM registration failed after show; scheduling deferred retries"
                 )
                 ThreadManager.single_shot(20, lambda: self._register_after_show_retry(1))
-
-            # Update visibility state
-            self._is_visible = True
-
-            # Update thumbnail visibility
-            self._update_thumbnail_properties()
-
-            # Trigger fade-in if not revealed yet (1000ms for creation)
-            if not self._has_revealed:
-                self._fade_in_thumbnail(1000)
-                self._has_revealed = True
+            else:
+                # Push initial properties at 0 opacity while invisible
+                self._update_thumbnail_properties()
+                # Now mark visible and start fade-in (800ms)
+                self._is_visible = True
+                self._update_thumbnail_properties()
+                if not self._has_revealed:
+                    self._fade_in_thumbnail(800)
+                    self._has_revealed = True
 
             self._logger.debug("Integrated overlay shown")
         except Exception as e:
@@ -830,10 +1347,20 @@ class IntegratedDWMOverlay(OverlayBase):
                 return
 
             # Success: complete the normal show sequence
+            # Keep invisible while pushing first properties at 0 opacity
+            self._is_visible = False
+            try:
+                self._visual_opacity = 0.0
+                if self._canvas:
+                    self._canvas.set_opacity(0.0)
+            except Exception:
+                pass
+            self._update_thumbnail_properties()
+            # Now show and fade in at 800ms
             self._is_visible = True
             self._update_thumbnail_properties()
             if not self._has_revealed:
-                self._fade_in_thumbnail(1000)
+                self._fade_in_thumbnail(800)
                 self._has_revealed = True
             self._logger.debug("Integrated overlay shown (deferred registration)")
         except Exception as e:
@@ -851,10 +1378,11 @@ class IntegratedDWMOverlay(OverlayBase):
             # Update visibility state
             self._is_visible = False
 
-            # Update thumbnail visibility
-            self._update_thumbnail_properties()
-
-            self._logger.debug("Integrated overlay hidden")
+            # Persist geometry sparingly on hide (standalone DWM only)
+            try:
+                self._persist_current_geometry()
+            except Exception:
+                pass
         except Exception as e:
             self._logger.error(f"Hide failed: {e}")
             raise
@@ -924,14 +1452,14 @@ class IntegratedDWMOverlay(OverlayBase):
         """Set overlay opacity with unified canvas and thumbnail handling."""
         try:
             raw = float(opacity)
-            clamped = max(0.1, min(1.0, raw))
+            clamped = max(0.01, min(1.0, raw))
             if clamped != raw:
                 try:
                     self._logger.debug(f"[OPACITY] DWM clamp -> {clamped:.2f} (from {raw:.3f})")
                 except Exception:
                     pass
             # Log at bounds for validation
-            if clamped in (0.1, 1.0):
+            if clamped in (0.01, 1.0):
                 try:
                     self._logger.debug(f"[OPACITY] DWM set -> {int(clamped*100)}%")
                 except Exception:
@@ -951,148 +1479,66 @@ class IntegratedDWMOverlay(OverlayBase):
             return False
 
     def _fade_in_thumbnail(self, duration_ms: int = 1000) -> None:
-        """Trigger fade-in animation for the thumbnail."""
+        """Trigger fade-in animation for the thumbnail using visual opacity override."""
         try:
             if not self._thumbnail_manager or not self._thumbnail_id:
                 return
-                
-            # Calculate steps for smooth animation (60 FPS)
-            frame_time = 16  # ~60 FPS
-            max_steps = max(1, duration_ms // frame_time)
-            
+
+            # 60 FPS fade
+            frame_time = 16
+            max_steps = max(1, int(duration_ms // frame_time))
+
             def fade_step(step: int):
                 if step >= max_steps:
-                    # Ensure final opacity is set
+                    # End animation: clear override and commit final opacity
+                    self._visual_opacity = None
                     if self._canvas:
                         self._canvas.set_opacity(self._opacity)
+                    self._update_thumbnail_properties()
                     return
-                    
-                # Smooth easing curve (ease-out)
+
+                # Ease-out curve
                 progress = step / max_steps
-                eased_progress = 1 - (1 - progress) ** 2
-                current_opacity = self._opacity * eased_progress
-                
+                eased = 1 - (1 - progress) ** 2
+                current = self._opacity * eased
+
+                # Apply to canvas and thumbnail
+                self._visual_opacity = current
                 if self._canvas:
-                    self._canvas.set_opacity(current_opacity)
-                    
-                # Schedule next step
+                    self._canvas.set_opacity(current)
+                self._update_thumbnail_properties()
+
                 ThreadManager.single_shot(frame_time, lambda: fade_step(step + 1))
-                
-            # Start fade animation from 0 opacity
+
+            # Start from 0
+            self._visual_opacity = 0.0
             if self._canvas:
                 self._canvas.set_opacity(0.0)
+            self._update_thumbnail_properties()
             fade_step(0)
-            
         except Exception as e:
             self._logger.error(f"Fade-in failed: {e}")
 
-    # --- Overlay base hooks -------------------------------------------------
-    def _render_impl(self) -> None:
-        """DWM thumbnails are updated on events; no per-frame rendering required."""
-        # No-op by design; keep available for future diagnostics
-        return
-
-    def _config_updated(self, old_config: dict, new_config: dict) -> None:
-        """Apply configuration changes to the running overlay."""
+    def _handle_swap_window(self, new_hwnd: int, record_mru: bool = False) -> None:
+        """Dispatch a source swap with simple in-flight queuing and UI-thread scheduling."""
         try:
-            # Opacity changes
-            old_op = float(old_config.get("opacity", 1.0) or 1.0)
-            new_op = float(new_config.get("opacity", 1.0) or 1.0)
-            if new_op != old_op:
-                self.set_opacity(new_op)
-
-            # Title change handled via _set_title_impl hook from base.set_title()
-
-            # Geometry updates
-            pos_changed = old_config.get("position") != new_config.get("position")
-            size_changed = old_config.get("size") != new_config.get("size")
-            if (pos_changed or size_changed) and self._host is not None:
-                pos = new_config.get("position")
-                size = new_config.get("size")
-                try:
-                    if pos and size:
-                        self._host.setGeometry(QRect(pos, size))
-                    elif pos:
-                        g = self._host.geometry()
-                        self._host.setGeometry(QRect(pos, g.size()))
-                    elif size:
-                        g = self._host.geometry()
-                        self._host.setGeometry(QRect(g.topLeft(), size))
-                finally:
-                    self._update_thumbnail_properties()
-
-            # Source hwnd swap via properties
-            try:
-                old_props = dict(old_config.get("properties") or {})
-                new_props = dict(new_config.get("properties") or {})
-                old_hwnd = int(old_props.get("hwnd") or 0)
-                new_hwnd = int(new_props.get("hwnd") or 0)
-            except Exception:
-                old_hwnd = 0
-                new_hwnd = 0
-            if new_hwnd and new_hwnd != old_hwnd:
-                # Perform swap on UI thread path
-                self._handle_swap_window(new_hwnd)
-        except Exception as e:
-            self._logger.error(f"Config update failed: {e}")
-            raise
-
-    def _set_title_impl(self, title: str) -> None:  # pragma: no cover
-        try:
-            if self._host is not None:
-                self._host.setWindowTitle(title)
-        except Exception:
-            # Non-fatal
-            pass
-
-    def _handle_swap_window(self, target_hwnd: int, record_mru: bool = False) -> None:
-        """Handle window swap request."""
-        try:
+            # Queue if a swap is already running
             if self._swap_in_flight:
-                # Queue the request for later
-                self._pending_swap_hwnd = target_hwnd
+                self._pending_swap_hwnd = new_hwnd
                 self._pending_swap_record_mru = record_mru
-                self._logger.debug(f"Swap in flight, queuing hwnd {target_hwnd}")
+                self._logger.debug(f"Queued pending swap to hwnd {new_hwnd}")
                 return
-            
+
+            # Mark in-flight and schedule the actual swap on UI thread
             self._swap_in_flight = True
-            self._pending_swap_hwnd = None
-            self._pending_swap_record_mru = False
-            
-            # Perform the swap
-            success = self._swap_source_hwnd(target_hwnd, record_mru=record_mru)
-            if not success:
-                self._logger.error(f"Failed to swap to hwnd {target_hwnd}")
-            else:
-                # Notify overlay manager of window change for auto-switch tracking
-                self._notify_window_change(target_hwnd)
+            ThreadManager.run_on_ui_thread(lambda: self._swap_source_hwnd(new_hwnd, record_mru))
         except Exception as e:
-            self._logger.error(f"Window swap handler failed: {e}", exc_info=True)
+            # Ensure flag is cleared on dispatch failure
             self._swap_in_flight = False
-
-    def update_source(self, hwnd: int) -> bool:
-        """Update the overlay's source window handle (OverlayManager reuse path).
-
-        This is a thin wrapper that validates the argument and delegates to
-        the existing swap handler, which queues the work on the UI thread.
-
-        Returns True if the request was accepted for processing.
-        """
-        try:
-            new_hwnd = int(hwnd) if hwnd is not None else 0
-        except Exception:
-            new_hwnd = 0
-
-        if not new_hwnd or not winval.is_valid_window(new_hwnd):
-            self._logger.error(f"update_source rejected invalid hwnd: {hwnd}")
-            return False
-
-        # Delegate to unified swap path
-        self._handle_swap_window(new_hwnd)
-        return True
+            self._logger.error(f"Swap dispatch failed: {e}")
 
     def _swap_source_hwnd(self, new_hwnd: int, record_mru: bool = False) -> bool:
-        """Swap the source window handle."""
+        """Swap the source window handle with a short crossfade to reduce visual artifacts."""
         self._logger.debug(
             f"_swap_source_hwnd start: new_hwnd={new_hwnd} target_hwnd={self._target_hwnd} visible={self._is_visible}"
         )
@@ -1102,18 +1548,35 @@ class IntegratedDWMOverlay(OverlayBase):
                 self._logger.error(f"Invalid swap target: {new_hwnd}")
                 return False
 
-            # Reset reveal state for fade effect
+            # Skip redundant swap to same source to prevent unnecessary flicker
+            try:
+                if int(self._source_hwnd or 0) == int(new_hwnd or 0):
+                    self._logger.debug("Swap requested to same hwnd; skipping re-register")
+                    return True
+            except Exception:
+                pass
+
+            # Reset reveal state for potential fade
             self._has_revealed = False
 
-            # If overlay is not visible or host/target isn't ready, just update source and bail.
-            # Registration will happen on next show/visibility change.
+            # If overlay not ready/visible, just set source and bail; registration happens on next show
             if not self._host or not getattr(self._host, 'isVisible', lambda: False)() or not self._target_hwnd:
                 self._source_hwnd = new_hwnd
                 self._cache_source_aspect()
                 self._logger.debug("Overlay hidden or target HWND not ready; deferred DWM registration until visible")
                 return True
 
-            # Unregister old thumbnail using destination HWND key
+            # Quick fade-out to mask swap (no wait; single frame)
+            try:
+                self._visual_opacity = 0.0
+                if self._canvas:
+                    self._canvas.set_opacity(0.0)
+                self._update_thumbnail_properties()
+            except Exception:
+                pass
+
+            start_ts = time.perf_counter()
+            # Unregister previous thumbnail
             if self._thumbnail_manager and self._target_hwnd:
                 try:
                     self._logger.debug(
@@ -1125,16 +1588,13 @@ class IntegratedDWMOverlay(OverlayBase):
                 finally:
                     self._thumbnail_id = None
 
-            # Update source window
+            # Update source
             self._source_hwnd = new_hwnd
             self._logger.debug(f"Updated source hwnd to {self._source_hwnd}")
-            
-            # Cache new aspect ratio for consistent scaling
             self._cache_source_aspect()
 
             # Register new thumbnail
             if not self._register_thumbnail():
-                # Capture HRESULT and state for diagnostics
                 last_hr = None
                 try:
                     if self._thumbnail_manager is not None:
@@ -1149,29 +1609,28 @@ class IntegratedDWMOverlay(OverlayBase):
                 self._logger.error(
                     f"Failed to register new thumbnail after swap. last_hresult={last_hr} src_ok={src_ok} tgt_ok={tgt_ok}"
                 )
-                # Mark as broken to allow manager-driven recovery
                 self._broken = True
                 self._needs_recreate = True
                 success = False
             else:
-                # Update properties and trigger fade-in (500ms for swap)
+                # Push initial props for new source and fade in
                 self._update_thumbnail_properties()
                 try:
-                    # Force a repaint of the host to ensure immediate visual refresh
                     if self._host:
                         self._host.update()
                 except Exception:
                     pass
                 if self._is_visible:
-                    self._fade_in_thumbnail(500)
+                    dur_ms = int((time.perf_counter() - start_ts) * 1000.0)
+                    # Pad fade slightly for longer backend operations
+                    fade_ms = 250 if dur_ms < 120 else (350 if dur_ms < 300 else 500)
+                    self._fade_in_thumbnail(fade_ms)
                     self._has_revealed = True
                 self._logger.info(f"Swapped to window {new_hwnd}")
-                # Clear any previous failure flags now that we are healthy
                 self._broken = False
                 self._needs_recreate = False
                 success = True
-                
-                # Add to MRU only when explicitly requested (e.g., context menu swaps)
+
                 if record_mru:
                     try:
                         from core.switching.mru_manager import get_mru_manager
@@ -1179,8 +1638,7 @@ class IntegratedDWMOverlay(OverlayBase):
                         self._logger.debug(f"Added hwnd {new_hwnd} to MRU from context menu swap")
                     except Exception as e:
                         self._logger.debug(f"Failed to add context menu swap to MRU: {e}")
-                
-                success = True
+
             return success
         except Exception as e:
             self._logger.error(f"Source swap failed: {e}")
@@ -1203,67 +1661,58 @@ class IntegratedDWMOverlay(OverlayBase):
             else:
                 self._swap_in_flight = False
                 self._logger.debug("_swap_source_hwnd complete: no pending swap")
-
-    def _handle_reset_position(self) -> None:
-        """Reset overlay position and size."""
+    def get_geometry(self) -> QRect:
+        """Get the current geometry of the overlay."""
         try:
-            if not self._host:
-                return
-                
-            # Clear border metrics cache on resize
-            self._border_metrics = None
-            
-            # Update canvas layout if available
-            if hasattr(self._canvas, '_update_layout'):
-                self._canvas._update_layout()
-            
-            # Reapply window masking after resize
-            if hasattr(self, '_host') and self._host:
-                try:
-                    # Get parent overlay to access masking method
-                    parent = self.parent()
-                    if parent and hasattr(parent, '_parent_overlay'):
-                        overlay = parent._parent_overlay
-                        if hasattr(overlay, '_apply_window_masking'):
-                            overlay._apply_window_masking()
-                except Exception as e:
-                    logger = get_logger("IntegratedBorderCanvas")
-                    logger.debug(f"Window mask update after resize failed: {e}")
-            
-            # Reset to initial geometry
-            self._apply_initial_geometry()
-            
-            # Update thumbnail properties
-            self._update_thumbnail_properties()
-            
-            self._logger.debug("Position reset completed")
-            
+            if self._host:
+                return self._host.geometry()
+            return QRect()
         except Exception as e:
-            self._logger.error(f"Position reset failed: {e}")
+            self._logger.debug(f"Error getting geometry: {e}")
+            return QRect()
+    
+    def get_opacity(self) -> float:
+        """Get the current opacity of the overlay."""
+        return self._opacity
+    
+    def update_source(self, hwnd: int) -> bool:
+        """Public API used by OverlayManager/Docking to update the source window.
 
-    def _notify_window_change(self, new_hwnd: int) -> None:
-        """Notify overlay manager of window change for auto-switch tracking."""
+        Validates and delegates to the unified swap handler which schedules on the UI thread.
+        Returns True if the request was accepted.
+        """
         try:
-            # Get overlay ID from config if available
-            overlay_id = getattr(self._config, 'id', None)
-            if overlay_id:
-                # Get overlay manager and update window registration
-                from core.graphics import get_overlay_manager
-                overlay_manager = get_overlay_manager()
-                if overlay_manager:
-                    overlay_manager._register_overlay_window(overlay_id, new_hwnd)
-                    self._logger.debug(f"Updated auto-switch tracking: overlay {overlay_id} -> window {new_hwnd}")
-        except Exception as e:
-            self._logger.debug(f"Failed to notify window change: {e}")
+            new_hwnd = int(hwnd) if hwnd is not None else 0
+        except Exception:
+            new_hwnd = 0
 
-    def _handle_quit_application(self) -> None:
-        """Handle quit application request."""
+        if not new_hwnd or not winval.is_valid_window(new_hwnd):
+            self._logger.error(f"update_source rejected invalid hwnd: {hwnd}")
+            return False
+
+        # Delegate to unified swap path (includes redundant-swap guard and crossfade)
+        self._handle_swap_window(new_hwnd)
+        return True
+    
+    def set_geometry(self, x: int, y: int, width: int, height: int) -> None:
+        """Set the geometry of the overlay with x, y, width, height parameters."""
         try:
-            from PySide6.QtCore import QCoreApplication
-            self._logger.info("Quit application requested from overlay")
-            QCoreApplication.quit()
+            if self._host:
+                rect = QRect(x, y, width, height)
+                self._host.setGeometry(rect)
         except Exception as e:
-            self._logger.error(f"Quit application failed: {e}")
+            self._logger.error(f"Error setting geometry: {e}")
+    
+    def set_geometry_with_letterbox(self, x: int, y: int, width: int, height: int, letterbox_type: str) -> None:
+        """Set geometry with letterboxing/pillarboxing for aspect ratio compliance."""
+        try:
+            if self._host:
+                self._host.setGeometry(x, y, width, height)
+                # Update thumbnail properties after geometry change
+                self._update_thumbnail_properties()
+                self._logger.debug(f"Applied {letterbox_type}boxing geometry: {x},{y} {width}x{height}")
+        except Exception as e:
+            self._logger.error(f"Error setting geometry with letterbox: {e}")
 
     # Properties for compatibility
     @property

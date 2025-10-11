@@ -10,8 +10,7 @@ import traceback
 import os
 import logging
 import ctypes
-from pathlib import Path
-from utils.paths import get_runtime_root, get_data_dir
+from utils.paths import get_runtime_root
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
@@ -63,7 +62,7 @@ def main() -> int:
     # With --debug: DEBUG to console and file.
     # Logs to portable runtime root
     logs_dir = get_runtime_root() / 'logs'
-    app_logger = configure_logging(
+    _ = configure_logging(
         name="spq",
         log_dir=logs_dir,
         console_level=(logging.DEBUG if debug_flag else logging.ERROR),
@@ -115,6 +114,30 @@ def main() -> int:
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Single instance enforcement to prevent keyboard hook conflicts
+    # Uses OS-level mutex for cross-process detection (not thread synchronization)
+    try:
+        from core.application.instance import ApplicationInstanceManager
+        
+        instance_mgr = ApplicationInstanceManager(app_name="SPQDocker")
+        
+        if instance_mgr.is_another_instance_running():
+            logger.error("Another instance of ShittyPiPQuickSwap is already running.")
+            logger.error("Exiting to prevent fuck ups.")
+            logger.error("Murder the existing instance from system tray before starting a new one.")
+            return 1
+        
+        logger.info("Single instance check passed - this is the primary instance")
+        
+        # Register cleanup to release mutex on exit
+        import atexit
+        atexit.register(instance_mgr.cleanup)
+        
+    except Exception as e:
+        # Non-fatal: if instance check fails, continue anyway (fail-open)
+        logger.warning(f"Could not perform instance check: {e}")
+        instance_mgr = None
     
     try:
         # Start the application
@@ -171,8 +194,8 @@ def main() -> int:
             theme_manager = get_theme_manager(app)
             logger.info(f"Theme manager initialized with theme: {theme_manager._current_theme}")
             
-            # Initialize opacity manager
-            opacity_manager = get_opacity_manager()
+            # Initialize opacity manager (singleton initialization for hotkeys)
+            _ = get_opacity_manager()
             logger.info("Opacity manager initialized")
             
             # Create main dialog

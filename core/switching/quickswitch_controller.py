@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, QPoint, QSize, QCoreApplication, QThread
 from core.threading import ThreadManager
 
 from core.logging import get_logger, throttled, log_dedupe
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 from core.graphics.overlay_manager import OverlayManager
 import win32gui
 
@@ -15,8 +15,8 @@ from utils.window_validation import is_valid_window, get_window_rect
 from utils.window.monitors import find_monitor_for_window
 from core.switching.mru_manager import get_mru_manager
 from core.switching.selection import compute_next_selection
-from core.switching.autoswitch_controller import get_autoswitch_controller
-from utils.resource_manager import get_resource_manager, ResourceType
+from core.switching.autoswitch_controller import get_foreground_autoswitch_controller
+from utils.resource_manager import get_resource_manager, ResourceType, find_resource_by_description
 
 try:
     import keyboard  # type: ignore
@@ -73,12 +73,15 @@ class QuickSwitchController(QObject):
             self._t_debug_dispatch = self._logger.debug
             self._t_debug_cooldown = self._logger.debug
             self._d_debug_fail = self._logger.debug
-        self._settings = SettingsManager()
+        self._settings = get_settings_manager()
         self._overlay_manager = OverlayManager()
         # Track last selected hwnd per active overlay to enable cyclic navigation
         self._cycle_last_by_overlay: dict[str, int] = {}
         # Lock-free reentrancy flag
         self._inflight: bool = False
+        
+        # Docking mode integration
+        self._docking_manager = None
 
         # Hotkey registration (keyboard library) state
         self._hotkey_id: str = "quickswitch"
@@ -97,6 +100,20 @@ class QuickSwitchController(QObject):
 
         self._initialized = True
         self._logger.debug("Initialized QuickSwitchController")
+
+    def register_docking_hotkey(self, docking_manager) -> None:
+        """Register docking-specific hotkey handling.
+        
+        Args:
+            docking_manager: Instance of DockingOverlayManager
+        """
+        self._docking_manager = docking_manager
+        self._logger.debug("Registered docking manager for hotkey integration")
+
+    def unregister_docking_hotkey(self) -> None:
+        """Unregister docking-specific hotkey handling."""
+        self._docking_manager = None
+        self._logger.debug("Unregistered docking manager from hotkey integration")
 
     class _KbHotkeyResource:
         """Weakref-able wrapper for a keyboard hotkey handle with cleanup."""
@@ -281,7 +298,30 @@ class QuickSwitchController(QObject):
             except Exception:
                 pass
 
-            # Get active overlay
+            # Check docking mode FIRST - must happen before regular overlay detection
+            try:
+                dm = None
+                try:
+                    rm = get_resource_manager()
+                    try:
+                        dm = rm.get("DockingOverlayManager")
+                    except Exception:
+                        dm = None
+                except Exception:
+                    dm = None
+                if dm is None:
+                    try:
+                        dm = find_resource_by_description("DockingOverlayManager")
+                    except Exception:
+                        dm = None
+                if dm is not None and hasattr(dm, "is_active") and dm.is_active():
+                    self._docking_manager = dm
+                    self._handle_docking_quickswitch(source)
+                    return
+            except Exception as e:
+                self._logger.debug(f"Docking manager check failed: {e}")
+
+            # Get active overlay (only if not in docking mode)
             overlay = self._get_active_overlay()
             if overlay is None:
                 self._logger.error("No active overlay; QuickSwitch aborted")
@@ -570,7 +610,7 @@ class QuickSwitchController(QObject):
 
             try:
                 if focus_target:
-                    get_autoswitch_controller().suppress_for(900, last_seen_hwnd=focus_target)
+                    get_foreground_autoswitch_controller().suppress_for(900, last_seen_hwnd=focus_target)
             except Exception:
                 pass
             self._t_debug_dispatch(f"Dispatching UI-thread focus change to hwnd={focus_target} (pre_swap={pre_swap_src}, swapped_to={swap_target}) in 25ms")
@@ -588,10 +628,68 @@ class QuickSwitchController(QObject):
         except Exception as e:
             self._logger.error(f"Quickswitch(UI) failed: {e}", exc_info=True)
         finally:
+            # Clear in-flight flag
+            self._inflight = False
+
+    def _is_docking_mode_active(self) -> bool:
+        """Check if docking mode is currently active."""
+        try:
+            # Check if docking manager exists and is active via resource manager
+            if self._docking_manager is None:
+                try:
+                    # Prefer direct ResourceManager .get() to support test monkeypatching
+                    rm = get_resource_manager()
+                    dm = None
+                    try:
+                        dm = rm.get("DockingOverlayManager")
+                    except Exception:
+                        dm = None
+                    if dm is None:
+                        # Fallback by description
+                        dm = find_resource_by_description("DockingOverlayManager")
+                    self._docking_manager = dm
+                    if self._docking_manager:
+                        self._logger.debug("Retrieved docking manager (RM/get or description)")
+                except Exception as e:
+                    self._logger.debug(f"Could not get docking manager from resource manager: {e}")
+                    return False
+
+            # Check if docking manager is active
+            if self._docking_manager and hasattr(self._docking_manager, 'is_active'):
+                is_active = self._docking_manager.is_active()
+                self._logger.debug(f"Docking mode active check: {is_active}")
+                return is_active
+            
+            return False
+        except Exception as e:
+            self._logger.debug(f"Error checking docking mode status: {e}")
+            return False
+
+    def _handle_docking_quickswitch(self, source: Optional[str]) -> None:
+        """Handle quickswitch when docking mode is active."""
+        try:
+            if self._docking_manager is None:
+                self._logger.error("Docking manager not available for quickswitch")
+                return
+            
+            # Delegate to docking manager's quickswitch handling
+            self._docking_manager.handle_overlay_interaction("main", "quickswitch")
+            
+            self._logger.debug(f"Docking quickswitch handled (source: {source})")
+            
+            # Publish event for docking quickswitch
             try:
-                self._inflight = False
-            except Exception:
-                pass
+                from core.application.core import get_app_core
+                get_app_core().events.publish(
+                    "switch.docking_quickswitch",
+                    {"source": source or "quickswitch"},
+                    source="QuickSwitchController",
+                )
+            except Exception as e:
+                self._logger.debug(f"Event publish failed (docking_quickswitch): {e}")
+                
+        except Exception as e:
+            self._logger.error(f"Error handling docking quickswitch: {e}", exc_info=True)
 
     def _seed_mru_from_zorder(self, start_hwnd: Optional[int]) -> int:
         """Populate MRU by enumerating top-level windows in Z-order and recording valid ones.
@@ -712,16 +810,31 @@ class QuickSwitchController(QObject):
 
     def _get_active_overlay(self):
         """
-        Get the currently active overlay from the OverlayManager.
-        
-        Accesses the active overlay via OverlayManager internals in a controlled way.
-        If OverlayManager exposes a public getter, prefer it; otherwise retrieve by internal id.
+        Get the currently active overlay from the OverlayManager or DockingOverlayManager.
         
         Returns:
             Optional[Overlay]: The active overlay instance, or None if no overlay is active.
         """
         try:
-            # Best-effort: try known private attribute; log if not present
+            # First check if docking mode is active via ResourceManager.get(), falling back to description
+            try:
+                rm = get_resource_manager()
+                docking_manager = None
+                try:
+                    docking_manager = rm.get("DockingOverlayManager")
+                except Exception:
+                    docking_manager = None
+                if docking_manager is None:
+                    docking_manager = find_resource_by_description("DockingOverlayManager")
+            except Exception:
+                docking_manager = find_resource_by_description("DockingOverlayManager")
+            if docking_manager and hasattr(docking_manager, 'is_active') and docking_manager.is_active():
+                # Return the main overlay from docking manager
+                main_overlay = getattr(docking_manager, '_main_overlay', None)
+                if main_overlay:
+                    return main_overlay
+            
+            # Fall back to regular overlay manager
             active_id = getattr(self._overlay_manager, "_active_overlay_id", None)
             if not active_id:
                 return None

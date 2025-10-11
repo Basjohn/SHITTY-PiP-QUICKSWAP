@@ -17,6 +17,11 @@
 - [🧵 Concurrency](#-concurrency)
 - [📊 Events](#-events)
 
+## 📎 Related Docs
+
+- [Understanding Guide](./Understanding.md) — end-to-end operational overview of how the system works (docking lifecycle, switching, validation, threading, debugging recipes).
+- [Spec](./Spec.md) — architecture policies and cross-cutting standards.
+
 ## 🧠 Core Services
 
 ### Application Core (`core/application/`)
@@ -97,11 +102,98 @@
 - **`BackendManager`**: Overlay backend selection
   - **Available Backends**: DWM, Software, Monitor
   - **Selection Logic**: Priority-based with fallback
+  - **Docking Mode Support**: Automatically selects DWM backend for `OverlayType.DOCKING`
   - **Key Methods**:
     - `get_available_backends()`: List available backends
-    - `select_backend(preference)`: Choose optimal backend
+    - `select_backend(preference, overlay_type)`: Choose optimal backend with type-specific preferences
     - `create_overlay(config)`: Factory method for overlays
   - **ResourceManager Integration**: Proper cleanup handlers for deterministic resource management
+
+### Docking System (`core/graphics/docking/`)
+- **`DockingOverlayManager`**: Multi-overlay docking mode controller
+  - **Features**:
+    - Three-overlay system (main 100%, secondary strictly decreasing: B≈70% of A, C/D/E decay by ~15% each; floors via min sizes)
+    - **SINGLE SOURCE OF TRUTH MRU**: Complete architectural refactor - eliminated all local MRU caches. DockingManager reads directly from `MRUManager` via `_get_current_mru()` helper. No listeners, no synchronization, no stale data. See `audits/mru_single_source_of_truth_COMPLETE.md`
+    - **Quickswitch Flow**: Hotkey entry remains centralized in `core/switching/quickswitch_controller.py`; when docking is active, the controller calls the docking manager (no callback expected). The docking manager handles quickswitch locally (no recursion to controller).
+    - **App Instance Injection**: Proper app instance injection for context menus using centralized provider pattern
+    - **Debug Log Suppression**: Uses `utils.debug.log_suppressor` to reduce excessive debug spam while preserving errors/warnings
+    - **Context Menu SST Violation Prevention**: Fixed timing issue where DWM overlays initialized before docking manager became active, causing context menu creation errors
+    - **Lock-Aware Autoswitch**: Enhanced autoswitch to properly respect individual overlay lock states through `_is_window_locked` property
+    - **Initialization Sequencing**: Proper `_is_initializing` flag prevents context menu creation during overlay initialization phase
+    - **Reduced Debug Spam**: Eliminated repeated debug messages in opacity animation loops and thumbnail property updates
+    - Automatic positioning with screen-aware bounds checking to prevent overlay C overlap/shifting during resize
+    - Tight content framing on creation/recreation/Correct AR: secondary widths include canvas content insets and cached AR so OUTER geometry hugs INNER content (no side gaps)
+    - Docking overlays skip extra DWM-level thumbnail inset (canvas `content_rect()` already accounts for borders/accents) to avoid double-inset blank space
+    - Inward/outward positioning based on screen edge proximity with vertical clamp to the screen work-area bottom (`availableGeometry`) and bounds validation
+    - Min-size-aware fit scaling of secondary overlays when space is constrained; floors enforced via `utils/window/overlay_constants.py` (`OVERLAY_MIN_WIDTH`, `OVERLAY_MIN_HEIGHT`)
+    - Overlay interaction handling (mode-aware):
+      - **Normal Mode**: Sticky window assignments - overlays maintain content unless explicitly changed
+        - Double-click main (A): Quickswitch to next MRU item (only A updates)
+        - Double-click secondary (B/C/D/E): Swap overlay content with foreground
+        - Quickswitch hotkey: Focuses overlay A's window, moves foreground to A, replaces source overlay if needed
+      - **Cycle Mode**: Dynamic MRU-based assignment - all overlays update on MRU changes
+        - Double-click any overlay: Focus that window, all overlays update to show next N MRU items
+        - Quickswitch hotkey: Rotates MRU, focuses next window, all overlays update
+      - Quickswitch (hotkey): Centralized controller triggers DockingOverlayManager, which performs mode-aware swap locally (no recursion)
+    - Lock-aware automatic switching via centralized switching controllers
+    - Resource lifecycle management with proper cleanup and ResourceManager integration
+    - Secondary overlays apply direct geometry with screen bounds validation to prevent overlap
+    - Movement binding uses event filter with proper host availability checking
+    - Batch geometry guard: `_batch_applying` suppresses host Move/Resize reactions during group apply to eliminate feedback loops/teleporting; cleared after scheduled UI tasks complete
+    - Secondary drag delegation: secondary hosts do not start local drags; `DockingOverlayManager.eventFilter()` translates the main overlay by global mouse deltas during a secondary-held drag and coalesces a sync
+    - Unified wheel-resize: secondary wheel is intercepted to scale the main overlay; prevents one-frame host distortion on secondaries
+    - Wheel-resize clamping: main overlay wheel-resize is clamped within the current monitor’s FULL bounds; size is reduced if necessary while preserving INNER AR using canvas insets
+  - **Geometry Persistence Architecture** (CRITICAL - 2025-10-09):
+    - Physical pixel-based persistence to `docking.last_state` using nearest-corner state
+    - Proper DPR scaling: converts logical ↔ physical pixels for multi-DPI correctness
+    - Anti-cascade protection: eliminated bidirectional sizing (secondaries NEVER resize main)
+    - Batch mode protection: `_batch_applying` flag blocks resize events during sync operations
+    - Initialization gating: `_is_initializing` flag blocks all syncs until system stabilizes
+    - Delayed initial sync: 100ms delay after overlays shown prevents restoration cascade
+    - 2-second suppression window after restoration prevents spurious saves
+    - Single sync source architecture: only delayed initial sync runs on startup
+    - See `audits/docking_persistence_complete_call_chain_analysis.md` for full details
+  - **Overlay E Bottom Alignment Fix** (2025-10-09):
+    - Fixed asymmetric canvas inset handling in secondary overlay sizing
+    - Canvas insets now properly added to both width AND height (was only width)
+    - Eliminates 12px downward drift at minimum sizes for rightmost overlays
+    - Top and bottom alignment now work identically at all sizes
+    - See `audits/overlay_e_bottom_alignment_investigation.md` for technical details
+  - **Key Methods**:
+    - `create_docking_system(config)`: Initialize 3-overlay system
+    - `destroy_docking_system()`: Clean shutdown with resource cleanup
+    - `sync_overlay_properties()`: Synchronize size, opacity, position
+      - Single source of truth for positioning (all legacy positioners removed). Implements inward/outward placement with min-size-aware scaling and sequence-wide clamping. Emits `FIT` and `POSITION` diagnostics.
+    - `handle_overlay_interaction(overlay_id, interaction_type)`: Process user interactions
+    - `update_mru_list(hwnd_list)`: Update MRU and sync with main system; dedupe and clamp capacity
+    - `eventFilter(obj, event)`: Handle drag hide/show, secondary-drag group translation, batch-guard suppression, and coalesced sync
+    - `_populate_mru_with_visible_windows()`: Fallback enumeration for insufficient MRU
+
+- **`DockingOverlay`**: Individual overlay wrapper for docking mode
+  - **Features**:
+    - Size ratio-based scaling relative to main overlay
+    - Target window management with HWND tracking
+    - Host wiring: injects `_parent_overlay` into `OverlayHost` so focus indicator lock toggle and key passthrough routing operate in docking mode
+    - Mouse event handling (double-click, context menu)
+    - ResourceManager integration for proper cleanup
+    - Batch-aware event filtering: during `_batch_applying`, overlay-level sync/wheel handling is suppressed to avoid recursive updates
+    - Secondary overlays do not initiate local drag/resize; wheel on a secondary scales the main overlay and triggers a coalesced group sync (smooth resize without host jitter)
+  - **Key Methods**:
+    - `initialize()`: Setup overlay with backend integration
+    - `set_target_window(hwnd)`: Assign window to display
+    - `sync_with_main(geometry, opacity)`: Synchronize with main overlay
+    - `cleanup()`: Resource cleanup including ResourceManager unregistration
+
+#### Focus Indicator & Lock (Docking)
+- `ui/overlays/geometry/focus_indicator.py` emits `lock_toggled` on click. `core/graphics/overlay_host.py` handles it and forwards to the underlying DWM overlay `toggle_window_lock()`, then reflects the state via `FocusIndicator.set_locked(...)`. Added `FOCUS_AUDIT` logs for before/after state.
+- Docking explicitly sets `OverlayHost._parent_overlay = IntegratedDWMOverlay` during `_setup_interaction_handling()` to make this path functional in docking mode.
+
+#### Media Key Passthrough Targeting (Docking)
+- `OverlayHost` resolves the routing target HWND in this order for docking: `_parent_overlay._source_hwnd`, `_parent_overlay._captured_hwnd`, `overlay._config.properties['hwnd']`. This is applied on key events, activation changes, and showEvent to avoid "no target hwnd" gaps after swaps.
+
+#### Docking Context Menu (Styling Parity)
+- `core/graphics/docking/context_menu.py` uses `QMenu` with `objectName='overlayContextMenu'` and applies theme. Menu and its submenus now use overlay-style QSS, matching DWM/Monitor menus in border, text weight, and sizing.
+ 
 
 ### DWM Integration (`core/graphics/backends/dwm/`)
 - **`IntegratedDWMOverlay`**: Hardware-accelerated window thumbnails
@@ -110,10 +202,16 @@
     - Integrated border canvas with aspect ratio preservation
     - Hardware acceleration with robust aspect ratio caching
     - Minimal CPU usage
+    - **Full window capture mode**: Captures entire window including title bar to fix modern Windows apps (Task Manager, Notepad, Settings) that use DWM Extended Frame technique
   - **Aspect Ratio Management**:
     - `_cache_source_aspect()`: Robust client area and window rect fallback
     - Bounds checking (0.2-5.0 ratio limits)
     - DPI-aware scaling for thumbnail properties
+    - **AR calculation independent of capture mode**: Always uses `GetClientRect()` from source window
+  - **Capture Mode** (2025-10-11):
+    - Uses `source_client_area_only=False` in all thumbnail property updates
+    - Fixes black title bar issue in modern Windows apps with extended frames
+    - Shows title bars for all windows (matches Windows taskbar preview behavior)
   - **Key Methods**:
     - `set_source_window(hwnd)`: Set target window
     - `update_thumbnail()`: Refresh thumbnail with aspect preservation
@@ -330,6 +428,25 @@
 
 ## 🏁 Entry Point
 
+### `version.py`
+- **Single Source of Truth** for application version
+  - **Version Components**:
+    - `VERSION_MAJOR`, `VERSION_MINOR`, `VERSION_PATCH`: Semantic version numbers
+    - `VERSION_SUFFIX`: Alpha/beta/RC suffix (e.g., "a", "b", "rc")
+    - `__version__`: Full version string (e.g., "2.1.0a")
+    - `VERSION_WIN32`: Windows PE metadata format (4-part, e.g., "2.1.0.0")
+  - **Application Metadata**:
+    - `APP_NAME`, `APP_DISPLAY_NAME`, `APP_COMPANY`, `APP_DESCRIPTION`
+  - **Build Metadata** (set by build scripts):
+    - `BUILD_DATE`, `BUILD_TIME`, `BUILD_COMMIT`
+  - **Functions**:
+    - `get_version_string(include_build=False)`: Formatted version with optional build info
+    - `get_full_version_info()`: Complete version dictionary
+  - **Usage**:
+    - Python runtime: `from version import __version__`
+    - Build scripts: PowerShell `Get-AppVersion` function parses version.py
+  - **Versioning Strategy**: Semantic versioning (Major.Minor.Patch)
+
 ### `main.py`
 - **`PiPApplication`**: Main Qt application class
   - **Key Methods**:
@@ -363,7 +480,7 @@
   - `ensure_window_mode_features()`: Lazy-initialize window-only systems
 - **Integrations**:
   - Always: `OpacityManager`
-  - Lazy (window overlays only): `QuickSwitchController`, `FocusTracker`, `AutoSwitchController`, Media KeepAlive (guarded by `features.media_control_enabled`)
+  - Lazy (window overlays only): `QuickSwitchController`, `FocusTracker`, `ForegroundAutoswitchController`, Media KeepAlive (guarded by `features.media_control_enabled`)
   - Trigger: `OverlayManager.create_overlay(...)` calls `ensure_window_mode_features()` for `OverlayType.WINDOW`
 
 #### `__init__.py`
@@ -389,6 +506,16 @@
    - `hotkeys.prefer_keyboard_fallback` (bool): Prefer keyboard-combo registration first in eligible cases; skip system registration if keyboard path succeeds.
    - `hotkeys.allow_single_digits` (bool): Treat `0–9` as safe single keys for the keyboard suppression backend.
 
+#### `hide_show_controller.py` - HideShowController
+- **Purpose**: Global hotkey (Ctrl+Shift+H) to toggle overlay visibility
+- **Implementation**: Uses `OverlayStateManager` for robust state capture/restore
+- **Integration**: All hide/show mechanisms (context menu, tray, hotkey) now use `OverlayStateManager` as single implementation
+- **Behavior**: 
+  - First press: Hides all overlays, captures full state (geometry, opacity, locks, assignments)
+  - Second press: Restores overlays from saved state
+  - Works with both single overlay and docking modes
+- **No suppression**: Like other multipress hotkeys, doesn't block key from reaching applications
+
 #### `switching/quickswitch_controller.py` - QuickSwitchController
 - **Purpose**: Owns quickswitch hotkey lifecycle
 - **Registration**: Registers the combo from `SettingsManager` key `hotkeys.opacity_quickswitch` (default: `shift+x`) via the `keyboard` library. No fallback/backtick paths. Cleaned up deterministically via `ResourceManager` as a custom resource
@@ -400,6 +527,33 @@
   - Behavior: high-frequency debug emits are rate-limited; repeated failure messages are deduplicated. Functional behavior unchanged
   - Fallback: if helpers unavailable, falls back to standard `logger.debug`
   - Gating: respects global debug (`SPQ_DEBUG`, `utils.debug.debug_enabled`)
+  - **Docking integration**: when docking is active, QuickSwitch delegates to `DockingOverlayManager.handle_overlay_interaction("main", "quickswitch")` which triggers `_rotate_mru_forward()` for proper Alt+Tab behavior. Per-overlay locks prevent automatic switching while still allowing manual double-click actions via the docking manager. Fresh ResourceManager lookup per call ensures proper delegation even without cached references
+  - **CRITICAL FIX (2025-09-18)**: Fixed broken `_rotate_mru_forward()` method in docking manager that only worked once - now properly rotates MRU list like classic Alt+Tab
+  - **MAJOR MODE-AWARE IMPLEMENTATION (2025-10-05)**: Refactored docking mode to properly distinguish Normal vs Cycle mode behaviors:
+    - **Normal Mode**: Sticky window assignments - overlays maintain content unless explicitly changed
+      - `_update_normal_mode_displays()`: Preserves assignments, only updates invalid/closed windows
+      - Quickswitch/double-click: Targeted updates (only affected overlay changes)
+      - Assignment tracking via `_normal_mode_assignments` dict
+    - **Cycle Mode**: Dynamic MRU-based assignment (existing behavior preserved)
+      - `_update_cycle_mode_displays()`: Updates all overlays based on MRU order (excluding foreground)
+      - Quickswitch/double-click: Full update of all overlays
+    - Helper methods: `_update_mru_order_only()`, `_assign_overlay()`, `_normal_mode_swap_with_foreground()`
+    - Mode transition: Captures current state as sticky baseline when switching Cycle→Normal
+    - Result: Normal mode no longer cascades changes to all overlays; B/C/D/E maintain content correctly
+- **Polling**: 250ms interval using `ThreadManager.single_shot` self-rescheduling (no raw QTimer)
+- **Debouncing**: 300ms stability requirement before triggering swaps
+- **Lock Awareness**: Respects both global (`OverlayManager.is_overlay_locked()`) and individual overlay locks (`_is_window_locked`)
+- **Docking Integration**: 
+  - **MRU-Aware Logic**: Only triggers autoswitch when focusing the SAME window as main overlay (follows Spec.md policy)
+  - **Cycle Mode Gating**: Automatically disabled when `docking.mode="cycle"` is active
+  - **Lock Checking**: Properly checks docking overlay lock states before triggering cycles
+- **Emergency Recovery**: Handles invalid/missing overlay sources by selecting valid MRU alternatives
+- **Display Lock Support**: Optional monitor-based switching via `features.display_locked_switching`
+- **Suppression API**: `suppress_for(duration_ms, last_seen_hwnd)` for coordination with QuickSwitch
+- **Events**: Publishes `switch.lock_suppressed` when blocked by overlay locks
+- **Threading**: All operations run on UI thread via `ThreadManager`
+- **Settings**: `features.autoswitch_enabled` (bool), `docking.mode` (gates cycle mode)
+- **Logging**: AUTOSWITCH prefix with detailed cycle/emergency diagnostics
 
 #### `opacity/manager.py` - OpacityManager
 - **Purpose**: Opacity increase/decrease hotkeys only
@@ -423,26 +577,26 @@
   - `set_target_hwnd(hwnd)`, `passthrough_key(vk) -> bool`
 - **Signals**: `enabled_changed(bool)`, `target_changed(int)`
  - **Events**: `key.passthrough.*` (enabled, target, forwarded, media_routed, blocked)
- - **Focus Gating**: `OverlayHost` sets target HWND when overlay active
+ - **Focus Gating & Routing**: `OverlayHost` sets target HWND when the overlay is active; `KeyPassthroughController` now routes media/volume keys ONLY when the overlay is focused. When unfocused, media/volume key requests are blocked (telemetry includes explicit reasons like `media-key-overlay-not-focused`).
  - **Rate Limiting**: ~18ms min interval, 10ms keyup delay
  - **Threading**: `ThreadManager.run_on_ui_thread`, `ThreadManager.single_shot` (no raw QTimer)
  - **Arrow→Volume Remap (media-enabled)**: When `features.media_control_enabled` is ON, `VK_UP` and `VK_DOWN` are internally remapped to `VK_VOLUME_UP`/`VK_VOLUME_DOWN` at the start of `passthrough_key`, `press_passthrough_key`, and `release_passthrough_key`. This triggers identical hold behavior and prevents arrow key events from being forwarded while active.
  - **Logging**: KEYPASS prefix
   - Verbose diagnostics gated by `debug.keypassthrough_verbose` (includes media routing and fallbacks)
-- **Overlay Suppression**: While any overlay is focused (tracked via `utils.state.focus_state.get_focus_state()`), global media keys (`VK_MEDIA_*`) and system volume keys (`VK_VOLUME_*`) are suppressed in `passthrough_key()`/`press_passthrough_key()`/`_volume_hold_tick()` to prevent duplicate adjustments. Focus check failures fail closed (block) to avoid double-handling. Events: `key.passthrough.blocked` with reasons like `media-key-overlay-focused`, `volume-overlay-focused`.
+ - **Focused-only Media Routing**: Media and system volume keys are processed only when an overlay is focused; otherwise they are blocked to avoid unintended global handling. Focus check failures fail closed (block) and emit `key.passthrough.blocked` with reasons like `media-key-focus-check-failed`.
  - **Browser-aware Child Fallback (media-disabled playback controls)**: When `features.media_control_enabled` is OFF and the target HWND is a supported browser (Chrome, Edge, Firefox, Discord), playback keys SPACE/LEFT/RIGHT are sent via `MediaController._send_browser_hotkey(...)` to child content windows first; top-level is used as a fallback. Publishes `key.passthrough.forwarded` with note `browser-child` on success.
  - **Verbose Non-media Logging**: Toggle `debug.keypassthrough_verbose` to emit reasoned decision logs for non-media paths (early returns, target validation, routing results). Off by default to avoid noise.
-- **Volume Keys Policy**:
+ - **Volume Keys Policy**:
   - Uses VK_VOLUME_UP (0xAF), VK_VOLUME_DOWN (0xAE), VK_VOLUME_MUTE (0xAD)
   - Routed locally via `MediaController.*_for_hwnd(hwnd)` with session-volume, app-hotkey, then mixer fallback
-  - Timer-based holds implemented: on press, perform an immediate step and start a repeating timer via `ThreadManager.single_shot`; on release, cancel via token invalidation
+  - Continuous hold is owned by `MediaController`: on press, `KeyPassthroughController` performs an immediate step then delegates the hold loop to `MediaController` (token-guarded, `ThreadManager.single_shot`). On release, KPC calls `MediaController.handle_volume_key_release(hwnd)`; if the target hwnd is missing (handoff), it calls `MediaController.stop_all_continuous_volume_adjustments()` to prevent runaways.
   - Arrow-to-volume remap: When media control is enabled, `VK_UP`/`VK_DOWN` are treated equivalently to volume keys for press/hold/release semantics (hold timers apply; arrow key events are not forwarded during active media control)
-  - Configurable timing via settings: `input.volume_hold_initial_delay_ms` (default 200), `input.volume_hold_interval_ms` (default 75)
+  - Configurable timing via settings (applied by MediaController): `input.volume_hold_initial_delay_ms` (default 200), `input.volume_hold_interval_ms` (default 50)
   - Minimal suppression window (~35ms) is still enforced to smooth bursts and avoid flooding
-  - Never intercepts globally; only routes when a valid target HWND is set
-  - **Hold rescheduling**: During holds, `_volume_hold_tick` always reschedules the next tick even when gating conditions (overlay focused/invalid target hwnd) are not met; the action is suppressed but the timer persists until release. Prevents premature early stop during long holds.
+  - Never intercepts globally; only routes when a valid target HWND is set and the overlay is focused
   - Arrow keys LEFT/RIGHT remain previous/next track; never mapped to volume
-- **UI Feedback on Block**: Centralized `_block(reason)` publishes `key.passthrough.blocked` and triggers a brief black flash (`~300ms`) on the active overlay's focus indicator via `OverlayManager.get_active_overlay()` and `OverlayHost.flash_focus_indicator(...)` on the UI thread.
+  - Auto-repeat guard: `OverlayHost` ignores auto-repeat `KeyPress` and `KeyRelease` for volume and arrow keys so only physical press and the final physical release are honored.
+ - **UI Feedback on Block**: Centralized `_block(reason)` publishes `key.passthrough.blocked` and triggers a brief black flash (`~300ms`) on the active overlay's focus indicator via `OverlayManager.get_active_overlay()` and `OverlayHost.flash_focus_indicator(...)` on the UI thread.
   - Throttled/Deduped: controlled by `ui.block_flash_min_interval_ms` (default 250ms). Repeats within the interval or same reason are coalesced.
  - **Blocklist Pre-check**: If `features.keypassthrough_blocklist_enabled` is true, performs an early check via the centralized loader (`core/input/keypassthrough_blocklist.py#get_blocklist()`). When the active window matches a rule (exe/title), the key is not forwarded, `_block("blocklist", extra=match_info)` is invoked, and an enriched `key.passthrough.blocked` event is emitted with `{ reason: "blocklist", extra: { type, value, exe, title } }`.
 
@@ -463,6 +617,8 @@
   - **Targeted Browser Selection**: `_send_browser_media_command_targeted()` matches DWM overlay source HWND to correct browser child window using title/class similarity scoring and media content detection
   - **Enhanced App Detection**: `_derive_app_name_from_context()` resolves UNKNOWN applications using process names, window titles, class names, and media characteristics (40+ applications supported)
   - **Continuous Volume Control**: Key hold detection with smooth 0-100% ramping via `handle_volume_key_press/release()` - immediate 2% step + continuous 1% steps after 0.5s hold
+  - **OSD Feedback Policy**: `media.volume.changed` events are ALWAYS published immediately on volume key press/hold for consistent user feedback, even when no audio session exists yet (numeric level shows when session becomes active)
+  - **Volume Key Gating**: Aligned with spacebar policy - requires app/overlay to be handling keys and valid target hwnd (no strict overlay-focus requirement)
   - Hints media activity to KeepAlive on successful commands to maintain background responsiveness
   - Process responsiveness checking before dispatch
   - Window enumeration caching (5s TTL)
@@ -624,6 +780,12 @@
   - QSS-only styling (no programmatic styling)
   - Full QMouseEvent API for event forwarding
 
+- **Wheel Resize Behavior (tuned)**:
+  - Dynamic fine-step near minimum bounds (no modifiers required) to prevent step skipping at extremes
+  - **Screen boundary performance** (2025-10-09 fix): Boundary smoothing logic now checks for **stable pinned edges** before reducing resize steps. When a window is pinned to a screen edge (e.g., left edge at x=0) and growing away from that edge, full resize deltas are applied without smoothing. Only triggers 2px smoothing when the window is actually trying to move beyond screen limits. This eliminates the slow resize issue at screen corners (especially bottom-left) while maintaining proper boundary handling.
+  - Min-size inner-AR lock when `content_aspect` is provided (maintains aspect ratio at minimum sizes using canvas insets)
+  - Opportunistic persistence: after wheel-apply and drag/resize release, if the host exposes `_persist_current_geometry()`, it is called to persist geometry (standalone DWM)
+
 #### Supporting Components
 - **`WindowManagementCore`**: Overlay management and state persistence
 - **`WindowState` & `WindowStateManager`**: Position/size save/restore
@@ -638,36 +800,30 @@
 - **`icons.py`**: Icon extraction and scaling
   - Blank icon policy: resource-only `:/icons/Blank.ico`; if load fails, generate a transparent 16×16 pixmap; no filesystem fallback. Warnings are logged on failure. Implemented in `core/application/window_enumerator.py::_init_blank_icon` and `core/window/enumerator.py::_init_blank_icon`.
 
----
-
-## 
-
-### Core Graphics System (`core/graphics/`)
-
-#### Overlay Architecture
 - **`overlay.py`**: Base `Overlay` class with common interface
 - **`overlay_host.py`**: Host window for overlays
-- **`OverlayManager`**: Centralized overlay lifecycle management with MRU tracking and auto-switch
-  - **Core Features**:
-    - Single overlay enforcement (one-at-a-time semantics)
-    - Most Recently Used (MRU) tracking for quick switching
-    - Overlay locking to prevent unwanted changes
-    - Integrated z-order management via ZOrderManager
-    - Auto-switch functionality when DWM capture windows close
-  - **Key Methods**:
-    - `create_overlay()`: Create new overlay with configuration
-    - `get_overlay(id)`: Retrieve overlay by ID (updates MRU)
-    - `remove_overlay(id)`: Clean removal with lock checking
-    - `update_mru(id)`: Update MRU list
+- **`OverlayManager`**: Centralized overlay lifecycle management with MRU tracking and locking support
+- **`BackendManager`**: Graphics backend selection and management (DXGI, fallbacks)
+- **`ZOrderManager`**: Window z-order enforcement and management
+- **Backends**: Hardware-accelerated capture and rendering backends
+  - **DXGI Backend**: Primary Windows capture backend using DXGI desktop duplication
+  - **DWM Backend**: Integrated DWM overlay system with hardware acceleration
+- **Docking System (`core/graphics/docking/`)**: Three-overlay docking mode implementation
+  - **`DockingOverlayManager`**: Orchestrates 3-overlay docking system with expanded MRU
+  - **`DockingOverlay`**: Individual overlay wrapper with synchronization and interaction handling
+  - **`DockingPositioner`**: Spatial positioning logic with directional priority (right > left > bottom > top)
+  - **`DockingContextMenu`**: Docking-specific context menu with limited options
+- **Types**: Core graphics type definitions and configurations
     - `set_overlay_lock(locked)`: Enable/disable overlay modifications
     - `get_mru_overlays(limit)`: Get overlays sorted by recent use
     - `set_auto_switch_enabled(enabled)`: Enable/disable auto-switching
 - **`backend_manager.py`**: Backend selection and initialization
 - **`types.py`**: Shared type definitions
-- **`window_monitor.py`**: Auto-switch functionality for DWM capture windows
-  - **`WindowMonitor`**: Monitors window validity and detects closures
-  - **`AutoSwitchManager`**: Manages auto-switching when windows close
-  - **Features**: Automatic overlay source switching to next valid window from MRU list
+- **`window_monitor.py`**: Closed-window switching functionality for overlays
+  - **`WindowMonitor`**: Monitors window validity and detects closures (2s polling)
+  - **`ClosedWindowSwitchManager`**: Manages auto-switching when windows close
+  - **Features**: Automatic overlay source switching to next valid window from MRU list when a window closes
+  - **NOTE**: This is separate from foreground-based autoswitch (see ForegroundAutoswitchController)
 
 #### Border Rendering System (`ui/overlays/`)
 - **`integrated_border_canvas.py`**: Unified canvas with integrated border rendering
@@ -1020,16 +1176,35 @@
    - `logs/` → runtime logs
    - Note: Legacy code paths referencing `resources/...` continue to work via PyInstaller `--add-data`.
 
-### Qt Resource Registration & Build Cleanup
+### Qt Resource Registration
  - **Qt resources registration**: Qt resources are compiled into `ui.resources_rc` and registered by both `main.py` and `utils/theme/theme_manager.py` at import time. This ensures `:/themes/*.qss` and other `:/` resource paths are available in tests and non-main contexts. On failure, a DEBUG log is emitted and the ThemeManager falls back to filesystem paths.
- - **Nuitka post-stage cleanup**: `scripts/build_nuitka.ps1` removes empty `<portable_root>/data/themes` and `<portable_root>/data/resources` directories after staging, reflecting that assets are embedded via Qt resources. Non-empty directories are preserved.
+
+### Build Scripts
+- **`scripts/build_onefile_local.ps1`** ⭐ RECOMMENDED: Nuitka onefile with persistent cache
+  - Creates single EXE with persistent cache extraction
+  - Output: `release/onefile_local/SPQ.exe`
+  - Extracts to `%LOCALAPPDATA%\SPQ\runtime` (reused between launches)
+  - AV-safe (proven - onefile builds pass Windows Defender)
+  - First launch ~2-3s, subsequent launches instant
+- **`scripts/build_onefile.ps1`**: Nuitka single-file build (temp extraction)
+  - Creates single portable EXE
+  - Output: `release/onefile/SPQ.exe`
+  - Extracts to temp on every launch
+  - AV-safe baseline (proven in testing)
+- **`scripts/build_standalone.ps1`**: Nuitka standalone build (clean layout)
+  - Creates directory: `SPQ.exe` in root, all DLLs in `data/` subdirectory
+  - Output: `release/standalone/SPQ.exe`
+  - ⚠️ KNOWN ISSUE: Triggers Windows Defender on static file analysis
+  - Fast startup, no unpacking delay
+  - Minimal flags + module exclusions
+- **`scripts/build_nuitka_single_av_safe_minimal.ps1`**: Original baseline (kept for reference)
+- **See:** `audits/build_script_comparison.md` for detailed comparison and recommendation
 
 ### Configuration Files
 - **`pyproject.toml`**: Python project configuration
 - **`Spec.md`**: Project specification
 - **`Index.md`**: This codebase index
 - **`ThemeIndex.md`**: Theme system documentation
- - **Build Script**: `scripts/build_pyinstaller.ps1` creates a PyInstaller one-folder portable build, stages `data/`, and creates `settings/` and `logs/`.
 
 ### Audit Trail
 - **`audits/`**: Architecture migration documentation

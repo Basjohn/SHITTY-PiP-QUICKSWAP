@@ -156,6 +156,21 @@ class _SettingsManagerImpl(ISettingsManager):
                 description='Per-app WM_COMMAND action IDs for MPC variants',
                 category=SettingsCategory.BEHAVIOR
             ),
+            # Input timing controls
+            'input.volume_hold_initial_delay_ms': SettingDefinition(
+                default=200,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 50 <= x <= 1000,
+                description='Initial delay before continuous volume adjustment starts when holding volume keys (50-1000ms)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'input.volume_hold_interval_ms': SettingDefinition(
+                default=50,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 10 <= x <= 200,
+                description='Interval between continuous volume steps when holding volume keys (10-200ms)',
+                category=SettingsCategory.BEHAVIOR
+            ),
             'appearance.opacity': SettingDefinition(
                 default=100,
                 setting_type=int,
@@ -165,9 +180,15 @@ class _SettingsManagerImpl(ISettingsManager):
             ),
             # Overlay visual options
             'overlay.rounded_borders': SettingDefinition(
-                default=False,
+                default=True,
                 setting_type=bool,
                 description='Use rounded corners for overlay border rendering',
+                category=SettingsCategory.APPEARANCE
+            ),
+            'overlay.larger_borders': SettingDefinition(
+                default=False,
+                setting_type=bool,
+                description='Increase border thickness by 1px for better visibility',
                 category=SettingsCategory.APPEARANCE
             ),
             # UI state persistence
@@ -192,8 +213,28 @@ class _SettingsManagerImpl(ISettingsManager):
             'ui.mode_button_state': SettingDefinition(
                 default='window',
                 setting_type=str,
-                options=['window', 'monitor'],
+                options=['window', 'monitor', 'docking'],
                 description='Selected mode button state',
+                category=SettingsCategory.GENERAL
+            ),
+            'ui.block_flash_min_interval_ms': SettingDefinition(
+                default=250,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 0 <= x <= 2000,
+                description='Minimum interval between keypassthrough block UI flash feedback (0-2000ms, throttles spam)',
+                category=SettingsCategory.GENERAL
+            ),
+            # Overlay geometry persistence (standalone DWM and Docking main)
+            'overlays.dwm.last_state': SettingDefinition(
+                default={},
+                setting_type=dict,
+                description='Nearest-corner persisted state for standalone DWM overlay (corner,width,height,monitor_index)',
+                category=SettingsCategory.GENERAL
+            ),
+            'docking.last_state': SettingDefinition(
+                default={},
+                setting_type=dict,
+                description='Nearest-corner persisted state for Docking main overlay (corner,width,height,monitor_index)',
                 category=SettingsCategory.GENERAL
             ),
             # Feature toggles
@@ -222,9 +263,58 @@ class _SettingsManagerImpl(ISettingsManager):
                 category=SettingsCategory.BEHAVIOR
             ),
             'features.media_control_enabled': SettingDefinition(
-                default=False,
+                default=True,
                 setting_type=bool,
                 description='Enable media key routing and media controller features',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            # Docking mode settings
+            'docking.enabled': SettingDefinition(
+                default=False,
+                setting_type=bool,
+                description='Enable docking mode (3-overlay system)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.mode': SettingDefinition(
+                default='normal',
+                setting_type=str,
+                options=['normal', 'cycle'],
+                description='Docking operation mode: normal (current behavior) or cycle (MRU-driven continuous cycling)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.overlay_count': SettingDefinition(
+                default=3,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 2 <= x <= 5,
+                description='Number of overlays to create in docking mode (2-5)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.size_ratios': SettingDefinition(
+                default=[1.0, 0.7, 0.5],
+                setting_type=list,
+                validator=lambda x: isinstance(x, list) and len(x) == 3 and all(isinstance(r, (int, float)) and 0.1 <= r <= 1.0 for r in x),
+                description='Size ratios for main and secondary overlays [100%, 70%, 50%]',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.spacing': SettingDefinition(
+                default=2,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 0 <= x <= 20,
+                description='Pixels between docking overlays (0-20)',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.positioning_mode': SettingDefinition(
+                default='auto',
+                setting_type=str,
+                options=['auto', 'manual'],
+                description='Positioning mode for secondary overlays',
+                category=SettingsCategory.BEHAVIOR
+            ),
+            'docking.mru_capacity': SettingDefinition(
+                default=12,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and 3 <= x <= 20,
+                description='MRU list capacity for docking mode (3-20)',
                 category=SettingsCategory.BEHAVIOR
             ),
             # Debug/diagnostics (verbose logging controls)
@@ -246,6 +336,12 @@ class _SettingsManagerImpl(ISettingsManager):
                 description='Verbose logging for Volume OSD widget visibility and updates',
                 category=SettingsCategory.GENERAL
             ),
+            'debug.docking_verbose': SettingDefinition(
+                default=False,
+                setting_type=bool,
+                description='Verbose logging for docking manager sizing/fit/position calculations',
+                category=SettingsCategory.GENERAL
+            ),
             # Hotkeys
             'hotkeys.opacity_enabled': SettingDefinition(
                 default=True,
@@ -253,10 +349,34 @@ class _SettingsManagerImpl(ISettingsManager):
                 description='Enable opacity hotkeys',
                 category=SettingsCategory.HOTKEYS
             ),
-            'hotkeys.quickswitch_enabled': SettingDefinition(
+            'hotkeys.prefer_keyboard_fallback': SettingDefinition(
                 default=False,
                 setting_type=bool,
+                description='Prefer keyboard library combo fallback when system hotkey registration fails',
+                category=SettingsCategory.HOTKEYS
+            ),
+            'hotkeys.allow_single_digits': SettingDefinition(
+                default=False,
+                setting_type=bool,
+                description='Allow single-digit keys as standalone hotkeys (keyboard backend only)',
+                category=SettingsCategory.HOTKEYS
+            ),
+            'hotkeys.quickswitch_enabled': SettingDefinition(
+                default=True,
+                setting_type=bool,
                 description='Enable QuickSwitch hotkey',
+                category=SettingsCategory.HOTKEYS
+            ),
+            'hotkeys.hide_show_enabled': SettingDefinition(
+                default=True,
+                setting_type=bool,
+                description='Enable Hide/Show All Overlays hotkey',
+                category=SettingsCategory.HOTKEYS
+            ),
+            'hotkeys.hide_show_overlays': SettingDefinition(
+                default='ctrl+shift+h',
+                setting_type=str,
+                description='Hide/Show all overlays hotkey combo (default: ctrl+shift+h)',
                 category=SettingsCategory.HOTKEYS
             ),
             'hotkeys.opacity_decrease': SettingDefinition(
@@ -272,9 +392,9 @@ class _SettingsManagerImpl(ISettingsManager):
                 category=SettingsCategory.HOTKEYS
             ),
             'hotkeys.opacity_quickswitch': SettingDefinition(
-                default='shift+x',
+                default='ctrl+shift+x',
                 setting_type=str,
-                description='Quickswitch combo (default: shift+x)',
+                description='Quickswitch combo (default: ctrl+shift+x)',
                 category=SettingsCategory.HOTKEYS
             ),
             # Graphics pipeline selection (feature flag)

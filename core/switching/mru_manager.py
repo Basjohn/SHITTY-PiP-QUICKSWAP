@@ -37,6 +37,8 @@ class MRUManager:
         self._cap = self.CAPACITY_DEFAULT
         # Lock-free: All MRU operations confined to UI thread
         self._pid = os.getpid()
+        # Subscribers for push-based updates
+        self._listeners = []  # list of callables: (List[int]) -> None
         self._initialized = True
         self._logger.debug("Initialized MRUManager")
 
@@ -82,20 +84,29 @@ class MRUManager:
         except Exception:
             title = ""
         self._logger.debug(f"Recorded hwnd={hwnd} title='{title}'; MRU size={len(self._mru)}")
+        # Notify listeners on change
+        try:
+            self._notify_listeners()
+        except Exception:
+            pass
         return True
 
     def get_recent(self, limit: Optional[int] = None) -> List[int]:
         """
         Return a most-recent-first list of valid hwnds (purging any that are no longer valid).
+        
+        NOTE: Does NOT filter minimized windows - they're valid quickswitch targets.
+        Only filters destroyed/invalid windows.
         """
         lim = self._cap if limit is None else max(0, int(limit))
         # Lock-free: UI thread only access
-        # Purge invalid entries
+        # Purge invalid entries (but keep minimized windows)
         purged = False
         valid_list: List[int] = []
         for hwnd in self._mru:
             try:
-                if is_valid_window(hwnd, our_pid=self._pid):
+                # Skip visibility check - minimized windows are valid quickswitch targets
+                if is_valid_window(hwnd, our_pid=self._pid, check_visible=False):
                     valid_list.append(hwnd)
                 else:
                     purged = True
@@ -112,6 +123,35 @@ class MRUManager:
         """
         recent_list = self.get_recent(limit=1)
         return recent_list[0] if recent_list else None
+
+    # --- Listener API (UI-thread usage) -----------------------------------
+    def add_listener(self, callback) -> None:
+        """Subscribe to MRU changes. Callback receives the latest MRU list (List[int])."""
+        try:
+            if callback and callback not in self._listeners:
+                self._listeners.append(callback)
+        except Exception:
+            pass
+
+    def remove_listener(self, callback) -> None:
+        """Unsubscribe a previously added listener."""
+        try:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+        except Exception:
+            pass
+
+    def _notify_listeners(self) -> None:
+        """Notify listeners of MRU order changes."""
+        try:
+            snapshot = self.get_recent(limit=self._cap)
+            for cb in list(self._listeners):
+                try:
+                    cb(snapshot)
+                except Exception as e:
+                    self._logger.debug(f"MRU listener error: {e}")
+        except Exception as e:
+            self._logger.debug(f"Failed notifying MRU listeners: {e}")
 
 
 def get_mru_manager() -> MRUManager:

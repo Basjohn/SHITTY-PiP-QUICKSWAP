@@ -26,6 +26,23 @@ class OverlayHost(QWidget):
     - Emits geometryChanged signal on move/resize for integrated rendering coordination
     """
 
+    # Global suppression window to avoid clearing passthrough target
+    _handoff_suppress_until_ms: int = 0
+
+    @classmethod
+    def suppress_deactivation_clears(cls, duration_ms: int = 350) -> None:
+        """Suppress clearing KEYPASS target for a short window after focus handoff.
+        Called by DockingManager before OS focus operations.
+        """
+        try:
+            from time import monotonic
+            now_ms = int(monotonic() * 1000)
+            cls._handoff_suppress_until_ms = max(cls._handoff_suppress_until_ms, now_ms + int(duration_ms))
+            lg = get_logger("OverlayHost")
+            lg.debug(f"FOCUS_AUDIT: Suppressing target clears for {duration_ms}ms (until={cls._handoff_suppress_until_ms})")
+        except Exception:
+            pass
+
     geometryChanged = Signal()
 
     def __init__(self, config: OverlayConfig):
@@ -136,12 +153,25 @@ class OverlayHost(QWidget):
             # Forward click to parent overlay's lock toggle if available
             def _on_lock_toggle():
                 try:
-                    ov = getattr(self, "_parent_overlay", None)
-                    if ov and hasattr(ov, "toggle_window_lock"):
+                    # Prefer backend overlay (DWM) for lock toggling; fallback to parent overlay
+                    ov = getattr(self, "_backend_overlay", None) or getattr(self, "_parent_overlay", None)
+                    lg = get_logger("OverlayHost")
+                    if ov is None:
+                        lg.debug("Lock toggle ignored: no overlay available")
+                        return
+                    before = bool(getattr(ov, "_is_window_locked", False)) if hasattr(ov, "_is_window_locked") else None
+                    if hasattr(ov, "toggle_window_lock"):
                         ov.toggle_window_lock()
-                        # Reflect state if readable
-                        if hasattr(ov, "_is_window_locked"):
-                            self._focus_indicator.set_locked(bool(getattr(ov, "_is_window_locked", False)))
+                        after = bool(getattr(ov, "_is_window_locked", False)) if hasattr(ov, "_is_window_locked") else None
+                        lg.info(f"FOCUS_AUDIT: Lock toggled via indicator: before={before} after={after}")
+                        # Reflect state conservatively
+                        if hasattr(self, "_focus_indicator") and self._focus_indicator is not None and after is not None:
+                            try:
+                                self._focus_indicator.set_locked(after)
+                            except Exception:
+                                pass
+                    else:
+                        lg.debug("Lock toggle ignored: overlay missing toggle_window_lock")
                 except Exception as e:
                     logger = get_logger("OverlayHost")
                     logger.debug(f"Lock toggle failed: {e}")
@@ -375,7 +405,13 @@ class OverlayHost(QWidget):
                 return False
 
             logger = get_logger("OverlayHost")
-            logger.debug(f"Key event: type={event.type()} auto_repeat={getattr(event, 'isAutoRepeat', lambda: False)()} VK={vk:02X} key={event.key()} text='{event.text()}'")
+            # Gate key event logging behind debug setting to reduce spam
+            try:
+                from core.settings import get_settings_manager
+                if get_settings_manager().get("debug.key_events_verbose", False):
+                    logger.debug(f"Key event: type={event.type()} auto_repeat={getattr(event, 'isAutoRepeat', lambda: False)()} VK={vk:02X} key={event.key()} text='{event.text()}'")
+            except Exception:
+                pass
 
             # Intercept ESC on key press to close the active overlay instead of passing through
             try:
@@ -394,13 +430,26 @@ class OverlayHost(QWidget):
                 kp = get_key_passthrough_controller()
                 # Force-sync target to current overlay source hwnd on every key event to avoid stale routing
                 try:
-                    ov = getattr(self, "_parent_overlay", None)
-                    if ov is not None and hasattr(ov, "_source_hwnd"):
-                        try:
-                            src_hwnd = int(getattr(ov, "_source_hwnd") or 0)
-                        except Exception:
-                            src_hwnd = 0
-                        kp.set_target_hwnd(src_hwnd if src_hwnd else None)
+                    ov = getattr(self, "_backend_overlay", None) or getattr(self, "_parent_overlay", None)
+                    src_hwnd = 0
+                    if ov is not None:
+                        # Prefer _source_hwnd, then _captured_hwnd, then config.properties['hwnd']
+                        for attr in ("_source_hwnd", "_captured_hwnd"):
+                            if hasattr(ov, attr):
+                                try:
+                                    src_hwnd = int(getattr(ov, attr) or 0)
+                                except Exception:
+                                    src_hwnd = 0
+                                if src_hwnd:
+                                    break
+                        if not src_hwnd:
+                            try:
+                                cfg = getattr(ov, "_config", None)
+                                props = dict(getattr(cfg, "properties", {}) or {}) if cfg is not None else {}
+                                src_hwnd = int(props.get("hwnd") or 0)
+                            except Exception:
+                                src_hwnd = 0
+                    kp.set_target_hwnd(src_hwnd if src_hwnd else None)
                 except Exception:
                     pass
 
@@ -424,6 +473,9 @@ class OverlayHost(QWidget):
                         logger.debug(f"Press volume passthrough {vk:02X} -> {handled}")
                         return handled
                     elif event.type() == QEvent.KeyRelease:
+                        # Ignore auto-repeat releases; only act on the real key-up
+                        if is_auto:
+                            return True
                         # Always release; safe if already released
                         kp.release_passthrough_key(int(vk))
                         logger.debug(f"Release volume passthrough {vk:02X}")
@@ -441,6 +493,9 @@ class OverlayHost(QWidget):
                         logger.debug(f"Press passthrough {vk:02X} -> {handled}")
                         return handled
                     elif event.type() == QEvent.KeyRelease:
+                        # Ignore auto-repeat releases; only act on the real key-up
+                        if is_auto:
+                            return True
                         # Always release; safe if already released
                         kp.release_passthrough_key(int(vk))
                         logger.debug(f"Release passthrough {vk:02X}")
@@ -648,23 +703,47 @@ class OverlayHost(QWidget):
             if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
                 logger.info(f"FOCUS_AUDIT: Setting focus indicator visibility: {is_active}")
                 self._focus_indicator.set_has_focus(is_active)
+                # For non-focusable hosts (e.g., secondary docking overlays), keep indicator visible
+                try:
+                    flags = self.windowFlags()
+                    if bool(flags & Qt.WindowDoesNotAcceptFocus):
+                        self._focus_indicator.set_visible_no_focus(True)
+                except Exception:
+                    pass
             else:
                 logger.info("FOCUS_AUDIT: No focus indicator to update")
 
             # Update KeyPassthroughController target HWND based on focus state
             try:
+                from time import monotonic
                 kp = get_key_passthrough_controller()
-                ov = getattr(self, "_parent_overlay", None)
-                # Route only when host is active and we have a valid captured source hwnd
-                if is_active and ov is not None and hasattr(ov, "_source_hwnd"):
-                    try:
-                        src_hwnd = int(getattr(ov, "_source_hwnd") or 0)
-                    except Exception:
-                        src_hwnd = 0
+                ov = getattr(self, "_backend_overlay", None) or getattr(self, "_parent_overlay", None)
+                # Route only when host is active and we have a valid source hwnd
+                if is_active and ov is not None:
+                    src_hwnd = 0
+                    for attr in ("_source_hwnd", "_captured_hwnd"):
+                        if hasattr(ov, attr):
+                            try:
+                                src_hwnd = int(getattr(ov, attr) or 0)
+                            except Exception:
+                                src_hwnd = 0
+                            if src_hwnd:
+                                break
+                    if not src_hwnd:
+                        try:
+                            cfg = getattr(ov, "_config", None)
+                            props = dict(getattr(cfg, "properties", {}) or {}) if cfg is not None else {}
+                            src_hwnd = int(props.get("hwnd") or 0)
+                        except Exception:
+                            src_hwnd = 0
                     kp.set_target_hwnd(src_hwnd if src_hwnd else None)
                 else:
-                    # Clear target on deactivation or when overlay lacks a source hwnd
-                    kp.set_target_hwnd(None)
+                    # Clear target on deactivation unless we're within handoff suppression window
+                    now_ms = int(monotonic() * 1000)
+                    if now_ms < OverlayHost._handoff_suppress_until_ms:
+                        logger.debug("FOCUS_AUDIT: Suppressed target clear on deactivation during handoff window")
+                    else:
+                        kp.set_target_hwnd(None)
             except Exception as e:
                 logger.debug(f"Passthrough target update failed: {e}")
         except Exception as e:
@@ -681,17 +760,36 @@ class OverlayHost(QWidget):
             if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
                 logger.info(f"FOCUS_AUDIT: Setting focus indicator on show: {is_active}")
                 self._focus_indicator.set_has_focus(is_active)
+                # Secondary (non-focusable) overlays should still show the indicator
+                try:
+                    flags = self.windowFlags()
+                    if bool(flags & Qt.WindowDoesNotAcceptFocus):
+                        self._focus_indicator.set_visible_no_focus(True)
+                except Exception:
+                    pass
             else:
                 logger.debug("No focus indicator on show")
             # Sync passthrough target on show as well
             try:
                 kp = get_key_passthrough_controller()
-                ov = getattr(self, "_parent_overlay", None)
-                if is_active and ov is not None and hasattr(ov, "_source_hwnd"):
-                    try:
-                        src_hwnd = int(getattr(ov, "_source_hwnd") or 0)
-                    except Exception:
-                        src_hwnd = 0
+                ov = getattr(self, "_backend_overlay", None) or getattr(self, "_parent_overlay", None)
+                if is_active and ov is not None:
+                    src_hwnd = 0
+                    for attr in ("_source_hwnd", "_captured_hwnd"):
+                        if hasattr(ov, attr):
+                            try:
+                                src_hwnd = int(getattr(ov, attr) or 0)
+                            except Exception:
+                                src_hwnd = 0
+                            if src_hwnd:
+                                break
+                    if not src_hwnd:
+                        try:
+                            cfg = getattr(ov, "_config", None)
+                            props = dict(getattr(cfg, "properties", {}) or {}) if cfg is not None else {}
+                            src_hwnd = int(props.get("hwnd") or 0)
+                        except Exception:
+                            src_hwnd = 0
                     kp.set_target_hwnd(src_hwnd if src_hwnd else None)
                 else:
                     kp.set_target_hwnd(None)
@@ -715,6 +813,13 @@ class OverlayHost(QWidget):
             # Hide focus indicator
             if hasattr(self, "_focus_indicator") and self._focus_indicator is not None:
                 self._focus_indicator.set_has_focus(False)
+                # Maintain visibility for non-focusable secondary overlays
+                try:
+                    flags = self.windowFlags()
+                    if bool(flags & Qt.WindowDoesNotAcceptFocus):
+                        self._focus_indicator.set_visible_no_focus(True)
+                except Exception:
+                    pass
             # Safety: release any volume holds if focus is lost
             try:
                 kp = get_key_passthrough_controller()
@@ -724,10 +829,15 @@ class OverlayHost(QWidget):
                 kp.release_passthrough_key(VK_VOLUME_DOWN)
             except Exception:
                 pass
-            # Clear passthrough target on focus out
+            # Clear passthrough target on focus out (respect handoff suppression)
             try:
-                kp = get_key_passthrough_controller()
-                kp.set_target_hwnd(None)
+                from time import monotonic
+                now_ms = int(monotonic() * 1000)
+                if now_ms < OverlayHost._handoff_suppress_until_ms:
+                    get_logger("OverlayHost").debug("FOCUS_AUDIT: Suppressed target clear on focusOut during handoff window")
+                else:
+                    kp = get_key_passthrough_controller()
+                    kp.set_target_hwnd(None)
             except Exception:
                 pass
         except Exception:
@@ -749,10 +859,15 @@ class OverlayHost(QWidget):
                 kp.release_passthrough_key(VK_VOLUME_DOWN)
             except Exception:
                 pass
-            # Clear passthrough target on hide
+            # Clear passthrough target on hide (respect handoff suppression)
             try:
-                kp = get_key_passthrough_controller()
-                kp.set_target_hwnd(None)
+                from time import monotonic
+                now_ms = int(monotonic() * 1000)
+                if now_ms < OverlayHost._handoff_suppress_until_ms:
+                    get_logger("OverlayHost").debug("FOCUS_AUDIT: Suppressed target clear on hide during handoff window")
+                else:
+                    kp = get_key_passthrough_controller()
+                    kp.set_target_hwnd(None)
             except Exception:
                 pass
             # Hide Volume OSD window if present

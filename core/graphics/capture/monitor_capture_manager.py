@@ -33,7 +33,7 @@ from core.threading import get_thread_manager
 from utils.resource_manager import get_resource_manager, ResourceType
 from utils.monitor_utils import get_all_monitors
 from utils.frame_exchange import get_exchange
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 
 logger = get_logger(__name__)
 
@@ -143,7 +143,7 @@ class MonitorCaptureManager(QObject):
 
         # Apply FPS from settings and watch for changes
         try:
-            self._settings = SettingsManager()
+            self._settings = get_settings_manager()
             fps_val = int(self._settings.get('capture.fps', 30))
             self.set_capture_rate(float(fps_val))
 

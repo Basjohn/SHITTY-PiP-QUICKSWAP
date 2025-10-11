@@ -4,8 +4,8 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
-from PySide6.QtCore import QTimer
 from core.logging import get_logger
+from core.threading import ThreadManager
 from utils.win.winmsg import (
     is_window,
     key_press,
@@ -67,9 +67,19 @@ class MediaController:
         self._app_detection_ttl = 2.0  # seconds
         
         # Continuous volume adjustment state
-        self._volume_hold_state = {}  # hwnd -> {'direction': 'up'/'down', 'start_time': float, 'timer': QTimer}
-        self._volume_hold_delay = 0.5  # seconds before continuous adjustment starts
-        self._volume_continuous_interval = 0.05  # seconds between continuous steps
+        self._volume_hold_state = {}  # hwnd -> {'direction': 'up'/'down', 'start_time': float, 'token': int, 'mode': 'delay'/'continuous'}
+        # Read delay/interval from settings for consistency with KeyPassthroughController
+        try:
+            delay_ms = int(self._settings.get("input.volume_hold_initial_delay_ms", 200))
+        except Exception:
+            delay_ms = 200
+        try:
+            interval_ms = int(self._settings.get("input.volume_hold_interval_ms", 50))
+        except Exception:
+            interval_ms = 50
+        self._volume_hold_delay = max(0.0, float(delay_ms) / 1000.0)  # seconds before continuous adjustment starts
+        self._volume_continuous_interval = max(0.01, float(interval_ms) / 1000.0)  # seconds between continuous steps
+        self._volume_hold_max_seconds = 6.0  # hard cap to prevent runaway timers
         
         # App catalog with comprehensive definitions from SPQStruggle
         self._default_apps = {
@@ -613,53 +623,73 @@ class MediaController:
     def _start_continuous_volume_adjustment(self, hwnd: int, direction: str) -> None:
         """Start continuous volume adjustment for key hold behavior."""
         try:
-            # Stop any existing continuous adjustment for this window
-            self._stop_continuous_volume_adjustment(hwnd)
+            # Ensure only one active hold at a time (safety)
+            self.stop_all_continuous_volume_adjustments()
             
-            # Create timer for continuous adjustment
-            timer = QTimer()
-            timer.timeout.connect(lambda: self._perform_continuous_volume_step(hwnd, direction))
-            
-            # Store state
+            # Initialize hold state with a unique token to guard scheduled callbacks
+            token = int(time.time() * 1000) & 0x7FFFFFFF
             self._volume_hold_state[hwnd] = {
                 'direction': direction,
                 'start_time': time.time(),
-                'timer': timer
+                'token': token,
+                'mode': 'delay'
             }
             
-            # Start timer with initial delay, then continuous intervals
-            timer.setSingleShot(True)
-            timer.timeout.connect(lambda: self._switch_to_continuous_mode(hwnd))
-            timer.start(int(self._volume_hold_delay * 1000))  # Convert to milliseconds
+            # Schedule switch into continuous mode after initial delay via ThreadManager
+            delay_ms = int(self._volume_hold_delay * 1000)
+            def _delayed_switch():
+                state = self._volume_hold_state.get(hwnd)
+                if not state or state.get('token') != token:
+                    return
+                self._switch_to_continuous_mode(hwnd, token)
+            ThreadManager.single_shot(delay_ms, _delayed_switch)
             
         except Exception as e:
             self._logger.debug(f"Failed to start continuous volume adjustment: {e}")
 
-    def _switch_to_continuous_mode(self, hwnd: int) -> None:
+    def _switch_to_continuous_mode(self, hwnd: int, token: Optional[int] = None) -> None:
         """Switch from initial delay to continuous adjustment mode."""
         try:
             if hwnd not in self._volume_hold_state:
                 return
                 
             state = self._volume_hold_state[hwnd]
-            timer = state['timer']
+            if token is not None and state.get('token') != token:
+                return
+            state['mode'] = 'continuous'
             direction = state['direction']
-            
-            # Disconnect old signal and connect new one for continuous mode
-            timer.disconnect()
-            timer.timeout.connect(lambda: self._perform_continuous_volume_step(hwnd, direction))
-            timer.setSingleShot(False)
-            timer.start(int(self._volume_continuous_interval * 1000))
+
+            def _step():
+                # Guard by token
+                s = self._volume_hold_state.get(hwnd)
+                if not s or s.get('token') != token or s.get('mode') != 'continuous':
+                    return
+                self._perform_continuous_volume_step(hwnd, direction, token)
+            # Kick the first step immediately, subsequent steps reschedule themselves
+            ThreadManager.single_shot(0, _step)
             
         except Exception as e:
             self._logger.debug(f"Failed to switch to continuous volume mode: {e}")
 
-    def _perform_continuous_volume_step(self, hwnd: int, direction: str) -> None:
+    def _perform_continuous_volume_step(self, hwnd: int, direction: str, token: Optional[int] = None) -> None:
         """Perform a single step of continuous volume adjustment."""
         try:
             if hwnd not in self._volume_hold_state:
                 return
                 
+            # Token/active guard to avoid ghost steps
+            state = self._volume_hold_state.get(hwnd)
+            if token is not None and (not state or state.get('token') != token or state.get('mode') != 'continuous'):
+                return
+            
+            # Hard cap on total hold duration to prevent runaway behavior if release is missed
+            try:
+                if (time.time() - float(state.get('start_time', 0.0))) > float(self._volume_hold_max_seconds):
+                    self._stop_continuous_volume_adjustment(hwnd)
+                    return
+            except Exception:
+                pass
+            
             # Get current volume to check bounds
             try:
                 current_volume = session_volume.get_session_volume_for_hwnd(hwnd)
@@ -687,14 +717,38 @@ class MediaController:
             
             # Perform the volume adjustment
             try:
-                if session_volume.adjust_session_volume_for_hwnd(hwnd, continuous_step):
-                    pass  # Success, continue
-                else:
-                    # If session volume fails, stop continuous adjustment
+                adjusted = session_volume.adjust_session_volume_for_hwnd(hwnd, continuous_step)
+                # Always publish OSD event for user feedback, even if session not found yet
+                try:
+                    level = session_volume.get_session_volume_for_hwnd(hwnd)
+                except Exception:
+                    level = None
+                try:
+                    payload = {
+                        "hwnd": hwnd,
+                        "app_name": self._detect_app_for_hwnd(hwnd) or "",
+                        "volume": float(level) if level is not None else None,
+                        "source": "key_hold",
+                        "reason": direction,
+                    }
+                    self._publish("media.volume.changed", payload)
+                except Exception:
+                    pass
+                # Stop continuous if no session found (repeated failures indicate no audio)
+                if not adjusted:
                     self._stop_continuous_volume_adjustment(hwnd)
             except Exception:
                 self._stop_continuous_volume_adjustment(hwnd)
                 
+            # Schedule next step if still active
+            try:
+                s2 = self._volume_hold_state.get(hwnd)
+                if s2 and s2.get('token') == token and s2.get('mode') == 'continuous':
+                    interval_ms = int(self._volume_continuous_interval * 1000)
+                    ThreadManager.single_shot(interval_ms, lambda: self._perform_continuous_volume_step(hwnd, direction, token))
+            except Exception:
+                pass
+            
         except Exception as e:
             self._logger.debug(f"Continuous volume step failed: {e}")
             self._stop_continuous_volume_adjustment(hwnd)
@@ -703,10 +757,6 @@ class MediaController:
         """Stop continuous volume adjustment for a window."""
         try:
             if hwnd in self._volume_hold_state:
-                state = self._volume_hold_state[hwnd]
-                timer = state['timer']
-                timer.stop()
-                timer.deleteLater()
                 del self._volume_hold_state[hwnd]
         except Exception as e:
             self._logger.debug(f"Failed to stop continuous volume adjustment: {e}")
@@ -725,7 +775,7 @@ class MediaController:
         Args:
             hwnd: Target window handle
             direction: 'up' or 'down'
-            
+        
         Returns:
             True if handled successfully
         """
@@ -733,10 +783,28 @@ class MediaController:
             # Perform immediate single step
             command = self.APPCOMMAND_VOLUME_UP if direction == 'up' else self.APPCOMMAND_VOLUME_DOWN
             success, _ = self.send_media_command(hwnd, command)
-            
+
+            # ALWAYS publish OSD event immediately for user feedback, even if no session exists
+            # This ensures consistent visual feedback regardless of audio session state
+            try:
+                level = session_volume.get_session_volume_for_hwnd(hwnd)
+            except Exception:
+                level = None
+            try:
+                payload = {
+                    "hwnd": hwnd,
+                    "app_name": self._detect_app_for_hwnd(hwnd) or "",
+                    "volume": float(level) if level is not None else None,
+                    "source": "key",
+                    "reason": direction,
+                }
+                self._publish("media.volume.changed", payload)
+            except Exception:
+                pass
+        
             # Start continuous adjustment for key hold
             self._start_continuous_volume_adjustment(hwnd, direction)
-            
+        
             return success
         except Exception as e:
             self._logger.debug(f"Volume key press handling failed: {e}")
@@ -745,7 +813,11 @@ class MediaController:
     def handle_volume_key_release(self, hwnd: int) -> None:
         """Handle volume key release to stop continuous adjustment."""
         try:
-            self._stop_continuous_volume_adjustment(hwnd)
+            if hwnd in self._volume_hold_state:
+                self._stop_continuous_volume_adjustment(hwnd)
+            else:
+                # If hwnd changed during handoff, ensure no timers are left running
+                self.stop_all_continuous_volume_adjustments()
         except Exception as e:
             self._logger.debug(f"Volume key release handling failed: {e}")
 
@@ -772,6 +844,14 @@ class MediaController:
             else:
                 return False, "Target window is not a recognized media app"
         return self._send_media_command_safe(hwnd, command, app_name)
+
+    # Public wrapper expected by callers (e.g., OverlayHost key routing)
+    def send_media_command(self, hwnd: int, command: int) -> Tuple[bool, str]:
+        """Send a media command to the specified hwnd.
+
+        This thin wrapper restores the historical API expected by callers.
+        """
+        return self._send_command_for_hwnd(hwnd, command)
     
     def _send_browser_media_command(self, hwnd: int, command: int) -> bool:
         """Send media command to browser with enhanced child window enumeration."""
@@ -1039,39 +1119,9 @@ class MediaController:
             step = cfg_step if command == self.APPCOMMAND_VOLUME_UP else -cfg_step
             reason = 'up' if step > 0 else 'down'
             # Try per-app session volume via PyCAW (if available)
+            # Note: OSD event publishing is delegated to handle_volume_key_press for consistency
             try:
                 if session_volume.adjust_session_volume_for_hwnd(hwnd, step):
-                    # Get exact level when available
-                    try:
-                        level = session_volume.get_session_volume_for_hwnd(hwnd)
-                    except Exception:
-                        level = None
-                    # Get window title for better OSD display
-                    window_title = None
-                    try:
-                        if WIN_AVAILABLE:
-                            from utils.window_validation import get_window_title
-                            window_title = get_window_title(hwnd)
-                    except Exception:
-                        pass
-                    
-                    # Use window title if app_name is unknown
-                    display_name = app_name
-                    if app_name == "unknown" and window_title:
-                        display_name = window_title
-                    
-                    self._publish(
-                        'media.volume.changed',
-                        {
-                            'hwnd': hwnd,
-                            'app_name': display_name,
-                            'window_title': window_title,
-                            'level': level,
-                            'volume': level,
-                            'source': 'session',
-                            'reason': reason,
-                        },
-                    )
                     return True, f"Adjusted session volume for {app_name} ({reason})"
             except Exception:
                 # Already logged in session_volume

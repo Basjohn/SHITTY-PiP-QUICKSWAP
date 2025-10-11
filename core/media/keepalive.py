@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 from core.threading import ThreadManager
 from core.media.media_controller import MediaController, get_media_controller
 from utils.win.winmsg import is_process_responsive
@@ -89,7 +89,7 @@ class MediaPlayerKeepAlive:
             self._tdebug_keepalive = self._logger.debug
             self._tdebug_act = self._logger.debug
             self._dwarn_unresp = self._logger.warning
-        self._settings = SettingsManager()
+        self._settings = get_settings_manager()
         self._media_controller: Optional[MediaController] = None
         
         # Monitoring state

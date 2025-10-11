@@ -21,6 +21,7 @@ import weakref
 import os
 import shutil
 import ctypes
+import threading
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 from .types import CleanupProtocol, ResourceInfo, ResourceType
@@ -1186,6 +1187,8 @@ class ResourceManager:
             self._logger.error(f"enforce_z_order delegation failed: {e}")
             return False
 
+    # register_overlay is defined below with optional border_widget for compatibility
+
     def register_overlay(self, overlay_id: str, main_widget: Any, border_widget: Any | None = None) -> bool:
         """Register an overlay with the unified z-order manager.
 
@@ -1276,12 +1279,36 @@ class ResourceManager:
             result = func()
             self._publish_snapshot()
             return result
-        
-        # Lock-free: Direct call for now to avoid circular import
-        # TODO: Implement proper ThreadManager integration after circular import resolution
-        result = func()
-        self._publish_snapshot()
-        return result
+
+        # Dispatch to UI thread and wait for completion (single-writer policy)
+        done = threading.Event()
+        holder: Dict[str, Any] = {}
+
+        def _wrap():
+            try:
+                holder['result'] = func()
+            finally:
+                # Always publish snapshot after mutation
+                try:
+                    self._publish_snapshot()
+                finally:
+                    try:
+                        done.set()
+                    except Exception:
+                        pass
+
+        try:
+            # Use internal UI dispatcher (avoids circular import on ThreadManager)
+            self._run_on_ui(_wrap)
+        except Exception:
+            # Best-effort fallback: execute directly to avoid loss of mutation
+            result = func()
+            self._publish_snapshot()
+            return result
+
+        # Wait for UI execution to complete
+        done.wait(timeout=max(0.05, float(timeout)))
+        return holder.get('result')
 
     def _mutation_worker_loop(self) -> None:
         """Deprecated: no-op."""

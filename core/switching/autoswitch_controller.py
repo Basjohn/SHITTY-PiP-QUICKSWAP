@@ -6,7 +6,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QPoint, QSize
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 from core.graphics.overlay_manager import OverlayManager
 from core.threading import ThreadManager
 
@@ -19,9 +19,14 @@ from utils.window.monitors import find_monitor_for_window
 from utils.resource_manager import get_resource_manager, ResourceType
 
 
-class AutoswitchController(QObject):
+class ForegroundAutoswitchController(QObject):
     """
-    Centralized Autoswitch controller (scaffold).
+    Foreground-based autoswitch controller (focus change monitoring).
+
+    Monitors foreground window focus changes and automatically swaps overlays
+    when the user focuses a window that's currently displayed in an overlay.
+
+    NOTE: This is NOT related to closed-window monitoring (see ClosedWindowSwitchManager).
 
     - Observes foreground window changes using a Qt timer (polling)
     - Applies strict filtering to candidate windows
@@ -29,7 +34,7 @@ class AutoswitchController(QObject):
     - Safely delegates swapping to the overlay's _handle_swap_window (UI-thread safe)
     - Live settings via apply_settings(); reads 'features.autoswitch_enabled'
 
-    Explicit logging with 'AUTOSWITCH' prefix. No silent fallbacks.
+    Explicit logging with 'FOREGROUND_AUTOSWITCH' prefix. No silent fallbacks.
     """
 
     POLL_INTERVAL_MS = 250
@@ -37,8 +42,8 @@ class AutoswitchController(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self._logger = get_logger("AUTOSWITCH")
-        self._settings = SettingsManager()
+        self._logger = get_logger("FOREGROUND_AUTOSWITCH")
+        self._settings = get_settings_manager()
         self._overlay_manager = OverlayManager()
         self._rm = get_resource_manager()
         self._rm_id = None
@@ -57,11 +62,13 @@ class AutoswitchController(QObject):
         self._suppress_until_ms: float = 0.0
         self._suppress_last_seen: Optional[int] = None
 
-        # Register settings change handler for live enable/disable
+        # Register settings change handlers for live enable/disable and docking mode gating
         self._settings_key_enable = "features.autoswitch_enabled"
+        self._settings_key_docking_mode = "docking.mode"
         self._settings_handler = self._on_setting_changed
         try:
             self._settings.register_change_handler(self._settings_key_enable, self._settings_handler)
+            self._settings.register_change_handler(self._settings_key_docking_mode, self._settings_handler)
         except Exception as e:
             self._logger.error(f"Failed to register settings handler for {self._settings_key_enable}: {e}")
 
@@ -79,7 +86,7 @@ class AutoswitchController(QObject):
 
         self.apply_settings()
 
-        self._logger.debug("Initialized AutoswitchController")
+        self._logger.debug("Initialized ForegroundAutoswitchController")
 
     def shutdown(self) -> None:
         """Deterministically stop polling, unregister handlers, and cleanup resources."""
@@ -116,7 +123,7 @@ class AutoswitchController(QObject):
     def _on_setting_changed(self, key: str, value) -> None:
         """React to live changes for autoswitch enable flag, serialized on UI thread."""
         try:
-            if key != self._settings_key_enable:
+            if key not in (self._settings_key_enable, self._settings_key_docking_mode):
                 return
             # Ensure apply_settings runs on UI thread
             ThreadManager.run_on_ui_thread(self.apply_settings)
@@ -162,20 +169,41 @@ class AutoswitchController(QObject):
             self._logger.error(f"Failed to arm suppression: {e}")
 
     def _get_active_overlay(self):
-        """
-        Get the currently active overlay from the OverlayManager.
-        
-        Returns:
-            Optional[Overlay]: The active overlay instance, or None if no overlay is active.
+        """Get the currently active overlay from the overlay manager."""
+        try:
+            return self._overlay_manager.get_active_overlay()
+        except Exception as e:
+            self._logger.error(f"Failed to get active overlay: {e}")
+            return None
+
+    def _get_active_docking_manager(self):
+        """Get the active docking manager if docking mode is active."""
+        try:
+            from utils.resource_manager import find_resource_by_description
+            docking_manager = find_resource_by_description("DockingOverlayManager")
+            if docking_manager and getattr(docking_manager, '_is_active', False):
+                return docking_manager
+        except Exception as e:
+            self._logger.debug(f"Failed to get docking manager: {e}")
+        return None
+
+    # --- Internal helpers -------------------------------------------------
+    def _is_overlay_locked(self, overlay) -> bool:
+        """Return True if the active overlay is individually locked.
+
+        Supports both direct DWM overlays (IntegratedDWMOverlay with `_is_window_locked`)
+        and docking overlays (DockingOverlay wrapper exposing `_dwm_overlay`).
         """
         try:
-            active_id = getattr(self._overlay_manager, "_active_overlay_id", None)
-            if not active_id:
-                return None
-            overlays = getattr(self._overlay_manager, "_overlays", {})
-            return overlays.get(active_id)
+            # Direct backend overlay
+            if hasattr(overlay, "_is_window_locked"):
+                return bool(getattr(overlay, "_is_window_locked", False))
+            # Docking wrapper → backend
+            if hasattr(overlay, "_dwm_overlay") and getattr(overlay, "_dwm_overlay") is not None:
+                return bool(getattr(overlay._dwm_overlay, "_is_window_locked", False))
         except Exception:
-            return None
+            return False
+        return False
 
     def _poll_tick(self) -> None:
         """Self-rescheduling polling tick using ThreadManager.single_shot.
@@ -199,17 +227,30 @@ class AutoswitchController(QObject):
     def apply_settings(self) -> None:
         """Apply current settings and start/stop observation accordingly."""
         try:
-            enabled = bool(self._settings.get("features.autoswitch_enabled", False))
+            enabled_base = bool(self._settings.get("features.autoswitch_enabled", False))
+            # Gate autoswitch when docking cycle mode is active
+            cycle_active = False
+            try:
+                docking_mode = str(self._settings.get("docking.mode", "normal") or "normal").lower()
+                if docking_mode == "cycle":
+                    # Only gate if docking manager is active
+                    dm = self._get_active_docking_manager()
+                    cycle_active = dm is not None and getattr(dm, "is_active", lambda: False)()
+            except Exception:
+                cycle_active = False
+
+            enabled = enabled_base and not cycle_active
             if enabled != self._enabled:
                 self._enabled = enabled
                 if self._enabled:
                     if not self._polling_active:
-                        self._logger.debug("Enabling autoswitch observation")
+                        self._logger.debug("Enabling foreground autoswitch observation")
                         self._polling_active = True
                         ThreadManager.single_shot(self.POLL_INTERVAL_MS, self._poll_tick)
                 else:
                     if self._polling_active:
-                        self._logger.debug("Disabling autoswitch observation")
+                        why = "docking cycle mode" if cycle_active else "setting disabled"
+                        self._logger.debug(f"Disabling autoswitch observation ({why})")
                         self._polling_active = False
                 # Reset state when toggled
                 self._last_seen_hwnd = None
@@ -281,6 +322,79 @@ class AutoswitchController(QObject):
         if self._last_seen_hwnd == hwnd:
             return
 
+        # Check for active docking mode first
+        docking_manager = self._get_active_docking_manager()
+        if docking_manager:
+            # Delegate to docking mode autoswitch logic with correct semantics
+            try:
+                # Get current overlay assignments (all overlays A/B/C/D/E)
+                main_overlay_hwnd = None
+                if hasattr(docking_manager, '_main_overlay') and docking_manager._main_overlay:
+                    main_overlay_hwnd = getattr(docking_manager._main_overlay, '_target_hwnd', None)
+                
+                # Check secondary overlays too
+                secondary_matches = []
+                if hasattr(docking_manager, '_secondary_overlays'):
+                    for i, overlay in enumerate(docking_manager._secondary_overlays):
+                        if overlay:
+                            target_hwnd = getattr(overlay, '_target_hwnd', None)
+                            if target_hwnd == hwnd:
+                                secondary_matches.append((f'secondary_{i}', overlay))
+                
+                # Check if focused window matches main overlay
+                if main_overlay_hwnd == hwnd:
+                    # Check if main overlay is locked - if so, skip autoswitch
+                    try:
+                        is_locked = False
+                        if hasattr(docking_manager, 'is_overlay_locked'):
+                            is_locked = docking_manager.is_overlay_locked('main')
+                        self._logger.debug(f"Docking autoswitch: main overlay lock check - is_locked={is_locked}, has_method={hasattr(docking_manager, 'is_overlay_locked')}")
+                        
+                        if is_locked:
+                            self._logger.info(f"FOREGROUND_AUTOSWITCH BLOCKED: Main overlay is locked - skipping cycle for hwnd {hwnd}")
+                        else:
+                            self._logger.debug(f"Docking autoswitch: focusing same window {hwnd} as main overlay - triggering cycle")
+                            docking_manager.handle_autoswitch_event(hwnd)
+                    except Exception as e:
+                        self._logger.error(f"Lock check failed: {e}")
+                        # Fall back to normal behavior
+                        self._logger.debug(f"Docking autoswitch: focusing same window {hwnd} as main overlay - triggering cycle")
+                        docking_manager.handle_autoswitch_event(hwnd)
+                
+                # Check if focused window matches any secondary overlay (B/C/D/E)
+                elif secondary_matches:
+                    for overlay_id, overlay in secondary_matches:
+                        try:
+                            is_locked = False
+                            if hasattr(docking_manager, 'is_overlay_locked'):
+                                is_locked = docking_manager.is_overlay_locked(overlay_id)
+                            
+                            if is_locked:
+                                self._logger.info(f"FOREGROUND_AUTOSWITCH BLOCKED: Overlay {overlay_id} is locked - skipping swap for hwnd {hwnd}")
+                            else:
+                                self._logger.debug(f"Docking autoswitch: focusing window {hwnd} in {overlay_id} - triggering swap")
+                                # Trigger Normal mode swap for this secondary overlay
+                                if hasattr(docking_manager, '_normal_mode_swap_with_foreground'):
+                                    docking_manager._normal_mode_swap_with_foreground(overlay_id)
+                                else:
+                                    self._logger.warning("Docking manager missing _normal_mode_swap_with_foreground method")
+                        except Exception as e:
+                            self._logger.error(f"Secondary overlay {overlay_id} autoswitch failed: {e}")
+                
+                else:
+                    self._logger.debug(f"Docking autoswitch: focusing different window {hwnd} (main={main_overlay_hwnd}) - no action")
+                    # Just update MRU for the focused window
+                    try:
+                        get_mru_manager().record(hwnd)
+                    except Exception:
+                        pass
+                
+                self._last_seen_hwnd = hwnd
+                return
+            except Exception as e:
+                self._logger.error(f"Docking mode autoswitch failed: {e}")
+                # Fall through to regular overlay handling
+        
         overlay = self._get_active_overlay()
         if overlay is None:
             # No active overlay; nothing to do
@@ -290,8 +404,8 @@ class AutoswitchController(QObject):
         try:
             # Check global overlay lock
             is_globally_locked = self._overlay_manager.is_overlay_locked()
-            # Check individual overlay lock state
-            is_individually_locked = getattr(overlay, "_is_window_locked", False)
+            # Check individual overlay lock state (supports docking wrapper by dereferencing backend)
+            is_individually_locked = self._is_overlay_locked(overlay)
             
             if is_globally_locked or is_individually_locked:
                 try:
@@ -576,10 +690,11 @@ class AutoswitchController(QObject):
             self._logger.error(f"Autoswitch emergency swap failed: {e}", exc_info=True)
 
 # Convenience accessor
-_def_instance: Optional[AutoswitchController] = None
+_foreground_autoswitch_controller: Optional[ForegroundAutoswitchController] = None
 
-def get_autoswitch_controller() -> AutoswitchController:
-    global _def_instance
-    if _def_instance is None:
-        _def_instance = AutoswitchController()
-    return _def_instance
+def get_foreground_autoswitch_controller() -> ForegroundAutoswitchController:
+    """Get the global foreground autoswitch controller instance."""
+    global _foreground_autoswitch_controller
+    if _foreground_autoswitch_controller is None:
+        _foreground_autoswitch_controller = ForegroundAutoswitchController()
+    return _foreground_autoswitch_controller

@@ -9,6 +9,7 @@ from core.logging import get_logger, throttled, log_dedupe
 from typing import Callable, Dict, Tuple, Any
 
 from PySide6.QtCore import QObject, Signal
+import threading
 
 import win32api
 import win32con
@@ -60,6 +61,9 @@ class HotkeyManager(QObject):
         self._message_thread: Optional[object] = None
         self._message_thread_id: Optional[int] = None
         self._message_thread_running: bool = False
+        # Minimal locks for WM_APP legacy path (queue path stays lock-free)
+        self._hotkey_lock = threading.RLock()
+        self._cmd_lock = threading.RLock()
         # Custom WM_APP messages for marshalled commands
         self._WM_APP_REGISTER = win32con.WM_APP + 1
         self._WM_APP_UNREGISTER = win32con.WM_APP + 2
@@ -98,15 +102,35 @@ class HotkeyManager(QObject):
         self._resource_id: Optional[Any] = None
         try:
             rm = get_resource_manager()
-            self._resource_id = rm.register(
-                self,
-                ResourceType.CUSTOM,
-                "HotkeyManager singleton",
-                cleanup_handler=lambda obj: obj.shutdown(),
-                tags={"hotkeys", "manager"},
-            )
+            try:
+                # Preferred: register the manager directly
+                self._resource_id = rm.register(
+                    self,
+                    ResourceType.CUSTOM,
+                    "HotkeyManager singleton",
+                    cleanup_handler=lambda obj: obj.shutdown(),
+                    tags={"hotkeys", "manager"},
+                    cleanup_priority=10  # Ensure hotkeys stop before thread pools
+                )
+                logger.debug("HotkeyManager registered with ResourceManager (direct)")
+            except Exception as inner:
+                # Fallback: register a tiny weakref-able proxy that shuts down the manager
+                class _HKProxy:
+                    __slots__ = ("_target",)
+                    def __init__(self, target):
+                        self._target = target
+                proxy = _HKProxy(self)
+                self._resource_id = rm.register(
+                    proxy,
+                    ResourceType.CUSTOM,
+                    "HotkeyManager proxy",
+                    cleanup_handler=lambda p: getattr(p, "_target", None) and getattr(p._target, "shutdown", lambda: None)(),
+                    tags={"hotkeys", "manager", "proxy"},
+                    cleanup_priority=10
+                )
+                logger.debug(f"HotkeyManager registered with ResourceManager via proxy: {inner}")
         except Exception as e:
-            logger.debug(f"HotkeyManager ResourceManager registration skipped: {e}")
+            logger.debug(f"HotkeyManager ResourceManager registration failed: {e}")
         self._initialized = True
         # HWND for message-only window (created on message thread)
         self._hwnd: Optional[int] = None
@@ -207,13 +231,17 @@ class HotkeyManager(QObject):
                     # If keyboard registration fails, fall through to system attempt
                 ok_sys = self._register_system_hotkey(hotkey_id, sequence)
                 if not ok_sys:
-                    logger.error(f"System hotkey registration failed for {hotkey_id} with sequence '{sequence}'")
-                    # Fallback: keyboard library combo hotkey with suppression
+                    # Attempt keyboard library combo fallback. Only escalate to error if fallback also fails.
                     kb_ok = self._register_keyboard_combo(hotkey_id, sequence)
                     if not kb_ok:
                         if hotkey_id in self._hotkeys:
                             del self._hotkeys[hotkey_id]
+                        logger.error(
+                            f"Failed to register system hotkey AND keyboard fallback for {hotkey_id} with sequence '{sequence}'"
+                        )
                         return False
+                    # Fallback succeeded; note at info level to avoid noisy error logs for expected paths
+                    logger.info(f"Using keyboard combo fallback for {hotkey_id}: '{sequence}' (system registration unavailable)")
                     logger.debug(f"Registered keyboard combo fallback for {hotkey_id}: '{sequence}'")
         
         logger.debug(f"Registered hotkey: {hotkey_id}")
@@ -452,11 +480,16 @@ class HotkeyManager(QObject):
 
             # Prefer SPSC queue
             if self._cmd_queue is not None:
-                pushed = self._cmd_queue.try_push(("unregister", hotkey_id, win32_hotkey_id, result))
+                evt = threading.Event()
+                pushed = self._cmd_queue.try_push(("unregister", hotkey_id, win32_hotkey_id, evt, result))
                 if not pushed:
                     logger.debug("Hotkey unregister queue full; falling back to WM_APP path")
                 else:
-                    # Lock-free: Use ThreadManager callback pattern instead of blocking wait
+                    # Wait briefly for the hotkey thread to process the command
+                    try:
+                        evt.wait(0.2)
+                    except Exception:
+                        pass
                     ok = bool(result.get("ok"))
                     # Remove mapping regardless to avoid staleness
                     # Lock-free: UI thread only access
@@ -517,14 +550,10 @@ class HotkeyManager(QObject):
                     self._tm.submit_task(ThreadPoolType.IO, _wrap, task_id="HotkeysMessageLoop")
                     logger.debug("Started hotkey message loop via ThreadManager IO pool")
                 except Exception as e:
-                    logger.error(f"ThreadManager submission failed, falling back to raw thread: {e}")
-                    # Fallback to ThreadManager worker pool
-                    self._tm.submit_to_pool(ThreadPoolType.IO, _runner)
-                    self._message_thread = "ThreadManager-IO"
+                    logger.error(f"ThreadManager submission failed: {e}")
             else:
-                # Use ThreadManager worker pool for message loop
-                self._tm.submit_to_pool(ThreadPoolType.IO, _runner)
-                self._message_thread = "ThreadManager-IO"
+                # ThreadManager unavailable; cannot start message loop
+                logger.error("ThreadManager unavailable; hotkey message loop not started")
         except Exception as e:
             self._message_thread_running = False
             logger.error(f"Failed to start message loop: {e}")
@@ -540,8 +569,63 @@ class HotkeyManager(QObject):
                     win32api.PostThreadMessage(int(self._message_thread_id), win32con.WM_QUIT, 0, 0)
             except Exception:
                 pass
+            # Also wake the thread's GetMessage by posting a benign message
+            try:
+                if self._hwnd:
+                    # WM_NULL ensures the queue wakes without side effects
+                    win32gui.PostMessage(self._hwnd, win32con.WM_NULL, 0, 0)
+            except Exception:
+                pass
+            # Final fallback: post a WM_APP no-op to the thread
+            try:
+                if self._message_thread_id:
+                    win32api.PostThreadMessage(int(self._message_thread_id), int(getattr(win32con, 'WM_APP', 0x8000)), 0, 0)
+            except Exception:
+                pass
         except Exception:
             pass
+
+    # Public shutdown for ResourceManager cleanup --------------------------------
+    def shutdown(self) -> None:
+        """Cleanly shutdown hotkey manager and stop its message loop.
+
+        Ensures that any long-running IO-pool task (the hotkey message loop)
+        exits promptly so the IO pool can shut down without stalling.
+        """
+        try:
+            logger.debug("HotkeyManager.shutdown called")
+            # 1) Proactively signal the message loop to exit before handler teardown
+            try:
+                # Best-effort: send explicit 'shutdown' command via SPSC
+                if getattr(self, "_cmd_queue", None) is not None:
+                    try:
+                        self._cmd_queue.try_push(("shutdown",))
+                    except Exception:
+                        pass
+                # Also post WM_QUIT directly
+                self._stop_message_loop()
+            except Exception:
+                pass
+
+            # 2) Unregister all hotkeys and keyboard handlers (idempotent)
+            try:
+                self.clear_hotkeys()
+            except Exception:
+                # Best effort: continue to force-stop the loop
+                pass
+            # 3) As a final nudge, post WM_QUIT directly if we have a thread id
+            try:
+                if self._message_thread_id:
+                    win32api.PostThreadMessage(int(self._message_thread_id), win32con.WM_QUIT, 0, 0)
+            except Exception:
+                pass
+            # Clear state markers
+            try:
+                self._message_thread_running = False
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"HotkeyManager.shutdown encountered an error: {e}")
 
     def _message_loop(self) -> None:
         """Message loop for processing hotkey events and marshalled commands."""
@@ -643,12 +727,14 @@ class HotkeyManager(QObject):
                     pass
 
             while True:
-                # block until a message arrives
+                # Block until a message arrives; returns 0 on WM_QUIT
                 res = win32gui.GetMessage(None, 0, 0)
+                # If WM_QUIT or error (0 or False-y), exit the loop to let thread end
+                if not res:
+                    break
+                # Also honor external stop signal promptly
                 if not self._message_thread_running:
                     break
-                if not res:
-                    continue
                 # Unpack message in a version-tolerant way
                 msg_id = None
                 wparam = None
@@ -804,31 +890,7 @@ class HotkeyManager(QObject):
             self._message_thread_id = None
 
     # -------------------- Lifecycle --------------------
-    def shutdown(self) -> None:
-        """Gracefully stop the message loop and unregister resources."""
-        try:
-            self.clear_hotkeys()
-        except Exception:
-            pass
-        try:
-            self._stop_message_loop()
-        except Exception:
-            pass
-        # Join message thread briefly to avoid pool shutdown races
-        try:
-            t = self._message_thread
-            if t and t.is_alive():
-                t.join(timeout=1.0)
-        except Exception:
-            pass
-        # Best-effort unregister from ResourceManager
-        try:
-            if self._resource_id is not None:
-                rm = get_resource_manager()
-                rm.unregister(self._resource_id, force=True)
-                self._resource_id = None
-        except Exception:
-            pass
+    # Note: duplicate shutdown() method removed; the primary shutdown() above is authoritative.
 
     # -------------------- Keyboard library backend (single-key suppression) --------------------
     def _is_single_key(self, sequence: str) -> Tuple[bool, Optional[str]]:
@@ -842,17 +904,22 @@ class HotkeyManager(QObject):
         if not token:
             return False
         t = token.lower()
-        if t in {"-", "=", "oem_minus", "oem_plus", "minus", "equal", "equals"}:
+        # Core symbol keys (use base symbols that work with keyboard library)
+        if t in {"-", "="}:
+            return True
+        # Legacy OEM names still considered safe but will be normalized
+        if t in {"oem_minus", "oem_plus", "minus", "equal", "equals"}:
             return True
         # Allow space as a safe single for keyboard-backend suppression
         if t == "space":
             return True
-        # Treat OEM_3 (backtick/tilde) as safe single; we will bind tight aliases only
+        # Treat backtick/OEM_3 as safe single (normalize to base symbol)
         if t in {"`", "~", "tilde", "grave", "oem_3"}:
             return True
         # Optional: allow digits as safe singles if enabled in settings
         if self._allow_single_digits and len(t) == 1 and t.isdigit():
             return True
+        # Function keys
         if t.startswith("f") and t[1:].isdigit():
             try:
                 fnum = int(t[1:])
@@ -862,15 +929,21 @@ class HotkeyManager(QObject):
         return False
 
     def _aliases_for_single_key(self, token: str) -> Tuple[str, ...]:
-        """Return minimal aliases for a given safe single key token."""
+        """Return minimal aliases for a given safe single key token.
+        
+        Only returns variants that are known to work with the keyboard library
+        to avoid debug spam from invalid key names.
+        """
         t = token.lower()
         if t in {"-", "oem_minus", "minus"}:
-            return ("-", "oem_minus", "minus")
+            # Only use variants known to work with keyboard library
+            return ("-",)
         if t in {"=", "oem_plus", "equal", "equals"}:
-            return ("=", "oem_plus", "equal", "equals")
+            # Only use variants known to work with keyboard library  
+            return ("=",)
         if t in {"`", "~", "tilde", "grave", "oem_3"}:
-            # Backtick/OEM_3: use only tokens known to the keyboard backend
-            return ("`", "oem_3", "grave")
+            # Backtick: use only the base symbol which works reliably
+            return ("`",)
         # Function keys: no aliases needed
         return (t,)
 

@@ -193,49 +193,39 @@ class SystemTrayManager(QObject):
         
         for action in self._actions.values():
             if action:
-                action.deleteLater()
+                try:
+                    action.deleteLater()
+                except RuntimeError:
+                    # Qt already deleted the action during parent cleanup
+                    pass
         
         self._actions.clear()
 
     def _restore_hidden_overlays(self) -> None:
-        """Restore all hidden overlays by making them visible."""
+        """Restore all hidden overlays using OverlayStateManager.
+        
+        Uses proper state restoration instead of manually showing widgets.
+        Falls back to MRU recreation if no saved state exists.
+        """
         try:
-            from core.graphics.overlay_manager import OverlayManager
+            from core.overlay_state_manager import get_overlay_state_manager
             from core.logging import get_logger
             logger = get_logger("SystemTray")
             
-            om = OverlayManager()
-            if not om:
-                logger.error("OverlayManager not available for overlay restoration")
-                return
+            state_mgr = get_overlay_state_manager()
             
-            # Get all overlays and show hidden ones
-            overlays = om.get_all_overlays()
-            restored_count = 0
-            
-            for overlay in overlays:
-                try:
-                    # Check if overlay has a host widget that can be shown
-                    if hasattr(overlay, '_host') and overlay._host:
-                        host = overlay._host
-                        if hasattr(host, 'isVisible') and not host.isVisible():
-                            host.show()
-                            restored_count += 1
-                            logger.debug(f"Restored hidden overlay: {getattr(overlay, 'id', 'unknown')}")
-                    elif hasattr(overlay, 'show') and hasattr(overlay, 'isVisible'):
-                        if not overlay.isVisible():
-                            overlay.show()
-                            restored_count += 1
-                            logger.debug(f"Restored hidden overlay: {getattr(overlay, 'id', 'unknown')}")
-                except Exception as e:
-                    logger.debug(f"Failed to restore overlay {getattr(overlay, 'id', 'unknown')}: {e}")
-            
-            if restored_count > 0:
-                logger.info(f"Restored {restored_count} hidden overlays")
+            # Try to restore from saved state
+            if state_mgr.are_overlays_hidden():
+                if state_mgr.show_all_overlays():
+                    logger.info("Restored overlays from saved state")
+                    return
+                else:
+                    logger.warning("State restoration failed, falling back to MRU recreation")
             else:
-                logger.debug("No hidden overlays found to restore")
-                # If no hidden overlays, recreate the most recent overlay from MRU
-                self._recreate_most_recent_overlay(logger)
+                logger.debug("No hidden overlays to restore, creating from MRU")
+            
+            # Fallback: recreate from MRU if no saved state
+            self._recreate_most_recent_overlay(logger)
                 
         except Exception as e:
             from core.logging import get_logger

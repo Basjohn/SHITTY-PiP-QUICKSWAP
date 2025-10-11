@@ -66,7 +66,12 @@ class ApplicationCore:
         try:
             # Initialize other core services
             self._logger.info("Initializing resource manager...")
-            self._resources: IResourceManager = resources.ResourceManager()
+            # IMPORTANT: use the global singleton, not a new instance
+            self._resources: IResourceManager = resources.get_resource_manager()
+            try:
+                self._logger.debug(f"ResourceManager singleton id={id(self._resources)}")
+            except Exception:
+                pass
             
             self._logger.info("Initializing thread manager...")
             self._threads: IThreadManager = threading.get_thread_manager()
@@ -104,7 +109,7 @@ class ApplicationCore:
 
             # Defer window-mode features until a window overlay is used
             self._quickswitch_controller = None  # type: ignore[assignment]
-            self._autoswitch_controller = None   # type: ignore[assignment]
+            self._foreground_autoswitch_controller = None   # type: ignore[assignment]
             self._focus_tracker = None           # type: ignore[assignment]
             self._media_keepalive = None         # type: ignore[assignment]
             self._window_mode_features_ready: bool = False
@@ -171,11 +176,11 @@ class ApplicationCore:
         return self._quickswitch_controller
 
     @property
-    def autoswitch_controller(self):
-        """Get the AutoSwitch controller singleton."""
+    def foreground_autoswitch_controller(self):
+        """Get the ForegroundAutoSwitch controller singleton."""
         # Ensure lazy initialization for window-mode features
         self.ensure_window_mode_features()
-        return self._autoswitch_controller
+        return self._foreground_autoswitch_controller
 
     def ensure_window_mode_features(self) -> None:
         """Lazily initialize controllers used only in window mode.
@@ -191,11 +196,11 @@ class ApplicationCore:
             # Switching controllers
             from ..switching.quickswitch_controller import get_quickswitch_controller
             from ..switching.focus_tracker import get_focus_tracker
-            from ..switching.autoswitch_controller import get_autoswitch_controller
+            from ..switching.autoswitch_controller import get_foreground_autoswitch_controller
 
             self._quickswitch_controller = get_quickswitch_controller()
             self._focus_tracker = get_focus_tracker()
-            self._autoswitch_controller = get_autoswitch_controller()
+            self._foreground_autoswitch_controller = get_foreground_autoswitch_controller()
 
             # Media system (keepalive) remains gated by settings
             self._initialize_media_system()

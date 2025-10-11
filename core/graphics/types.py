@@ -14,6 +14,7 @@ class OverlayType(Enum):
     WINDOW = auto()      # Regular window overlay
     MONITOR = auto()     # Full-screen overlay on a monitor
     BORDER = auto()      # Border around a window
+    DOCKING = auto()     # Three-overlay docking mode system
     CUSTOM = auto()      # Custom overlay with custom behavior
 
 
@@ -51,6 +52,17 @@ class OverlayConfig:
     
     # Custom properties
     properties: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DockingConfig:
+    """Configuration specific to docking mode overlays."""
+    main_overlay_id: str = ""
+    secondary_overlay_ids: list[str] = field(default_factory=list)
+    size_ratios: list[float] = field(default_factory=lambda: [1.0, 0.7, 0.5])  # 100%, 70%, 50%
+    positioning_mode: str = "auto"  # auto, manual
+    spacing: int = 2  # pixels between overlays
+    mru_capacity: int = 12  # expanded MRU capacity for 3 overlays
 
 
 @dataclass

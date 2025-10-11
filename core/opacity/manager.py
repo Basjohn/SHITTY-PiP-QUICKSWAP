@@ -6,7 +6,7 @@ and overlays, independent of any specific UI instance.
 """
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 from core.threading import ThreadManager
 from core.hotkeys.manager import HotkeyManager
 from utils.resource_manager import get_resource_manager, ResourceType
@@ -55,7 +55,7 @@ class OpacityManager(QObject):
             
         super().__init__()
         self._logger = get_logger(__name__)
-        self._settings_manager = SettingsManager()
+        self._settings_manager = get_settings_manager()
         # Resource registration for lifecycle management
         self._resource_id = None
         try:
@@ -70,12 +70,12 @@ class OpacityManager(QObject):
         except Exception:
             # Best-effort registration
             self._resource_id = None
-        # Normalize stored opacity to minimum 10% for self-healing of legacy values
+        # Normalize stored opacity to minimum 1% for self-healing of legacy values
         try:
             stored = self._settings_manager.get("appearance.opacity", 100)
-            if isinstance(stored, (int, float)) and stored < 10:
-                self._logger.debug(f"[OPACITY] Normalizing stored value from {stored}% to 10%")
-                self._settings_manager.set("appearance.opacity", 10)
+            if isinstance(stored, (int, float)) and stored < 1:
+                self._logger.debug(f"[OPACITY] Normalizing stored value from {stored}% to 1%")
+                self._settings_manager.set("appearance.opacity", 1)
                 # Save immediately to persist correction
                 self._settings_manager.save()
         except Exception:
@@ -132,7 +132,7 @@ class OpacityManager(QObject):
                 self._logger.warning("Invalid increase hotkey value, skipping registration")
                 return
 
-            hm = HotkeyManager()
+            hm = HotkeyManager()  # Singleton via __new__
             # Keyboard-backend safe single-key registrations with suppression
             hm.register_hotkey(
                 self._hk_id_decrease,
@@ -191,7 +191,7 @@ class OpacityManager(QObject):
         self._dec_tick_index = 0
         # If already at lower bound, stop immediately
         try:
-            if self.get_opacity() <= 10:
+            if self.get_opacity() <= 1:
                 self._decrease_key_pressed = False
                 return
         except Exception:
@@ -207,9 +207,9 @@ class OpacityManager(QObject):
         self._decrease_opacity()
         # Stop at lower bound without looping
         try:
-            if self.get_opacity() <= 10:
+            if self.get_opacity() <= 1:
                 self._decrease_key_pressed = False
-                self._logger.debug("[OPACITY] Hit lower bound 10%; stopping decrease ticks")
+                self._logger.debug("[OPACITY] Hit lower bound 1%; stopping decrease ticks")
                 # Persist final value once when reaching bound
                 try:
                     self._settings_manager.save()
@@ -292,7 +292,7 @@ class OpacityManager(QObject):
         # 1-1-1-2 cadence -> average +25% speed over base step=1
         step = 2 if (self._dec_tick_index % 4 == 3) else 1
         self._dec_tick_index += 1
-        new_opacity = max(10, current_opacity - step)
+        new_opacity = max(1, current_opacity - step)
         self.set_opacity(new_opacity)
     
     def increase_opacity(self, amount: int = 5) -> None:
@@ -304,12 +304,12 @@ class OpacityManager(QObject):
     def decrease_opacity(self, amount: int = 1) -> None:
         """Decrease the opacity by the specified amount."""
         current_opacity = self._settings_manager.get("appearance.opacity", 100)
-        new_opacity = max(10, current_opacity - amount)
+        new_opacity = max(1, current_opacity - amount)
         self.set_opacity(new_opacity)
     
     def set_opacity(self, percent: int) -> None:
-        """Set the opacity to the given percentage (10-100)."""
-        percent = max(10, min(100, percent))
+        """Set the opacity to the given percentage (1-100)."""
+        percent = max(1, min(100, percent))
         # Read current to avoid redundant updates/logging
         current = self._settings_manager.get("appearance.opacity", 100)
         if current == percent:
@@ -319,7 +319,7 @@ class OpacityManager(QObject):
         # Do NOT save immediately on each tick; batch-save on key release or bounds
         self._settings_manager.set("appearance.opacity", percent, save_immediately=False)
         # Log at bounds for validation
-        if percent in (10, 100):
+        if percent in (1, 100):
             self._logger.debug(f"[OPACITY] set -> {percent}%")
         self.opacityChanged.emit(percent)
     
@@ -330,7 +330,7 @@ class OpacityManager(QObject):
     def _unregister_hotkeys(self) -> None:
         """Unregister opacity hotkeys via HotkeyManager."""
         try:
-            hm = HotkeyManager()
+            hm = HotkeyManager()  # Singleton via __new__
             try:
                 hm.unregister_hotkey(self._hk_id_decrease)
             except Exception:

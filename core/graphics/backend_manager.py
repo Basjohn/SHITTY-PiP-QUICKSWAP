@@ -202,6 +202,15 @@ class BackendManager:
         # Handle None backend parameter (defensive fix for overlay recreation)
         if preferred is None:
             preferred = BackendType.AUTO
+        
+        # Special handling for docking mode - prefer DWM backend
+        if overlay_type == OverlayType.DOCKING:
+            dwm_info = self._backends.get(BackendType.DWM)
+            if dwm_info and dwm_info.supported and dwm_info.backend_class:
+                logger.debug("Selected DWM backend for docking mode")
+                return dwm_info.backend_class
+            else:
+                logger.warning("DWM backend not available for docking mode, falling back to auto selection")
             
         # If a specific backend is requested, try to use it
         if preferred != BackendType.AUTO:

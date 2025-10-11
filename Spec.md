@@ -13,11 +13,122 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Hardware-Accelerated Rendering**: DXGI-only capture via dxcam (CPU-copy frames). No WGC. No swapchain presenter.
 - **Multi-Monitor Support**: Full support for multiple monitor configurations with independent settings
 - **DPI Awareness**: Proper handling of high-DPI displays and scaling
+- **Docking Mode**: Multi-overlay system with three synchronized overlays (main 100%, secondary 70%/50% size ratios)
+  - **CENTRALIZED ARCHITECTURE POLICY**: All MRU management, switching, and app instance injection must use centralized core modules
+  - **MRU SINGLE SOURCE OF TRUTH** (CRITICAL - see `audits/mru_single_source_of_truth_COMPLETE.md`):
+    - **POLICY**: `MRUManager` is the ONLY storage for window HWND MRU - no local caches permitted
+    - **DockingManager**: Reads via `_get_current_mru()` helper, writes via `MRUManager.record()` or `_reorder_mru()`
+    - **OverlayManager**: Reads via `get_mru_window_list()`, writes via `MRUManager.record()`
+    - **NO LISTENERS**: Eliminated push/callback system - pull-based on demand only
+    - **NO SYNCHRONIZATION**: No sync logic needed - impossible to have stale data
+    - **NO LOCAL LISTS**: Removed `_mru_list`, `_on_mru_changed()`, suppression flags
+    - **BENEFITS**: No stale data, no race conditions, no sync bugs, always consistent
+    - **ARCHITECTURE**: `FocusTracker` → `MRUManager` (write) ← `DockingManager` + `OverlayManager` (read)
+  - **Switching Integration**: Delegates all quickswitch operations to `core.switching.quickswitch_controller.QuickSwitchController`
+  - **HIDE/SHOW INTEGRATION POLICY** (CRITICAL):
+    - **SINGLE IMPLEMENTATION**: `OverlayStateManager` is the ONLY hide/show implementation
+    - **UNIFIED USAGE**: Context menu, tray menu, and Ctrl+Shift+H hotkey ALL use `OverlayStateManager`
+    - **NO SIMPLE .hide()**: Never use simple `.hide()` calls - always use state manager for proper capture/restore
+    - **STATE CAPTURE**: Captures geometry, opacity, locks, window assignments, Normal mode assignments
+    - **STATE RESTORATION**: Full restoration including window validation and MRU seeding
+    - **COMPONENTS**:
+      - `HideShowController`: Owns Ctrl+Shift+H hotkey, delegates to `OverlayStateManager`
+      - `DockingManager.hide_all_overlays()`: Calls `OverlayStateManager.hide_all_overlays()`
+      - `TrayManager._restore_hidden_overlays()`: Calls `OverlayStateManager.show_all_overlays()`
+      - Context menu: Routes to manager which uses state manager
+  - **MODE SWITCHING POLICY** (CRITICAL):
+    - **CLEAN TRANSITIONS**: All mode transitions must destroy existing overlays before creating new ones
+    - **IMPLEMENTATION**: `MainDialog._destroy_all_existing_overlays()` called before each creation
+    - **DESTRUCTION ORDER**:
+      1. Check and destroy active docking system via `DockingOverlayManager.destroy_docking_system()`
+      2. Close all single overlays via `OverlayManager.get_all_overlays()` and `overlay.close()`
+    - **MODES**: Window → Monitor, Window → Docking, Monitor → Docking, etc. all follow this pattern
+    - **RESULT**: No orphaned overlays, clean resource management, proper state transitions
+  - **CONTEXT MENU INTEGRATION POLICY**:
+    - **SWITCH TO SINGLE OVERLAY**: Enabled in docking mode context menus
+    - **IMPLEMENTATION**: `_handle_switch_to_single_overlay()` in `DockingOverlay`
+    - **BEHAVIOR**: Preserves current main overlay's window when switching to single mode
+    - **VALIDATION**: Validates preserved window is still valid before creating single overlay
+    - **CALLBACK REGISTRATION**: Must be in docking config `actions` dict for context menu visibility
+  - **App Instance Injection**: Uses centralized provider pattern from main overlay manager for context menu functionality
+  - **Debug Log Suppression**: Uses `utils.debug.log_suppressor` to reduce excessive debug spam while preserving error/warning visibility
+  - **Screen-Aware Positioning**: Automatic inward/outward positioning based on screen boundaries with proper bounds validation to prevent overlay C overlap/shifting during resize
+  - **Vertical Alignment Policy**: Secondary overlays align to main overlay's top or bottom edge (adaptive based on nearest corner). All overlays (main and secondaries) can extend below taskbar boundary and rely on Z-order enforcement to stay visible above taskbar. Simple screen bounds check prevents extending beyond physical display edges.
+  - **Z-Order Enforcement Policy** (CRITICAL - see `audits/docking_z_order_investigation.md`):
+    - All overlays (main and secondary) use `Qt.WindowStaysOnTopHint` flag
+    - All overlays register with unified `ZOrderManager` on creation
+    - CRITICAL: Explicit `ZOrderPriority.CRITICAL` enforcement after `show()` calls
+    - Immediate `SetWindowPos(HWND_TOPMOST)` bypasses debouncing to prevent taskbar coverage
+    - Without explicit enforcement, debounced z-order allows overlays to appear below taskbar
+    - Main overlay enforced once after show, secondaries enforced in loop
+  - **Single Positioning Source (Policy)**: The only positioning logic lives in `core/graphics/docking/manager.py::sync_overlay_properties()`. All legacy positioners are removed/ignored. The method emits `FIT` and `POSITION` diagnostics and performs min-size-aware fit scaling using `utils/window/overlay_constants.py` floors
+  - **Natural Bottom Alignment**: The `aligned_y()` helper within `sync_overlay_properties()` aligns secondaries directly to main's top or bottom edge without artificial taskbar clamping. All overlays (main + secondaries) benefit from identical Z-order enforcement that keeps them visible above the taskbar, allowing perfect bottom-alignment even when dragged low. Only physical screen bounds are enforced.
+  - **Uniform Horizontal Offset**: In outward positioning mode, screen overflow offset is applied uniformly to all secondaries by tracking the nominal cursor separately from the offset-adjusted positions. This prevents cumulative gaps that would otherwise appear at minimum sizes (especially overlay E). The offset shifts the entire group as a unit.
+  - **Deferred AR Correction Disabled**: Docking overlays skip the 15ms deferred `_handle_correct_aspect()` that runs after DWM initialization. The `DockingOverlayManager` has exclusive control over docking overlay geometry through `sync_overlay_properties()`, ensuring persisted bottom-corner geometry isn't overridden on restore.
+  - **Tight Content Framing (Docking)**: OUTER geometry for docking overlays is computed to tightly hug INNER content plus border/inner-accent margins. Secondary widths include canvas content insets and cached AR so creation/recreation/"Correct AR" do not exhibit side gaps. Docking overlays skip the extra DWM-level thumbnail inset (the canvas `content_rect()` already accounts for borders/accents) to avoid double-insetting.
+  - **Strict Secondary Size Hierarchy**: Overlay sizes strictly decrease A > B > C > D > E until min/max floors. Baseline: B≈70% of A; each further secondary decays by ~15% (floors enforced by `OVERLAY_MIN_WIDTH/HEIGHT`). Post-fit enforcement adjusts ties down by 1px and recomputes widths from AR+insets.
+  - **Deferred AR Correction**: After DWM overlay initialization, a small deferred `_handle_correct_aspect()` (~15ms via `ThreadManager.single_shot`) eliminates minor initial gaps without user interaction.
+  - Interactive overlay switching via centralized controllers (main = delegate to centralized MRU rotation; secondary = centralized focus management)
+  - **MRU Minimized Window Support**: MRU validation skips visibility checks during quickswitch retrieval (`check_visible=False`), allowing minimized/hidden windows to remain valid quickswitch targets. Only destroyed/invalid windows are filtered out.
+  - **Hide/Show Hotkey (Ctrl+Shift+H)**: Toggles visibility of all overlays via `HideShowController`. Gated behind `hotkeys.hide_show_enabled` setting (default: False) with CircleCheckBox toggle in subsettings. Uses `OverlayStateManager` for state persistence and restoration. Both controllers registered with ResourceManager for proper cleanup. All Qt operations (overlay creation/destruction) run via `ThreadManager.run_in_main_thread()` to prevent cross-thread violations. State manager uses `find_resource_by_description()` to locate overlay managers in ResourceManager.
+  - **HotkeyManager Singleton Pattern**: All controllers (`HideShowController`, `OpacityManager`) use `HotkeyManager()` directly from `core/hotkeys/manager.py`. The class implements singleton via `__new__()`, ensuring all instances share the same hotkey registration state. This prevents duplicate Windows hotkey registration conflicts. The deprecated `core/hotkeys/compat.py` compatibility layer has been removed.
+  - Lock-aware automatic switching via centralized switching controllers with proper delegation patterns
+  - Comprehensive resource management with ResourceManager integration and proper cleanup handlers
+  - Secondary overlays apply direct geometry with screen bounds validation to prevent overlap and positioning conflicts
+  - Movement binding uses event filter with proper host availability checking and delayed retry mechanisms
+  - **Batch Geometry Guard**: `_batch_applying` suppresses host Move/Resize reactions during group geometry application to eliminate feedback loops and teleporting; cleared after scheduled UI tasks complete
+  - **Secondary Drag Delegation**: Secondary overlay hosts do not start local drags. `DockingOverlayManager.eventFilter()` translates the main overlay by global mouse deltas during a secondary-held drag, then coalesces a sync to reposition secondaries (smooth group dragging)
+  - **Unified Wheel-Resize**: Wheel on secondary overlays is intercepted to scale the main overlay; prevents transient self-resize distortion on secondaries and keeps the dock cohesive
+  - **Geometry Persistence Architecture** (CRITICAL - 2025-10-09):
+    - Saves docking main overlay geometry in physical pixels to `docking.last_state`
+    - Uses nearest-corner state persistence (see `utils/window/overlay_persistence.py`)
+    - Converts logical ↔ physical pixels with proper DPR scaling
+    - Suppresses saves for 2 seconds after restoration to prevent spurious updates
+    - Single sync source: delayed initial sync (100ms after overlays shown)
+    - **Anti-Cascade Architecture**:
+      - Bidirectional sizing eliminated - secondaries NEVER resize main
+      - Batch mode (`_batch_applying`) blocks resize events during sync
+      - Initialization mode (`_is_initializing`) blocks all syncs until stable
+      - Coalesced syncs check both flags before scheduling
+    - **Result**: Main overlay geometry persists correctly across restarts without resize cascades
+    - See `audits/docking_persistence_complete_call_chain_analysis.md` for implementation details
+  - **MRU-Aware Autoswitch Logic**: Overlays A/B/C maintain MRU ordering with duplicate prevention and lock-aware cycling
+    - **Overlay Assignment**: A=MRU[0], B=MRU[1], C=MRU[2] from centralized MRU manager
+    - **Duplicate Prevention**: When autoswitch assigns window X to overlay A, if B or C already has X, they swap content to maintain uniqueness
+    - **Priority Resolution**: If multiple overlays would receive the same window, A takes priority and B/C shift to next available MRU entries
+    - **Cycling Logic**: When A returns to same window (e.g., 1001→1001), push A→B, B→C, and assign most recent valid MRU to A
+    - **Lock Awareness**: Locked overlays skip content changes but system still prevents duplicates across unlocked overlays
+    - **Fallback Population**: When MRU has <3 entries, enumerate visible windows via WindowEnumerator to ensure B/C have valid targets
 - **Robust Aspect Ratio Management**: 
   - DWM overlay uses sophisticated client area and window rect fallback logic
   - Monitor overlay inherits DWM aspect ratio caching for consistent scaling
   - Bounds checking (0.2-5.0 ratio limits) prevents extreme distortions
   - DPI-aware thumbnail property scaling for proper rendering
+
+#### DWM Overlay Geometry Persistence (Spec)
+
+- Apply persisted geometry on show: On `_show_impl()`, standalone DWM overlays attempt to restore the last saved nearest-corner geometry. On success, an INFO log "Applied persisted DWM geometry" is emitted for diagnostics.
+- Persist geometry on interaction and hide: Geometry is saved on hide as before, and also opportunistically after drag/resize release and wheel-apply via `WindowBehaviorManager` calling `_persist_current_geometry()` when exposed by the overlay host.
+- Benign DWM errors: `DwmUpdateThumbnailProperties` E_INVALIDARG during hide or with degenerate rectangles is downgraded to DEBUG to reduce noise; ERROR severity is retained otherwise.
+
+##### Troubleshooting: Verifying Persistence Apply
+
+- DWM apply success emits: `[DWM_PERSIST] Applied persisted DWM geometry` in the standard app log (`logs/app_*.log` in runtime; repo dev: `app.log`).
+- Docking apply success emits: `[DOCK_PERSIST] Applied persisted docking main geometry`.
+- If restore does not apply:
+  - Confirm keys exist: DWM uses `overlays.dwm.last_state`, Docking uses `docking.last_state`.
+  - Check monitor topology changes; geometry is clamped via `ensure_within_available_desktop(...)`.
+  - Check canvas insets and aspect calculations for DWM (source window rect availability).
+
+#### DWM Capture Mode Policy (Spec)
+
+- **Full Window Capture** (2025-10-11): DWM thumbnails use `source_client_area_only=False` to capture the entire window including title bar and borders
+- **Rationale**: Modern Windows apps (Windows 11 Task Manager, Notepad, Settings, etc.) use **DWM Extended Frame** technique where the title bar is rendered inside the client area via `DwmExtendFrameIntoClientArea()`. When `source_client_area_only=True`, DWM incorrectly calculates an offset that skips valid content, causing black areas at the top of these apps
+- **Behavior**: All windows (modern and traditional) are captured with their title bars visible, matching Windows taskbar preview behavior
+- **Aspect Ratio Independence**: This setting does NOT affect aspect ratio calculations - AR is always calculated from `GetClientRect()` on the source window regardless of capture mode
+- **Implementation**: `core/graphics/backends/dwm/integrated_dwm_backend.py` lines 531 and 569 set `source_client_area_only=False` in all `update_thumbnail()` calls
+- **Impact**: Traditional apps (Chrome, Firefox, etc.) now show title bars in overlays instead of content-only. This is acceptable as it provides consistent behavior across all window types and matches user expectations from taskbar previews
+- **Reference**: See `audits/dwm_modern_windows_apps_black_titlebar_research.md` for detailed technical analysis
 - **Comprehensive Theming System**: 
   - Support for light/dark themes with custom styling
   - Structured QSS organization for maintainability
@@ -40,9 +151,26 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Strict No-Fallback**: Either complete functionality or explicit failure with clear logging; deferred initialization with retries is acceptable
 - **Window Type Handling**: Unknown window types are logged and raise `ValueError`; no fallback to `WindowType.CUSTOM`
 - **Resource Management**: All managers register with ResourceManager using lambda-wrapped cleanup handlers (`cleanup_handler=lambda obj: obj._cleanup()`) for consistent parameter signatures
-- **Debug Logging Policy**: Debug logging disabled by default; enable via `SPQ_DEBUG` environment variable (`1`, `true`, `yes`, or `on`). All debug logs gated behind `utils.debug.debug_enabled`. Frequent logs throttled; `BorderRenderer` employs per-path rate limiting
+- **Docking Mode Integration**: Controllers must check for active docking manager via ResourceManager and delegate appropriately. Fresh lookups per operation ensure proper routing without reliance on cached state
+- **Debug Logging Policy**: Debug logging disabled by default; enable via `SPQ_DEBUG` environment variable (`1`, `true`, `yes`, or `on`). All debug logs gated behind `utils.debug.debug_enabled`. Frequent logs throttled; `BorderRenderer` employs per-path rate limiting. `CursorManager` short-circuits identical cursor requests and dedupes logs to avoid ArrowCursor spam during drag/hover cycles
   - KeyPassthrough verbose decision logs: settings key `debug.keypassthrough_verbose` enables detailed non-media decision logging (target validation, early return reasons, routing results). Default: false.
   - EventSystem dispatch tracing: settings key `debug.events_trace` enables lightweight begin/end trace logs with handler identity, priority, duration, and handled flag. Default: false.
+- **TODO Comment Policy** (CRITICAL - see `audits/todo_fixme_evaluation_2025_10_06.md`):
+  - **Prohibition**: TODO/FIXME/XXX/HACK comments are **strongly discouraged** in production code
+  - **Issue Tracking Required**: All work items must be tracked in external issue tracker, not inline comments
+  - **Allowed Exceptions** (with strict requirements):
+    - **Temporary TODOs**: Must include removal deadline (max 30 days): `# TODO(Remove by 2025-11-06): Workaround for Qt 6.5 bug #12345`
+    - **Issue-Linked TODOs**: Must reference specific issue: `# TODO(#456): Add GPU acceleration for large overlays`
+    - **Both preferred**: `# TODO(#456, Remove by 2025-11-06): Temporary fix until upstream merge`
+  - **Monthly Audit**: All TODO comments reviewed monthly; expired/stale comments must be implemented or removed
+  - **Rationale**: 
+    - Inline TODOs become obsolete and conflict with architecture (see 2025-10-06 audit)
+    - Features described in TODOs may already be implemented elsewhere
+    - Commented-out "stub" code misleads developers about implementation status
+    - Untracked work items create hidden technical debt
+  - **Enforcement**: PR reviews must reject TODOs without issue numbers or deadlines
+  - **Violation Example**: `# TODO: Implement position manager integration` ← REJECTED (no issue, no deadline, feature already exists)
+  - **Valid Example**: `# TODO(#789, 2025-11-15): Remove legacy hotkey compat after migration complete`
 
 #### KeyPassthrough Blocklist (Spec)
 
@@ -84,6 +212,32 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
   - Performs responsiveness checks and enforces a timeout.
   - Do not call raw `SendMessage` directly.
   - `safe_send_appcommand` remains the helper for APPCOMMAND-based media operations.
+
+#### Media Routing & Volume Hold (Spec)
+
+- **Focused-only Media Routing (Policy)**
+  - Media keys (`VK_MEDIA_*`) and system volume keys (`VK_VOLUME_*`) are only routed when an overlay is focused.
+  - When unfocused, these keys are blocked by `KeyPassthroughController` to avoid unintended global actions and to minimize processing.
+  - Focus checks failing due to transient state are treated conservatively (fail closed) and emit `key.passthrough.blocked` with `*-focus-check-failed` reasons.
+
+- **Ownership of Continuous Volume Adjustment**
+  - `MediaController` exclusively owns the hold loop. `KeyPassthroughController` performs one immediate step and delegates hold to `MediaController`.
+  - Implementation uses `ThreadManager.single_shot` with token guards (no raw `QTimer`). A hard cap (`_volume_hold_max_seconds`) prevents runaways.
+  - Release semantics are robust: `KeyPassthroughController.release_passthrough_key()` calls `MediaController.handle_volume_key_release(hwnd)` when a target exists, or `MediaController.stop_all_continuous_volume_adjustments()` if the target hwnd is missing (handoff/clear) to avoid ghost loops.
+
+- **Auto-repeat Guard (Qt)**
+  - `OverlayHost` ignores auto-repeat `KeyPress` and `KeyRelease` for `VK_VOLUME_UP/DOWN` and `VK_UP/DOWN`.
+  - Only the physical first press starts the hold; only the final physical key-up ends it. This prevents premature stop due to Qt auto-repeat release events.
+
+- **Timing & Settings (Single Source of Truth)**
+  - `MediaController` reads timing from settings:
+    - `input.volume_hold_initial_delay_ms` (default 200)
+    - `input.volume_hold_interval_ms` (default 50)
+  - Progressive step sizing during continuous mode (session-volume): ~1% initially, scaling to ~2% after ~1s.
+
+- **Active Audio Session Requirement (Behavioral Quirk)**
+  - Continuous adjustment uses per-app session volume. If the target application has no active audio session (e.g., currently silent), continuous steps may no-op until a session exists.
+  - The initial immediate step is still applied via the media command path; subsequent continuous steps require a session. This is acceptable by policy and may be addressed by the Media Keepalive subsystem if desired.
 
 #### Media Keepalive Integration (Spec)
 
@@ -128,6 +282,18 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - Enforcement: `_ensure_min_overlay_size(rect)` clamps the overlay rectangle to at least the computed minimum while preserving the top-left origin. Used during initial overlay creation/placement and relevant resize paths.
 - Relationship to centralized constants: `utils/window/overlay_constants.py` defines `OVERLAY_MIN_WIDTH=200`, `OVERLAY_MIN_HEIGHT=180`, and `DEFAULT_ASPECT=(16, 9)`. These serve as general guardrails and canvas defaults but are not the source of truth for initial overlay window sizing.
 - Roadmap: unify min-size logic behind a central helper (e.g., `utils/window/overlay_sizing.py`) consumed by UI and backends; deprecate divergent ad-hoc minima.
+
+#### Wheel Resize Behavior (Spec)
+
+- Dynamic fine-step near minimum bounds without modifiers to prevent step skipping at extremes.
+- **Screen boundary performance** (2025-10-09 fix): Boundary smoothing logic checks for **stable pinned edges** before reducing resize steps:
+  - When a window is pinned to a screen edge (e.g., left edge at x=0) and growing away from that edge, full resize deltas are applied
+  - Smoothing (2px steps) only triggers when the window is actually trying to move beyond screen limits
+  - Eliminates slow resize at screen corners (especially bottom-left: x=0, y=max) where boundary detection was false-positive
+  - Implementation: tracks whether pinned edge positions remain constant between `cur_geo`, `new_rect`, and `clamped` - stability indicates growing away from boundary
+- Clamping is performed within the current monitor's FULL geometry (not union-of-monitors). If the proposed size exceeds the monitor, size is reduced while preserving INNER aspect ratio using canvas insets, then position is clamped to the monitor bounds.
+- Inner aspect-ratio lock when the canvas provides `content_aspect` and insets; AR is preserved for inner content while respecting outer min-size.
+- Persistence triggers: after wheel-apply and after drag/resize release, if the overlay host exposes `_persist_current_geometry()`, it is called (standalone DWM) to keep persisted state fresh for creation-time restore.
 
 ### Portable Build & Distribution (Windows)
 
@@ -191,8 +357,7 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Blocklist defaults**: `SettingsManager._ensure_keypassthrough_blocklist_defaults()` ensures `<settings_dir>/keypassthrough_blocklist.txt` exists with conservative defaults on first run. Encoding/format per the KeyPassthrough Blocklist spec. Existing files are never overwritten.
 - **Directory Creation**: Settings directory is automatically created if missing during initialization
 - **Logging**: Creation attempts and outcomes are logged (prefixes: `[SETTINGS]`, `[KEYPASS]`). IO errors are logged; the app continues with in-memory settings and retries on subsequent saves.
-- **Guarantee**: In portable builds, after the first successful run and clean exit, `<runtime_root>/settings/settings.json` and `<runtime_root>/settings/keypassthrough_blocklist.txt` will exist.
-
+  - **Guarantee**: In portable builds, after the first successful run and clean exit, `<runtime_root>/settings/settings.json` and `<runtime_root>/settings/keypassthrough_blocklist.txt` will exist.
 
 ---
 
@@ -202,7 +367,8 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 
 **Centralized resource lifecycle via `utils/resource_manager` facade**
 
-- **Manager**: `core/resources/manager.py#ResourceManager` — implementation tracks resources with weakrefs, reference accounting, and deterministic cleanup. Integrates with `ThreadManager` via `attach_thread_manager()` and dispatches all mutations synchronously on the UI thread via `ThreadManager.run_on_ui_thread` (single-writer semantics). Publishes lock-free snapshots via a `TripleBuffer`. Registers an atexit cleanup hook
+- **Manager**: `core/resources/manager.py#ResourceManager` — implementation tracks resources with weakrefs, reference accounting, and deterministic cleanup. Integrates with `ThreadManager` via `attach_thread_manager()` and dispatches all mutations synchronously on the UI thread (single-writer semantics). Publishes lock-free snapshots via a `TripleBuffer`. Registers an atexit cleanup hook
+  - Implementation note (2025-09-18): `_enqueue_mutation_sync()` now enforces UI single-writer by dispatching via the manager's internal UI dispatcher and synchronously awaiting completion before publishing a snapshot
 - **Access**: `utils/resource_manager.py` facade re-exports the public API. Always import from `utils.resource_manager` (do not import `core.resources` directly)
 - **API**: `attach_thread_manager()`, `register()`, `unregister()`, `get()`, `get_typed()`, `list_resources()`, `cleanup_all()`, `shutdown()`, plus Z-order delegations and convenience helpers
 - **Deprecation**: direct imports of `core.resources` in call sites are deprecated; use the `utils.resource_manager` facade exclusively
@@ -227,20 +393,7 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Frame exchange**: uses triple buffering with atomic indices; producer publishes latest complete frame, consumer reads most recent without locks
 - **No shared mutable state** across threads; ownership is transferred via queue items. Bursts are coalesced at queue boundaries with explicit policies (drop/overwrite/coalesce) per channel
 - **Primitives module**: `utils/lockfree/` provides `SPSCQueue` and `TripleBuffer`
- - **Factories**: `ThreadManager.create_spsc_queue(capacity)` and `ThreadManager.create_triple_buffer()` are the canonical creation APIs
- - **Volume hold timers**: `core/input/key_passthrough_controller.py#KeyPassthroughController` implements press-and-hold for VK_VOLUME_UP/DOWN using `ThreadManager.single_shot` with token-based cancellation.
-  - Press: immediate volume step routed per target HWND, then schedule repeat after `input.volume_hold_initial_delay_ms` (default 200ms).
-  - Repeat: scheduled every `input.volume_hold_interval_ms` (default 75ms) while held.
-  - Release: cancels by invalidating the token; subsequent ticks are ignored.
-  - Gating: suppresses stepping when the overlay is focused or when no valid target HWND is available; the hold timer always reschedules the next tick (no early stop) so long as the hold token remains valid. This prevents premature termination during long holds while avoiding duplicate adjustments when the OSD has focus.
-  - Arrow-to-volume remap (Media Control ON): when `features.media_control_enabled` is True, `VK_UP` is remapped to `VK_VOLUME_UP` and `VK_DOWN` to `VK_VOLUME_DOWN` early in `passthrough_key`/`press_passthrough_key`/`release_passthrough_key`, unifying hold semantics and preventing arrow-key forwarding during media control. `VK_LEFT`/`VK_RIGHT` are unaffected by this remap.
-
-  - **Volume routing policy**: Session-only per-app routing via `utils.audio.session_volume` (no fallback to app hotkeys or global mixer). The audio module includes a psutil-guarded child-process session resolution to handle apps whose audio session runs in renderer/subprocesses (e.g., browsers). When PyCAW or psutil are unavailable, operations fail fast with explicit DEBUG logs under the `AUDIO_SESSION` logger.
-
-#### Hotkeys (Spec)
-
-- **Single-key suppression (keyboard backend)**:
-  - Backend: `keyboard` library with `suppress=True` for single, no-modifier keys — no LLHOOK path for these.
+- **Docking Mode Threading**: All docking system operations (overlay creation, synchronization, positioning) are dispatched to UI thread via `ThreadManager.run_on_ui_thread` for thread safety
   - Gate: first-press gate held in `HotkeyManager._kb_press_state[hotkey_id]` to prevent repeats; reset on release.
   - Watchdog: tokenized watchdog uses `ThreadManager.single_shot(interval≈85ms)` to poll `keyboard.is_pressed(key_token)`. If a release event is missed, it resets the gate and logs `[HOTKEY][WATCHDOG] gate-reset` for the affected hotkey. Scheduling is idempotent per-token to avoid races.
   - Modifiers: press handlers ignore when `ctrl` or `shift` are down to avoid unintended activation with modifiers; this policy remains unchanged.
@@ -263,6 +416,8 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 #### Quickswitch (Spec)
 
 - **Ownership & Registration**: `QuickSwitchController` owns quickswitch. Registers a global combo via the `keyboard` library from settings key `hotkeys.opacity_quickswitch` (default: `shift+x`). No fallback combos and no backtick-specific handling.
+  - Centralization policy (Option A retained): QuickSwitchController keeps its own combo registration and cooldown/locking logic. `HotkeyManager` continues to own other global/system hotkeys. This avoids duplication of docking-aware selection rules and preserves the single entry point while docking mode is active (controller delegates to docking manager and returns).
+  - Option B (deferred): If future work centralizes the quickswitch combo under `HotkeyManager`, extract a pure orchestrator for docking/window-mode selection (no Qt) to avoid logic drift. The manager would then execute decisions; controller becomes a thin shim. Not implemented as of 2025-09-18.
 - **Settings**:
   - `hotkeys.quickswitch_enabled` (bool): toggles feature
   - `hotkeys.opacity_quickswitch` (str): stores the combo; live-updated by SubSettingsDialog
@@ -270,9 +425,29 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Lock-free Gating**: Uses an in-flight flag to prevent re-entrancy and a monotonic timestamp gate for a fixed 800ms cooldown (`time.monotonic()`). No `threading.Lock/RLock`.
 - **Events**: Publishes suppression diagnostics: `switch.cooldown_suppressed`, `switch.reentry_suppressed`, `switch.lock_suppressed`.
 
+##### Quickswitch – Implementation Flow (Authoritative)
+- **Cooldown and Dispatch**
+  - 800ms cooldown gate enforced both before and on the UI thread.
+  - Off-UI invocations schedule `_quickswitch_impl()` on UI via `ThreadManager.run_on_ui_thread()` with a simple `_inflight` guard.
+- **Docking-first Delegation**
+  - If a `DockingOverlayManager` is active (found via `ResourceManager`), delegate: `handle_overlay_interaction("main", "quickswitch")` and return.
+- **Active Overlay Path** (non-docking)
+  - Resolve active overlay from `OverlayManager`.
+  - If globally or individually locked, do not swap; instead focus the overlay's captured window (if available), emit `switch.lock_suppressed`, and return.
+- **Candidate Collection**
+  - Read current foreground via `win32gui.GetForegroundWindow()` and current overlay source (`overlay._current_source_hwnd` fallback `_src_hwnd`).
+  - MRU list via `get_mru_manager().get_recent(limit=7)`. If MRU has <2 entries, seed from Z-order as needed.
+  - Build ordered unique candidates: `[foreground, current_src, MRU...]`.
+  - Optional display-locked filtering when `features.display_locked_switching` is true: restrict to windows on the same monitor as the current source.
+  - Exclude overlay/host HWNDs from focus targets (forbidden set includes host, border, DWM host when present).
+- **Selection and Swap**
+  - Prefer swapping to the valid foreground if not forbidden and display-locked predicate passes; otherwise use `compute_next_selection(...)` over the candidate list.
+  - Perform `overlay._handle_swap_window(target_hwnd)`. Update MRU for the foreground and focus target.
+  - Defer focus handoff ~25ms to the pre-swap source (or chosen) and arm autoswitch suppression: `get_autoswitch_controller().suppress_for(900, last_seen_hwnd=focus_target)`.
+
 #### Quickswitch Logging (Spec)
 
-- **Centralized Utilities**: `core.logging.throttled` and `core.logging.log_dedupe` are used inside `core/switching/quickswitch_controller.py#QuickSwitchController` to reduce debug log spam during rapid operations.
+- **Logging**: Centralized utilities: `core.logging.throttled` and `core.logging.log_dedupe` are used inside `core/switching/quickswitch_controller.py#QuickSwitchController` to reduce debug log spam during rapid operations.
 - **Categories (tags)**:
   - `"quickswitch:reentry"` — re-entrancy gate suppressions
   - `"quickswitch:lock"` — overlay lock checks and outcomes
@@ -285,6 +460,61 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Behavior**: high-frequency debug emits in `quickswitch()` are throttled (category-specific windows) and repeated failure messages are deduplicated to preserve clarity. Functional behavior is unchanged.
 - **Fallback**: if the helpers are unavailable at runtime, initialization falls back to standard `logger.debug` so logging remains functional (no feature dependency on throttling/deduping).
 - **Gating**: respects the global debug policy (`SPQ_DEBUG`, `utils.debug.debug_enabled`).
+
+##### Docking Integration (Quickswitch)
+- **CRITICAL FIX (2025-10-06)**: Fixed `_rotate_mru_forward()` to implement correct **targeted swap** behavior
+- When docking is active, QuickSwitch delegates to `DockingOverlayManager.handle_overlay_interaction("main", "quickswitch")` which triggers MRU rotation with targeted swap
+- **Targeted Swap Logic (Normal Mode)**: 
+  - **User intent**: "I want to interact with the window shown in this overlay"
+  - **Rotates MRU**: If overlay's window == MRU[0], swap MRU[0] ↔ MRU[1]
+  - **Focuses outgoing window**: The window being swapped OUT goes to foreground (user can interact with it)
+  - **Swaps in MRU[0]**: Overlay displays new MRU[0] after rotation
+  - **Result**: User gets the window they clicked, overlay shows next most-recent window
+- **Applies to all overlays**: Main (A) and secondaries (B/C/D/E) use same targeted swap pattern in Normal mode
+- **Enhanced Secondary Focus**: Double-click on secondary overlays uses `_normal_mode_swap_with_foreground()` for targeted swap
+- **Cycle Mode**: Double-click focuses window, all overlays update dynamically based on MRU
+- Per-overlay lock (focus indicator) suppresses quickswitch automatic updates; manual double-click on overlays remains enabled with proper locked overlay handling
+
+#### Autoswitch (Spec)
+
+- **Ownership**: `ForegroundAutoswitchController` observes OS foreground changes and may swap overlay sources when appropriate.
+- **Debounce**: Stable foreground selection window `STABLE_DEBOUNCE_MS` enforced; suppression window supported for quickswitch handoff.
+- **Active Overlay Resolution**: Prefers docking main overlay when docking is active; otherwise uses `OverlayManager` active overlay.
+- **Lock-aware Gating**:
+  - Global lock: suppressed when `OverlayManager.is_overlay_locked()` is true.
+  - Individual lock: suppressed when the active overlay is locked. For docking, this checks the DWM backend lock via the DockingOverlay wrapper (`overlay._dwm_overlay._is_window_locked`). For direct DWM overlays, the controller checks `_is_window_locked` on the overlay itself.
+- **Selection Policy**:
+  - Normal path (foreground == current source): cycles MRU to the next eligible window (no Z-order fallback). Display-locked filtering optional via setting `features.display_locked_switching`.
+  - Emergency path (invalid/missing current source): attempts recovery by picking a valid MRU alternative (no Z-order fallback).
+- **Validation**: All candidate windows must pass `utils.window_validation.is_valid_window`.
+
+##### Autoswitch – Implementation Flow (Authoritative)
+- **Polling**
+  - Self-rescheduling tick via `ThreadManager.single_shot(POLL_INTERVAL_MS)`. Defaults: `POLL_INTERVAL_MS=250ms`, `STABLE_DEBOUNCE_MS=300ms`.
+  - Suppression window after QuickSwitch handoff: `suppress_for(duration_ms=900, last_seen_hwnd=...)` prevents immediate re-trigger; also stabilizes `_last_seen_hwnd`.
+- **Docking Path**
+  - If docking is active, only trigger a cycle when the foreground equals the main overlay's current window. Otherwise, record MRU and exit.
+- **Non-docking Path**
+  - Resolve active overlay from `OverlayManager`. Respect global and per-overlay locks.
+  - If foreground equals current source, build candidates `[foreground, current_src, MRU...]`, optionally apply display-locked filter; compute next via `compute_next_selection(...)` and swap via `overlay._handle_swap_window(chosen)`.
+  - If foreground differs from current source, do nothing unless in emergency (missing/invalid current source). In emergency, compute candidates as above and swap.
+  - Record MRU for chosen targets; maintain `_last_applied_src` and `_last_seen_hwnd` for stability and diagnostics.
+
+---
+
+### Switching – Potential Improvements (Proposal)
+- **Make timings configurable**
+  - Expose `quickswitch.cooldown_ms` (default 800) and `autoswitch.debounce_ms` (default 300) in settings to accommodate user preference and hardware variance.
+- **Adaptive autoswitch debounce**
+  - Increase debounce temporarily after a swap (e.g., +150–250ms) to reduce oscillation when users rapidly alt-tab between the same two windows.
+- **Unified suppression window**
+  - Align QuickSwitch cooldown (800ms) and Autoswitch suppression (900ms) under a single configurable value for more predictable interactions.
+- **Display-locked switching UX**
+  - Surface `features.display_locked_switching` in the UI with a brief tooltip. Optionally allow per-mode (docking vs. single overlay) overrides.
+- **User feedback on lock suppression**
+  - When a swap is suppressed due to an overlay lock, optionally show a brief non-intrusive toast or focus-indicator pulse explaining why nothing changed.
+- **MRU quality**
+  - Consider filtering known shell/system windows during MRU seeding beyond `is_valid_window` (e.g., taskbar, our own process), especially on fresh starts.
 
 #### Event System Architecture (Spec)
 
@@ -678,6 +908,16 @@ See also: `Index.md` → Graphics & Overlays → "Canonical Border/Clipping/Mask
 - Comprehensive window enumeration and filtering
 - Window state tracking and event handling
 - Z-order and focus management
+- **WINDOW STATE PRESERVATION POLICY** (CRITICAL):
+  - **NEVER USE SW_SHOWNORMAL**: Forces windows into normal mode, destroying fullscreen/maximized states
+  - **PROVEN APPROACH**: Based on `quickswitch_controller._focus_window()` that has never failed
+  - **FOCUS STRATEGY**:
+    1. Only use `SW_RESTORE` if window is minimized (preserves fullscreen/maximized)
+    2. Never use `SW_SHOWNORMAL` or other mode-forcing show commands
+    3. Use `SetWindowPos` with `SWP_SHOWWINDOW` flag to ensure visibility without changing state
+    4. Fallback progression: simple `SetForegroundWindow` → `SetWindowPos` TOPMOST sequence → thread input attachment → Alt keystroke trick
+  - **IMPLEMENTATION**: `DockingManager._bring_hwnd_to_focus()` uses this proven approach
+  - **RESULT**: Fullscreen windows stay fullscreen, maximized windows stay maximized, normal windows stay normal
 - Window snapping and positioning
 - Multi-monitor support
 - Window thumbnail generation
@@ -782,11 +1022,11 @@ See also: `Index.md` → Graphics & Overlays → "Canonical Border/Clipping/Mask
 ##### Display Locked Switching (Monitor-Scoped MRU)
 
 - Setting key: `features.display_locked_switching` (bool; default: false)
-- Behavior: When enabled, both `QuickSwitchController` and `AutoswitchController` filter MRU candidates to those on the same monitor as the overlay's current source window.
+- Behavior: When enabled, both `QuickSwitchController` and `ForegroundAutoswitchController` filter MRU candidates to those on the same monitor as the overlay's current source window.
   - Monitor detection uses `utils.window.monitors.find_monitor_for_window(QPoint, QSize) -> int`.
   - Window geometry is obtained via `utils.window_validation.get_window_rect(hwnd)`; equality of monitor indices determines eligibility.
   - Applied on all selection paths: standard quickswitch candidate ordering, autoswitch (fg==current_src) cyclic selection, and autoswitch emergency recovery.
-- Live updates: The SubSettingsDialog toggles this key and notifies controllers (`QuickSwitchController.update_hotkeys()`; `AutoswitchController.apply_settings()`) so behavior updates without restart.
+- Live updates: The SubSettingsDialog toggles this key and notifies controllers (`QuickSwitchController.update_hotkeys()`; `ForegroundAutoswitchController.apply_settings()`) so behavior updates without restart.
 
 #### Shutdown Sequence (ApplicationCore)
 
@@ -1063,7 +1303,11 @@ rm.cleanup_all()
       - Provides access to all core services through type-hinted properties
       - Handles initialization order and error handling
       - Implements proper cleanup on shutdown
-    - `ApplicationInstanceManager`: Single instance management
+    - `ApplicationInstanceManager`: Single instance enforcement using OS-level mutex
+      - **Cross-process detection**: Uses Win32 named mutex for inter-process coordination (not intra-process thread synchronization)
+      - **Prevents keyboard hook conflicts**: Multiple instances with conflicting system-wide keyboard hooks cause modifier key state corruption
+      - **Enforced in main.py**: Checks before Qt initialization, exits cleanly if another instance detected
+      - **Policy clarification**: OS mutex for cross-process detection is appropriate; ThreadManager lock-free patterns apply to intra-process threading only
     - `ApplicationLifecycle`: Application startup/shutdown logic
   - **Design Principles**:
     - **Explicit Dependency Injection**: Services are injected through constructors and properties
@@ -1123,8 +1367,9 @@ rm.cleanup_all()
     - `OverlayHost.mouseDoubleClickEvent` triggers `QuickSwitchController.quickswitch()` for mouse-driven switching.
   - Logging: All logs use the `QUICKSWITCH` prefix. No silent fallbacks.
 
-- AutoswitchController (`core/switching/autoswitch_controller.py`)
-  - Ownership: Observes foreground window changes and requests overlay swaps when stable.
+- ForegroundAutoswitchController (`core/switching/autoswitch_controller.py`)
+  - Ownership: Observes foreground window focus changes and requests overlay swaps when stable.
+  - NOTE: This is NOT related to closed-window monitoring (see ClosedWindowSwitchManager).
   - Settings:
     - `features.autoswitch_enabled` (bool)
   - Responsibilities:
@@ -1132,17 +1377,17 @@ rm.cleanup_all()
     - Strictly validate target windows; skip invalid candidates.
     - Safely call the active overlay’s `_handle_swap_window(hwnd)` on the UI thread.
     - `apply_settings()` applies enable/disable immediately.
-  - Logging: All logs use the `AUTOSWITCH` prefix. No silent fallbacks.
+  - Logging: All logs use the `FOREGROUND_AUTOSWITCH` prefix. No silent fallbacks.
 
 - Initialization Strategy (composition root):
   - Controllers are initialized at application startup in `core/application/core.py (ApplicationCore)` for clean, centralized lifecycle:
-    - After initializing OpacityManager, construct singletons via `get_quickswitch_controller()` and `get_autoswitch_controller()`.
+    - After initializing OpacityManager, construct singletons via `get_quickswitch_controller()` and `get_foreground_autoswitch_controller()`.
     - This ensures hotkeys and autoswitch observation are active whenever overlays exist and keeps ownership centralized.
   - Scope boundaries:
     - `OpacityManager` owns only opacity increase/decrease hotkeys. It does not register the quickswitch key.
     - The quickswitch key is loaded and owned by `QuickSwitchController` (move any residual quickswitch key handling out of `OpacityManager`).
   - Settings wiring:
-    - `SubSettingsDialog` calls `QuickSwitchController.update_hotkeys()` when the quickswitch key changes and `AutoswitchController.apply_settings()` when the autoswitch toggle changes.
+    - `SubSettingsDialog` calls `QuickSwitchController.update_hotkeys()` when the quickswitch key changes and `ForegroundAutoswitchController.apply_settings()` when the autoswitch toggle changes.
 - **Theme System**: Centralized theme management in `utils/theme/manager.py` with:
   - Support for light/dark themes
   - Resource-aware asset loading and caching

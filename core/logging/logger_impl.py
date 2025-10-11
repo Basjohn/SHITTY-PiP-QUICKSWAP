@@ -110,7 +110,12 @@ class ColoredFormatter(logging.Formatter):
             colored_level = f"{self.COLOR_SEQ % (30 + color_code)}{levelname:>8}{self.RESET_SEQ}"
 
         # Enhanced highlighting: vibrant orange for emphasized loggers
-        if record.name in _highlighted_loggers:
+        # Special purple highlighting for DOCK_GEOM, MRU_FOCUS, and PERSIST_STATE
+        if record.name in ("DOCK_GEOM", "MRU_FOCUS", "PERSIST_STATE"):
+            # Use bright magenta/purple for geometry, MRU, and persistence diagnostics - unique color
+            name_part = f"\033[{self.BRIGHT_MAGENTA}m{record.name}{self.RESET_SEQ}"
+            message = f"\033[{self.BRIGHT_MAGENTA}m{message}{self.RESET_SEQ}"
+        elif record.name in _highlighted_loggers:
             # Use bright yellow/orange for highlighted loggers - more vibrant
             name_part = f"\033[{self.BRIGHT_YELLOW}m{record.name}{self.RESET_SEQ}"
             message = f"\033[{self.BRIGHT_YELLOW}m{message}{self.RESET_SEQ}"

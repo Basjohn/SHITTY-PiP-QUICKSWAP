@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.logging import get_logger
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 
 try:
     import win32gui
@@ -35,7 +35,7 @@ class KeyPassthroughBlocklist:
 
     def __init__(self, blocklist_path: Optional[Path] = None) -> None:
         self._logger = get_logger("KEYPASS")
-        self._settings = SettingsManager()
+        self._settings = get_settings_manager()
         if blocklist_path is None:
             try:
                 settings_dir: Path = self._settings.get_settings_dir()

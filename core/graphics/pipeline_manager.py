@@ -23,7 +23,7 @@ from PySide6.QtCore import QObject, Signal, QSize
 from core.logging import get_logger
 from core.threading import get_thread_manager
 from utils.resource_manager import get_resource_manager, ResourceType
-from core.settings.settings_manager import SettingsManager
+from core.settings import get_settings_manager
 
 # Reuse existing capture frame type
 from core.graphics.capture.monitor_capture_manager import (
@@ -59,7 +59,7 @@ class PipelineManager(QObject):
         super().__init__()
         self._thread_manager = get_thread_manager()
         self._resource_manager = get_resource_manager()
-        self._settings = SettingsManager()
+        self._settings = get_settings_manager()
 
         # Active pipeline and backend manager
         self._pipeline: Optional[str] = None

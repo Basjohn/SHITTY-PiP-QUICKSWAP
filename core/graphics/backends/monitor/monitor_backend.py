@@ -6,7 +6,6 @@ monitor capture content via `ui/overlays/monitor/monitor_overlay.py`.
 """
 
 from typing import Optional, Dict, Any
-from PySide6.QtWidgets import QWidget
 
 from core.logging import get_logger
 from core.threading import get_thread_manager
@@ -52,6 +51,11 @@ class MonitorBackend(OverlayBase):
         self._host = MonitorOverlay()
         # Store a back-reference for cleanup compatibility if needed by others
         self._host._parent_overlay = self  # noqa: SLF001
+        
+        # Propagate app_instance if available (set by OverlayManager)
+        if hasattr(self, '_app_instance_for_host'):
+            self._host.app_instance = self._app_instance_for_host
+            logger.debug("Propagated app_instance to MonitorOverlay host widget")
 
         if not self._host.set_target_monitor(target_monitor):
             # Ensure deletion on failure
