@@ -15,6 +15,7 @@ from core.logging import get_logger
 from core.threading import ThreadManager
 from utils.theme.theme_manager import get_theme_manager
 from utils.window.behavior import WindowBehaviorManager
+from utils.window.dialog_positioning import calculate_snap_position, DialogSide
 from core.settings.settings_manager import SettingsManager
 from core.opacity.manager import get_opacity_manager
 from core.ui.tray import SystemTrayManager
@@ -1229,37 +1230,39 @@ class MainDialog(QMainWindow):
         
         The title bar and any blank space in the window should be draggable, except for controls.
         """
+        # Get widget at position
+        w = self.childAt(pos)
+        
         # Allow dragging from the entire title bar height, except on window control buttons
         title_h = self.title_bar.height() if hasattr(self, 'title_bar') and self.title_bar else 55
         if pos.y() <= title_h:
-            w = self.childAt(pos)
             if w and getattr(w, 'objectName', lambda: '')() in ["minimizeButton", "maximizeButton", "closeButton"]:
                 return False
             return True
 
-        # Outside the title bar region, do NOT allow dragging
-        # This prevents accidental drags from content areas and focuses UX on the title bar
-        return False
-
-        # Helper: walk up parents to detect interactive controls or right-side buttons
+        # For content area (below title bar): allow dragging from non-interactive widgets
+        # Interactive controls should NOT trigger dragging
         interactive_types = (QComboBox, QPushButton, QSlider, QLineEdit, QCheckBox, QRadioButton, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
+        
+        # Walk up the widget hierarchy to check for interactive controls
         cur = w
         while cur is not None and cur is not self:
-            # Allow dragging from the badge as requested
+            # Allow dragging from the badge specifically
             if hasattr(self, 'badge_label') and cur is self.badge_label:
                 return True
+            
+            # Block dragging from interactive controls
             if isinstance(cur, interactive_types):
                 return False
-            # Avoid dragging from the right-side buttons container
+            
+            # Block dragging from right-side buttons container
             if hasattr(self, 'right_buttons_widget') and cur is self.right_buttons_widget:
                 return False
+            
             cur = cur.parentWidget()
 
-        # For container widgets within the content area, allow dragging
-        if self.content_widget.isAncestorOf(w):
-            return True
-
-        return False
+        # Allow dragging from content area blank spaces and containers
+        return True
     
     def showEvent(self, event):
         """Handle window show event to restore geometry and refresh badge visuals."""
@@ -1305,23 +1308,22 @@ class MainDialog(QMainWindow):
             logger.error(f"Error in resizeEvent updating badge: {e}", exc_info=True)
     
     def closeEvent(self, event):
-        """Handle window close event to save geometry."""
+        """Handle window close event."""
         try:
-            # Save window geometry
-            geometry = {
-                "x": self.x(),
-                "y": self.y(),
-                "width": self.width(),
-                "height": self.height(),
-                "maximized": self.isMaximized()
-            }
-            self.settings_manager.set("ui.main_window_geometry", geometry)
-            
+            # Persist display index for future positioning
+            from PySide6.QtGui import QGuiApplication
+            screens = QGuiApplication.screens()
+            # Find which display this dialog is on
+            center = self.geometry().center()
+            for i, screen in enumerate(screens):
+                if screen.geometry().contains(center):
+                    self.settings_manager.set("ui.last_dialog_display", i)
+                    logger.debug(f"Main dialog closed on display {i}")
+                    break
             # Hide badge if it exists
             if hasattr(self, 'badge_label'):
                 self.badge_label.hide()
-                
-            logger.debug(f"Saved main window geometry: {geometry}")
+            
             # Route to centralized shutdown so all resources are cleaned, then quit
             try:
                 self._on_tray_quit()
@@ -1330,9 +1332,8 @@ class MainDialog(QMainWindow):
             event.accept()
             
         except Exception as e:
-            logger.error(f"Error saving window geometry: {e}", exc_info=True)
-            event.ignore()
-            raise RuntimeError("Failed to save window geometry.") from e
+            logger.error(f"Error in dialog close: {e}", exc_info=True)
+            event.accept()  # Still close even if persistence fails
     
     # --- UI Update Methods ---
     
@@ -1870,25 +1871,30 @@ class MainDialog(QMainWindow):
     # --- Window Management Methods ---
     
     def _restore_window_geometry(self):
-        """Restore window geometry from settings."""
+        """Position window using smart snap positioning with taskbar awareness."""
         try:
-            geometry = self.settings_manager.get("ui.main_window_geometry", None)
-            if geometry:
-                self.setGeometry(
-                    geometry.get("x", self.x()),
-                    geometry.get("y", self.y()),
-                    geometry.get("width", self.width()),
-                    geometry.get("height", self.height())
-                )
-                
-                if geometry.get("maximized", False):
-                    self.showMaximized()
-                    
-                logger.debug(f"Restored main window geometry: {geometry}")
+            # Get last used display index
+            last_display = self.settings_manager.get("ui.last_dialog_display", 0)
+            
+            # Calculate smart snap position (left side for main dialog)
+            position = calculate_snap_position(
+                dialog_size=self.size(),
+                side=DialogSide.LEFT,
+                monitor_index=last_display,
+                spacing=10
+            )
+            
+            # Apply position
+            self.move(position)
+            logger.debug(f"Main dialog positioned at {position} on display {last_display}")
                 
         except Exception as e:
-            logger.error(f"Error restoring window geometry: {e}", exc_info=True)
-            raise RuntimeError("Failed to restore window geometry.") from e
+            logger.error(f"Error positioning main dialog: {e}", exc_info=True)
+            # Fallback to centered
+            try:
+                self._center_window()
+            except Exception:
+                pass
     
     def _minimize_to_tray(self):
         """Minimize the window to the system tray."""

@@ -115,38 +115,46 @@ def main() -> int:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Single instance enforcement to prevent keyboard hook conflicts
-    # Uses OS-level mutex for cross-process detection (not thread synchronization)
-    try:
-        from core.application.instance import ApplicationInstanceManager
-        
-        instance_mgr = ApplicationInstanceManager(app_name="SPQDocker")
-        
-        if instance_mgr.is_another_instance_running():
-            logger.error("Another instance of ShittyPiPQuickSwap is already running.")
-            logger.error("Exiting to prevent fuck ups.")
-            logger.error("Murder the existing instance from system tray before starting a new one.")
-            return 1
-        
-        logger.info("Single instance check passed - this is the primary instance")
-        
-        # Register cleanup to release mutex on exit
-        import atexit
-        atexit.register(instance_mgr.cleanup)
-        
-    except Exception as e:
-        # Non-fatal: if instance check fails, continue anyway (fail-open)
-        logger.warning(f"Could not perform instance check: {e}")
-        instance_mgr = None
-    
     try:
         # Start the application
         logger.info("Starting application...")
         
-        # Ensure we have a QApplication instance
+        # Ensure we have a QApplication instance (needed for dialogs)
         app = QApplication.instance()
         if not app:
             app = QApplication(sys.argv)
+        
+        # Single instance enforcement to prevent keyboard hook conflicts
+        # Must be after QApplication creation to show dialog
+        try:
+            from core.application.instance import ApplicationInstanceManager
+            
+            instance_mgr = ApplicationInstanceManager(app_name="SPQDocker")
+            
+            if instance_mgr.is_another_instance_running():
+                logger.error("Another instance of ShittyPiPQuickSwap is already running.")
+                logger.error("Exiting to prevent fuck ups.")
+                
+                # Show styled dialog to inform user
+                try:
+                    from ui.dialogs.instance_running_dialog import InstanceRunningDialog
+                    dialog = InstanceRunningDialog()
+                    dialog.exec()
+                except Exception as e:
+                    logger.error(f"Failed to show instance dialog: {e}")
+                
+                return 1
+            
+            logger.info("Single instance check passed - this is the primary instance")
+            
+            # Register cleanup to release mutex on exit
+            import atexit
+            atexit.register(instance_mgr.cleanup)
+            
+        except Exception as e:
+            # Non-fatal: if instance check fails, continue anyway (fail-open)
+            logger.warning(f"Could not perform instance check: {e}")
+            instance_mgr = None
         
         # Register compiled Qt resources (no-op if module absent)
         try:

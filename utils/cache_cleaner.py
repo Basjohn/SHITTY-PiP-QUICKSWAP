@@ -55,13 +55,21 @@ def cleanup_pycache(root_dir=None, suppress_errors=True):
     return success, failures
 
 
-def register_cleanup_on_exit(root_dir=None):
+def register_cleanup_on_exit(root_dir=None, cleanup_on_start=True):
     """
     Register the cleanup_pycache function to run at interpreter shutdown.
+    Optionally also cleans on registration (startup).
     
     Args:
         root_dir (str or Path, optional): Root directory to clean. If None, uses default.
+        cleanup_on_start (bool): If True, also clean immediately on registration (default: True)
     """
     import atexit
+    
+    # Clean on startup to ensure fresh bytecode
+    if cleanup_on_start:
+        cleanup_pycache(root_dir=root_dir, suppress_errors=True)
+    
+    # Also clean on exit
     atexit.register(cleanup_pycache, root_dir=root_dir, suppress_errors=True)
     logger.debug("Registered __pycache__ cleanup for application exit")

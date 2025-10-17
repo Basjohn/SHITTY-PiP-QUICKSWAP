@@ -145,6 +145,9 @@ $pyArgs += '--hidden-import', 'PySide6.QtCore'
 $pyArgs += '--hidden-import', 'PySide6.QtGui'
 $pyArgs += '--hidden-import', 'PySide6.QtWidgets'
 
+# Hidden imports for lazy-loaded modules (function-scope imports)
+$pyArgs += '--hidden-import', 'core.opacity.manager'
+
 # Clean build
 $pyArgs += '--clean'
 $pyArgs += '--noconfirm'

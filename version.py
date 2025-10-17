@@ -13,9 +13,9 @@ Alpha/Beta/RC suffixes supported (e.g., "2.1.0a" for alpha)
 
 # Version components
 VERSION_MAJOR = 2
-VERSION_MINOR = 1
+VERSION_MINOR = 2
 VERSION_PATCH = 0
-VERSION_SUFFIX = "a"  # Empty string for release, "a" for alpha, "b" for beta, "rc" for release candidate
+VERSION_SUFFIX = ""  # Empty string for release, "a" for alpha, "b" for beta, "rc" for release candidate
 
 # Full version string (for Python)
 __version__ = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH}{VERSION_SUFFIX}"

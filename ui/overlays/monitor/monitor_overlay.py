@@ -396,6 +396,16 @@ class MonitorOverlay(QWidget):
         """Forward wheel events to window behavior manager for resize."""
         if self._window_behavior:
             self._window_behavior.wheelEvent(event)
+            
+            # Force immediate content rect update after wheel resize to prevent gaps
+            # The border canvas resize event should handle this, but explicitly updating
+            # ensures the capture display geometry is synchronized immediately
+            try:
+                if self._border_canvas and hasattr(self._border_canvas, '_update_content_rect'):
+                    self._border_canvas._update_content_rect()
+            except Exception as e:
+                logger.debug(f"Content rect update after wheel resize failed: {e}")
+        
         super().wheelEvent(event)
     
     def moveEvent(self, event: QMoveEvent) -> None:

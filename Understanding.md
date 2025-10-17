@@ -41,6 +41,77 @@ flowchart LR
 
 ## Recent changes
 
+### 2025-10-12: Aspect Ratio Canvas Initialization Fix
+
+**ISSUE 1**: Windows with out-of-bounds AR (e.g., Spotify 237x39, AR 6.077) fell back to 16:9 but rendered as **tiny thumbnails with massive padding** on all sides in docking mode.
+
+**ROOT CAUSE**: Canvas AR was set during initialization with arbitrary dimensions (`1280x720`) before the docking manager sized the overlay. Canvas calculated `content_rect` as tiny (e.g., `247x139`) based on those preset dimensions, causing severe size mismatch with actual overlay geometry (e.g., `862x492`).
+
+**FIX**: `core/graphics/backends/dwm/integrated_dwm_backend.py` 
+- **Initialization (lines 175-194)**: Skip canvas AR setup entirely for docking overlays
+```python
+# For docking overlays, skip AR init - let manager handle it
+if not self._is_docking_overlay():
+    # Standalone overlay - set AR immediately from window dimensions
+    self._canvas.set_content_aspect(src_w, src_h)
+# Docking overlay - AR will be set dynamically after manager sizes overlay
+```
+
+- **Dynamic AR Setup (lines 621-652)**: Set canvas AR in `_update_thumbnail_properties()` based on window validity
+```python
+# Check if window dimensions match the cached source aspect (within 5%)
+if abs(window_ar - source_aspect) / source_aspect < 0.05:
+    # Valid window AR - use actual window dimensions
+    self._canvas.set_content_aspect(src_w, src_h)  # e.g., 2106x1071
+else:
+    # Fallback AR - scale from overlay's current size
+    overlay_w = self._host.width()  # e.g., 862
+    overlay_h = int(overlay_w / source_aspect)  # e.g., 485 for 16:9
+    self._canvas.set_content_aspect(overlay_w, overlay_h)
+```
+
+**RESULT**: Canvas AR always matches overlay's actual size, eliminating tiny thumbnails. Overlays B/C/D/E (valid AR) use window dimensions, overlay A (fallback AR) scales from overlay size.
+
+**ISSUE 2**: Wheel-resize triggered **endless resize loop** - kept oscillating between 120px and 365px height.
+
+**ROOT CAUSE**: AR validation ran on EVERY `sync_overlay_properties()` call, including during user resizes:
+1. User resizes to 648x120 (AR 6.077) 
+2. Sync triggers → AR validation detects mismatch
+3. Resizes to 648x371 (AR 1.778)
+4. Triggers another resize event → another sync → loop continues
+
+**FIX**: `core/graphics/docking/manager.py` Smart HWND-based validation:
+```python
+# Track which HWND was validated
+self._last_validated_main_hwnd = None
+self._user_resize_in_progress = False  # Set during wheel/resize events
+
+# Only validate AR when HWND changes (swaps) OR first time
+should_validate = (
+    not self._user_resize_in_progress and
+    (current_main_hwnd != self._last_validated_main_hwnd or ...)
+)
+```
+
+**AR Validation Behavior Matrix**:
+| Trigger | Validates? | Reason |
+|---------|-----------|--------|
+| Creation/initialization | ✅ | `_last_validated_main_hwnd == None` |
+| Window swap (manual/autoswitch/cycle) | ✅ | HWND changed |
+| User wheel-resize | ❌ | `_user_resize_in_progress == True` |
+| User drag-resize | ❌ | `_user_resize_in_progress == True` |
+| Secondary positioning sync | ❌ | No HWND change |
+
+**AUTOSWITCH/CYCLE INTEGRATION**: Added sync triggers after display updates (lines 2876, 1118, 2726) to ensure AR validation runs after autoswitch/cycle swaps new windows.
+
+**RESULT**: 
+- Fallback AR windows render properly with no padding issues
+- User resizing works smoothly without AR validation interference  
+- Autoswitch/cycle swaps correctly validate and resize for new window ARs
+- Eliminates endless resize loops
+
+**Audit**: See `audits/ar_chain_reaction_debugging_report.md` for complete analysis
+
 ### 2025-10-09: Overlay E Bottom Alignment Fix
 
 **ISSUE**: Overlay E (rightmost/smallest secondary) drifted downward at minimum sizes when using bottom alignment, but top alignment worked perfectly.

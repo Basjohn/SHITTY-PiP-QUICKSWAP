@@ -2,10 +2,11 @@ from ui.components.circle_checkbox import CircleCheckBox
 from ui.dialogs.keypassthrough_warning_dialog import KeyPassthroughWarningDialog
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QKeySequenceEdit, QFrame, QCheckBox, QPushButton, QScrollArea, QWidget
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence, QMouseEvent
+from PySide6.QtGui import QKeySequence, QMouseEvent, QGuiApplication
 from core.settings import SettingsManager
 from core.opacity.manager import OpacityManager
 from utils.window.behavior import WindowBehaviorManager
+from utils.window.dialog_positioning import calculate_snap_position, DialogSide
 from core.logging import get_logger
 logger = get_logger(__name__)
 
@@ -34,7 +35,7 @@ class SubSettingsDialog(QDialog):
         # the dialog so QSS translucent backgrounds take effect.
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         # Use a minimum size rather than fixed to avoid layout overlap at smaller DPIs
-        self.setMinimumSize(380, 625)
+        self.setMinimumSize(380, 635)
         self.setObjectName("subsettingsDialog")
         self.setMouseTracking(True)
         
@@ -235,6 +236,35 @@ class SubSettingsDialog(QDialog):
         content_layout.addWidget(increase_label)
         content_layout.addWidget(self.increase_hotkey_edit)
 
+        # Wheel Opacity Scroll Modifier - Two checkboxes on same line
+        wheel_opacity_layout = QHBoxLayout()
+        wheel_opacity_layout.setSpacing(12)
+        
+        wheel_opacity_label = QLabel("Wheel Opacity Scroll:")
+        wheel_opacity_label.setObjectName("SubSettingsSectionLabel")
+        wheel_opacity_layout.addWidget(wheel_opacity_label)
+        
+        self.wheel_opacity_alt_checkbox = CircleCheckBox("ALT")
+        self.wheel_opacity_alt_checkbox.setObjectName("WheelOpacityAltCheckBox")
+        self.wheel_opacity_alt_checkbox.setMinimumWidth(60)
+        self.wheel_opacity_alt_checkbox.setToolTip(
+            "Use ALT + Scroll for opacity adjustment.\n"
+            "WARNING: Must be different from other registered hotkeys to avoid conflicts."
+        )
+        wheel_opacity_layout.addWidget(self.wheel_opacity_alt_checkbox)
+        
+        self.wheel_opacity_ctrl_checkbox = CircleCheckBox("CTRL")
+        self.wheel_opacity_ctrl_checkbox.setObjectName("WheelOpacityCtrlCheckBox")
+        self.wheel_opacity_ctrl_checkbox.setMinimumWidth(70)
+        self.wheel_opacity_ctrl_checkbox.setToolTip(
+            "Use CTRL + Scroll for opacity adjustment.\n"
+            "WARNING: Must be different from other registered hotkeys to avoid conflicts."
+        )
+        wheel_opacity_layout.addWidget(self.wheel_opacity_ctrl_checkbox)
+        wheel_opacity_layout.addStretch()
+        
+        content_layout.addLayout(wheel_opacity_layout)
+
         # ===== FEATURE TOGGLES =====
         # Autoswitch
         self.autoswitch_checkbox = CircleCheckBox("Enable Autoswitch")
@@ -367,6 +397,15 @@ class SubSettingsDialog(QDialog):
         larger_borders_enabled = bool(self.settings_manager.get("overlay.larger_borders", False))
         self.larger_borders_checkbox.setChecked(larger_borders_enabled)
 
+        # Wheel Opacity Modifier (default alt)
+        wheel_opacity_modifier = self.settings_manager.get("input.wheel_opacity_modifier", "alt")
+        if wheel_opacity_modifier.lower() == "ctrl":
+            self.wheel_opacity_ctrl_checkbox.setChecked(True)
+            self.wheel_opacity_alt_checkbox.setChecked(False)
+        else:
+            self.wheel_opacity_alt_checkbox.setChecked(True)
+            self.wheel_opacity_ctrl_checkbox.setChecked(False)
+
 
     def _save_settings(self):
         """Save the current settings."""
@@ -439,6 +478,11 @@ class SubSettingsDialog(QDialog):
         larger_borders_enabled = self.larger_borders_checkbox.isChecked()
         self.settings_manager.set("overlay.larger_borders", larger_borders_enabled, save_immediately=False)
         logger.debug(f"Saved overlay.larger_borders={larger_borders_enabled}")
+        
+        # Wheel Opacity Modifier
+        wheel_opacity_modifier = "ctrl" if self.wheel_opacity_ctrl_checkbox.isChecked() else "alt"
+        self.settings_manager.set("input.wheel_opacity_modifier", wheel_opacity_modifier, save_immediately=False)
+        logger.debug(f"Saved input.wheel_opacity_modifier='{wheel_opacity_modifier}'")
         
         # Single batched save at the end
         self.settings_manager.save()
@@ -622,6 +666,32 @@ class SubSettingsDialog(QDialog):
         self.settings_manager.set("features.media_control_enabled", enabled)
         logger.debug(f"Media control toggled to {enabled}")
 
+    def _on_wheel_opacity_alt_changed(self, state):
+        """Handle ALT checkbox change for wheel opacity modifier."""
+        if self.wheel_opacity_alt_checkbox.isChecked():
+            # Uncheck CTRL when ALT is checked (mutually exclusive)
+            self.wheel_opacity_ctrl_checkbox.blockSignals(True)
+            self.wheel_opacity_ctrl_checkbox.setChecked(False)
+            self.wheel_opacity_ctrl_checkbox.blockSignals(False)
+            self.settings_manager.set("input.wheel_opacity_modifier", "alt")
+            logger.debug("Wheel opacity modifier changed to alt")
+        elif not self.wheel_opacity_ctrl_checkbox.isChecked():
+            # If both are unchecked, default to ALT
+            self.wheel_opacity_alt_checkbox.setChecked(True)
+
+    def _on_wheel_opacity_ctrl_changed(self, state):
+        """Handle CTRL checkbox change for wheel opacity modifier."""
+        if self.wheel_opacity_ctrl_checkbox.isChecked():
+            # Uncheck ALT when CTRL is checked (mutually exclusive)
+            self.wheel_opacity_alt_checkbox.blockSignals(True)
+            self.wheel_opacity_alt_checkbox.setChecked(False)
+            self.wheel_opacity_alt_checkbox.blockSignals(False)
+            self.settings_manager.set("input.wheel_opacity_modifier", "ctrl")
+            logger.debug("Wheel opacity modifier changed to ctrl")
+        elif not self.wheel_opacity_alt_checkbox.isChecked():
+            # If both are unchecked, default to ALT
+            self.wheel_opacity_alt_checkbox.setChecked(True)
+
     # Removed click-through change handler
 
     def _on_capture_fps_changed(self, text):
@@ -658,6 +728,8 @@ class SubSettingsDialog(QDialog):
         self.larger_borders_checkbox.stateChanged.connect(self._on_larger_borders_changed)
         self.display_locked_checkbox.stateChanged.connect(self._on_display_locked_switching_changed)
         self.capture_fps_combo.currentTextChanged.connect(self._on_capture_fps_changed)
+        self.wheel_opacity_alt_checkbox.stateChanged.connect(self._on_wheel_opacity_alt_changed)
+        self.wheel_opacity_ctrl_checkbox.stateChanged.connect(self._on_wheel_opacity_ctrl_changed)
 
     # Theme application is centralized in ThemeManager; dialog does not apply theme directly
 
@@ -666,16 +738,52 @@ class SubSettingsDialog(QDialog):
     # defined earlier in this class
 
     def showEvent(self, event):
-        """Reset cursor when dialog is shown to fix horizontal arrow cursor bug."""
+        """Reset cursor and position dialog using smart snap positioning."""
         super().showEvent(event)
+        
+        # Smart positioning on first show
+        try:
+            # Get last used display index
+            last_display = self.settings_manager.get("ui.last_dialog_display", 0)
+            
+            # Calculate smart snap position (right side for subsettings)
+            position = calculate_snap_position(
+                dialog_size=self.size(),
+                side=DialogSide.RIGHT,
+                monitor_index=last_display,
+                spacing=10
+            )
+            
+            # Apply position
+            self.move(position)
+            logger.debug(f"Subsettings dialog positioned at {position} on display {last_display}")
+        except Exception as e:
+            logger.warning(f"Error positioning subsettings dialog: {e}")
+        
         # Reset cursor to default arrow to prevent stuck resize cursor
+        # This addresses a bug where the resize cursor sometimes persists after mouseover
         self.setCursor(Qt.ArrowCursor)
+    
+    def closeEvent(self, event):
+        """Persist display index when dialog is closed."""
+        try:
+            # Find which display this dialog is on
+            screens = QGuiApplication.screens()
+            center = self.geometry().center()
+            for i, screen in enumerate(screens):
+                if screen.geometry().contains(center):
+                    self.settings_manager.set("ui.last_dialog_display", i)
+                    logger.debug(f"Subsettings dialog closed on display {i}")
+                    break
+        except Exception as e:
+            logger.warning(f"Error persisting subsettings display: {e}")
+        
+        super().closeEvent(event)
         # Also ensure window behavior manager resets its state
         if hasattr(self, 'window_behavior'):
             self.window_behavior.handle_leave()
     
     def keyPressEvent(self, event):
-        """Close the subsettings dialog on ESC."""
         try:
             if event and event.key() == Qt.Key_Escape:
                 event.accept()

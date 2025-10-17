@@ -19,6 +19,7 @@ from PySide6.QtGui import QGuiApplication
 from core.logging import get_logger
 from utils.window.monitors import get_physical_work_area_at, get_physical_monitor_rect_at
 from core.threading import ThreadManager
+from core.settings import get_settings_manager
 
 T = TypeVar('T', bound='WindowState')
 
@@ -891,7 +892,9 @@ class WindowBehaviorManager:
             pass
     
     def handle_wheel(self, event, content_aspect: Optional[tuple[int, int]] = None, content_insets: Optional[tuple[int, int]] = None) -> None:
-        """Handle wheel-based resize with batching, inner-AR preservation, and bounds clamping.
+        """Handle wheel-based resize or opacity adjustment with batching, inner-AR preservation, and bounds clamping.
+        
+        When the configured modifier (Alt or Ctrl) is held, adjusts overlay opacity instead of resizing.
         
         Args:
             event: QWheelEvent (must provide angleDelta())
@@ -899,6 +902,50 @@ class WindowBehaviorManager:
             content_insets: Optional (ix, iy) DPI-aware per-side insets used to derive inner content rect
         """
         try:
+            # Check for configured modifier key for opacity adjustment mode
+            # Use both Qt event modifiers AND physical keyboard state for reliability
+            from PySide6.QtCore import Qt
+            modifiers = event.modifiers() if hasattr(event, 'modifiers') else Qt.NoModifier
+            
+            # Get configured modifier from settings (default: alt)
+            try:
+                settings_mgr = get_settings_manager()
+                modifier_key = settings_mgr.get('input.wheel_opacity_modifier', 'alt').lower()
+            except Exception:
+                modifier_key = 'alt'
+            
+            # Check Qt modifiers first based on configured key
+            modifier_pressed = False
+            vk_code = None
+            
+            if modifier_key == 'ctrl':
+                modifier_pressed = bool(modifiers & Qt.ControlModifier)
+                vk_code = 0x11  # VK_CONTROL
+            else:  # 'alt' is default
+                modifier_pressed = bool(modifiers & Qt.AltModifier)
+                vk_code = 0x12  # VK_MENU (Alt key)
+            
+            # On Windows, also check actual keyboard state as fallback (more reliable)
+            # This prevents race conditions where Qt event modifiers arrive before key state updates
+            if not modifier_pressed and vk_code is not None:
+                try:
+                    import sys
+                    if sys.platform == 'win32':
+                        import ctypes
+                        # GetAsyncKeyState returns MSB set if key is down
+                        state = ctypes.windll.user32.GetAsyncKeyState(vk_code)
+                        modifier_pressed = bool(state & 0x8000)
+                except Exception:
+                    pass
+            
+            if modifier_pressed:
+                # Modifier+Scroll → Opacity adjustment
+                self._handle_wheel_opacity(event)
+                if hasattr(event, 'accept'):
+                    event.accept()
+                return
+            
+            # No modifier → Continue with resize logic
             # Docking mode guard: if this host belongs to a secondary docking overlay,
             # do not perform host wheel-resize here. Let DockingOverlay intercept and scale the main.
             try:
@@ -1203,6 +1250,60 @@ class WindowBehaviorManager:
                     self._apply_pending_wheel_geo()
         except Exception as e:
             self._logger.error(f"handle_wheel failed: {e}")
+
+    def _handle_wheel_opacity(self, event) -> None:
+        """Handle Modifier+Scroll for opacity adjustment.
+        
+        Adjusts the overlay opacity based on wheel delta when the configured modifier (Alt or Ctrl) is held.
+        
+        Args:
+            event: QWheelEvent with modifier key held
+        """
+        try:
+            from core.opacity.manager import get_opacity_manager
+            
+            # Extract wheel delta (Qt: 120 units per step)
+            angle = event.angleDelta() if hasattr(event, 'angleDelta') else None
+            if angle is None:
+                return
+            
+            raw = angle.y() if hasattr(angle, 'y') and angle.y() != 0 else (
+                angle.x() if hasattr(angle, 'x') else 0
+            )
+            if raw == 0:
+                return
+            
+            # Convert wheel units to opacity percent
+            # Qt: 120 units per scroll tick
+            # Target: ~8% per tick for fast adjustment
+            steps = float(raw) / 120.0
+            opacity_delta = int(steps * 8)  # 8% per tick
+            
+            # Clamp to non-zero delta to ensure visible change on standard mice
+            if opacity_delta == 0 and raw != 0:
+                opacity_delta = 1 if raw > 0 else -1
+            
+            # Get opacity manager and adjust
+            om = get_opacity_manager()
+            current = om.get_opacity()
+            new_opacity = max(1, min(100, current + opacity_delta))
+            
+            if new_opacity != current:
+                om.set_opacity(new_opacity)
+                # Suppress repeated debug logs - only log at boundaries
+                if new_opacity == 1 or new_opacity == 100:
+                    # Get modifier name for logging
+                    try:
+                        settings_mgr = get_settings_manager()
+                        mod_name = settings_mgr.get('input.wheel_opacity_modifier', 'alt').upper()
+                    except Exception:
+                        mod_name = 'ALT'
+                    self._logger.debug(
+                        f"[{mod_name}_SCROLL_OPACITY] {current}% -> {new_opacity}% "
+                        f"(boundary reached)"
+                    )
+        except Exception as e:
+            self._logger.error(f"Modifier+Scroll opacity adjustment failed: {e}")
 
     def handle_leave(self):
         """Handle mouse leave events to reset cursor."""

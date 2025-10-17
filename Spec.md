@@ -99,11 +99,28 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
     - **Cycling Logic**: When A returns to same window (e.g., 1001→1001), push A→B, B→C, and assign most recent valid MRU to A
     - **Lock Awareness**: Locked overlays skip content changes but system still prevents duplicates across unlocked overlays
     - **Fallback Population**: When MRU has <3 entries, enumerate visible windows via WindowEnumerator to ensure B/C have valid targets
-- **Robust Aspect Ratio Management**: 
-  - DWM overlay uses sophisticated client area and window rect fallback logic
+- **Robust Aspect Ratio Management** (Updated 2025-10-12): 
+  - **Three-tier AR fallback**: (1) Window AR (client/window rect, 0.4-3.0 bounds), (2) Display AR (0.3-4.0 bounds for real displays), (3) 16:9 default
+  - **Canvas AR Initialization Policy** (CRITICAL):
+    - **Standalone overlays**: Canvas AR set immediately during initialization from window dimensions
+    - **Docking overlays**: Canvas AR skipped during initialization - set dynamically in `_update_thumbnail_properties()` after manager sizes overlay
+    - **Rationale**: Docking manager controls all geometry through `sync_overlay_properties()`, so canvas AR must adapt to actual overlay size, not preset dimensions
+  - **Dynamic Canvas AR (Docking)**: `_update_thumbnail_properties()` sets canvas AR based on window validity:
+    - **Valid window AR** (matches cached `_source_aspect` within 5%): Use actual window dimensions (e.g., `2106x1071`)
+    - **Fallback AR** (invalid window, used fallback): Scale from overlay's current width (e.g., overlay `862px` wide with AR `1.778` → `862x485`)
+    - **Result**: Canvas always fits properly regardless of whether window AR was valid or fallback, eliminating tiny thumbnails and padding issues
+  - **Smart AR Validation** (Docking): HWND-based validation prevents resize loops
+    - **When Validation Runs**: Creation, restoration from hidden, window swaps (manual/autoswitch/cycle)
+    - **When Validation Skips**: User wheel-resize, user drag-resize, secondary positioning syncs
+    - **Implementation**: Tracks `_last_validated_main_hwnd` to detect source changes; sets `_user_resize_in_progress` flag during resize events (cleared after 500ms)
+    - **Autoswitch/Cycle Integration**: Display updates trigger coalesced sync (10ms delay) to validate AR for newly swapped windows
+    - **Result**: AR validation corrects geometry on swaps but doesn't interfere with user resizing, eliminating endless resize loops
+  - **Docking thumbnail calculation**: For docking overlays, trusts canvas `content_rect` directly; DockingManager handles AR at geometry level
+  - **"Correct AR" integration**: Direct parent reference to docking manager (replaces unreliable GC search) for reliable sync triggering
   - Monitor overlay inherits DWM aspect ratio caching for consistent scaling
-  - Bounds checking (0.2-5.0 ratio limits) prevents extreme distortions
+  - Bounds checking prevents extreme distortions (window: 0.4-3.0, display: 0.3-4.0, overall clamp: 0.2-5.0)
   - DPI-aware thumbnail property scaling for proper rendering
+  - **Complete flow trace**: See `audits/docking_ar_flow_complete_trace.md` and `audits/ar_chain_reaction_debugging_report.md` for AR lifecycle and fixes
 
 #### DWM Overlay Geometry Persistence (Spec)
 
@@ -196,10 +213,21 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 
 ### Architectural Rules (Cross-cutting)
 
-- **Lock-free Concurrency Model**: All utility modules use UI thread confinement for state mutations (completed migration 2024-12-28)
-  - `ZOrderManager`, `CursorManager`, `MouseCaptureCoordinator` - all migrated to lock-free design
+- **Lock-free Concurrency Model**: All utility modules use UI thread confinement for state mutations (completed migration 2024-12-28, extended 2025-10-16)
+  - `ZOrderManager`, `CursorManager`, `MouseCaptureCoordinator`, `HotkeyManager`, `LogSuppressor` - all migrated to lock-free design
   - Cross-thread calls dispatched via `ThreadManager.run_on_ui_thread()`
-  - No explicit locks (RLock, Lock) in utility modules
+  - No explicit locks (RLock, Lock) in utility modules - **100% LOCK-FREE CODEBASE ACHIEVED**
+  - **HotkeyManager Lock-Free Architecture** (2025-10-16):
+    - Single-threaded ownership: dedicated hotkey thread owns all `_system_hotkeys` state
+    - SPSC queue for cross-thread commands (lock-free data structure)
+    - Event-based synchronization for infrequent operations (registration/unregistration)
+    - Zero lock contention in hotkey dispatch path (critical for Ctrl+Scroll and media keys)
+    - Eliminated race condition with modifier key detection during focus changes
+  - **LogSuppressor Lock-Free Architecture** (2025-10-16):
+    - Thread-local storage for per-thread suppression state (no locks needed)
+    - Each thread maintains independent timestamp cache and suppression set
+    - Zero contention across threads, fully lock-free
+    - Maintains full suppression semantics without blocking
 - **No Backwards-Compatibility Layers**: Do not add legacy shims, dual paths, or compatibility wrappers. Remove redundant/legacy code during refactors
 - **No Duplication**: Centralize shared logic (e.g., `ThreadManager`, `ZOrderManager`, `ThemeManager`, `OverlayManager`). Extract shared behavior once and reuse
 - **No Code Bloat**: Prefer standardized interfaces, single sources of truth, and small composable helpers over ad-hoc per-backend logic
@@ -294,6 +322,24 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - Clamping is performed within the current monitor's FULL geometry (not union-of-monitors). If the proposed size exceeds the monitor, size is reduced while preserving INNER aspect ratio using canvas insets, then position is clamped to the monitor bounds.
 - Inner aspect-ratio lock when the canvas provides `content_aspect` and insets; AR is preserved for inner content while respecting outer min-size.
 - Persistence triggers: after wheel-apply and after drag/resize release, if the overlay host exposes `_persist_current_geometry()`, it is called (standalone DWM) to keep persisted state fresh for creation-time restore.
+
+#### Modifier+Scroll Opacity Adjustment (Spec)
+
+- **Configurable modifier-based mode switching** (2025-10-17): Wheel events switch between resize and opacity adjustment based on configured modifier key
+  - **No modifier held**: Standard wheel-resize behavior (existing functionality)
+  - **Modifier held (Alt or Ctrl)**: Opacity adjustment mode (~8% per tick, clamped to 1-100% range)
+  - **Setting**: `input.wheel_opacity_modifier` (default: "alt")
+  - **Configuration**: User can select ALT or CTRL via "Wheel Opacity Scroll" dropdown in subsettings dialog
+  - **Conflict Warning**: Tooltip warns users that the modifier must be different from other registered hotkeys
+  - Event is explicitly accepted to prevent OS propagation
+- **Implementation**: Centralized in `WindowBehaviorManager.handle_wheel()` with dedicated `_handle_wheel_opacity()` handler
+  - Checks both Qt event modifiers AND Windows `GetAsyncKeyState()` for reliability (VK_MENU/0x12 for Alt, VK_CONTROL/0x11 for Ctrl)
+  - Prevents race conditions where Qt modifiers arrive before keyboard state updates
+- **Compatibility**: Works in all overlay modes (single overlay, docking main, docking secondaries)
+- **Opacity range**: 1-100% (matches `OpacityManager` bounds)
+- **Delta calculation**: `(wheel_delta / 120.0) * 8` → ~8% per standard mouse tick
+- **Integration**: Uses existing `OpacityManager` singleton for persistence and UI updates
+- **Logging**: `[ALT_SCROLL_OPACITY]` or `[CTRL_SCROLL_OPACITY]` prefix for debugging (based on configured modifier)
 
 ### Portable Build & Distribution (Windows)
 
@@ -474,6 +520,36 @@ SPQModular is a hardware-accelerated overlay application that provides real-time
 - **Enhanced Secondary Focus**: Double-click on secondary overlays uses `_normal_mode_swap_with_foreground()` for targeted swap
 - **Cycle Mode**: Double-click focuses window, all overlays update dynamically based on MRU
 - Per-overlay lock (focus indicator) suppresses quickswitch automatic updates; manual double-click on overlays remains enabled with proper locked overlay handling
+
+#### Automatic Overlay Switching Systems (Spec)
+
+SPQModular has **two distinct automatic switching systems** with different purposes and settings:
+
+##### 1. Foreground-Focus Autoswitch (`ForegroundAutoswitchController`)
+- **Purpose**: Swaps overlay content when you focus a window that's currently displayed in an overlay
+- **Trigger**: OS foreground window changes (polling-based)
+- **Setting**: `features.autoswitch_enabled` (default: False)
+- **Poll Interval**: 250ms with 300ms debounce
+- **UI Control**: Subsettings dialog "Enable Autoswitch" checkbox
+- **Location**: `core/switching/autoswitch_controller.py`
+
+##### 2. Closed-Window Auto-Replacement (`ClosedWindowSwitchManager`)
+- **Purpose**: Automatically replaces blank overlays when their source window closes
+- **Trigger**: Window validity monitoring (detects closed/destroyed windows)
+- **Setting**: `behavior.dead_switch` (default: True) - no UI toggle, enabled by default
+- **Poll Interval**: 2000ms (2 seconds)
+- **Behavior**: Replaces blank overlay with next valid MRU window (duplicate-aware)
+- **Location**: `core/graphics/window_monitor.py`
+- **Features**:
+  - MRU-aware selection (prioritizes recently used windows)
+  - Duplicate prevention (excludes windows already in other overlays)
+  - Automatic registration/unregistration on overlay creation/destruction
+  - Works for both single overlays and docking mode
+
+**Settings** (2025-10-17 rename):
+- `features.autoswitch_enabled` - Controls foreground-focus autoswitch (ForegroundAutoswitchController)
+- `behavior.dead_switch` - Controls closed-window auto-replacement (ClosedWindowSwitchManager)
+- Completely separate settings for completely separate systems - no fallback layers
 
 #### Autoswitch (Spec)
 
@@ -1152,6 +1228,33 @@ python scripts/sync_themes.py
   - No inline styles; theme application handled centrally by `ThemeManager`
   - Debug logging on setting saves and changes for auditability
   - Visual gap fix: QSS margins for `#titleFrame` and `QFrame#settingsContentFrame` adjusted to remove the transparent seam
+
+#### Smart Dialog Positioning (UI Spec)
+
+- **Module**: `utils/window/dialog_positioning.py`
+- **Purpose**: Intelligent dialog positioning with taskbar awareness and multi-monitor persistence
+- **Integration**: Both `MainDialog` and `SubSettingsDialog` use smart positioning instead of basic geometry restoration
+- **Architecture** (2025-10-17):
+  - **Taskbar Detection**: Uses Windows `SHAppBarMessage` API to detect taskbar edge (left/right/top/bottom)
+  - **Snap Logic**:
+    - **Bottom taskbar** (default): Dialogs snap to bottom corners (main=left, subsettings=right)
+    - **Top taskbar**: Dialogs snap to top corners
+    - **Left/Right taskbar**: Dialogs stack vertically on the opposite edge
+    - **No taskbar detected**: Fallback to bottom corners using `availableGeometry()`
+  - **Spacing**: 10px default spacing from screen edges
+  - **Display Persistence**: `ui.last_dialog_display` (int) persists the last monitor index used
+  - **Position on Show**: Both dialogs calculate smart position in `showEvent()` based on their side (main=LEFT, subsettings=RIGHT)
+  - **Persist on Close**: Both dialogs save the display index in `closeEvent()` by detecting which monitor contains their center point
+- **Fallbacks**:
+  1. Primary: Taskbar-aware snap to opposite sides
+  2. Secondary: Bottom corners if no taskbar detected
+  3. Tertiary: Centered (avoided by design, only on catastrophic failure)
+- **Multi-Monitor**: Automatically uses the last display where dialogs were shown; validates monitor index bounds
+- **Benefits**:
+  - Predictable positioning across sessions
+  - Avoids taskbar occlusion
+  - Natural left/right pairing for main + subsettings dialogs
+  - Works seamlessly with vertical/horizontal taskbars
 
 ### Resource Management
 - Centralized resource tracking and cleanup via `core/resources/manager.py` (`ResourceManager`)

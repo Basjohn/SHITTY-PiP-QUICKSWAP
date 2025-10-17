@@ -587,13 +587,77 @@ QKeySequenceEdit#SettingsKeySequenceEdit:focus {
 
 /* Custom outer border frame for SubSettingsDialog */
 QFrame#settingsDialogBorder,
-QFrame#aboutDialogBorder {
+QFrame#aboutDialogBorder,
+QFrame#instanceDialogBorder {
     /* Outer visual container: paints both background and rounded outline */
     background-color: rgba(43, 43, 43, 0.8); /* Subsettings main background @ 80% */
     border: 2px solid rgba(255, 255, 255, 1.0);
     border-radius: 8px;
     padding: 2px; /* match border thickness for clean inner edge */
     margin: 0;
+}
+
+/* ===== INSTANCE RUNNING DIALOG ===== */
+QDialog#instanceRunningDialog {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+}
+
+#instanceRunningDialog QWidget#titleFrame {
+    background-color: rgba(26, 26, 26, 0.92);
+    border: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+
+#instanceRunningDialog QFrame#instanceContentFrame {
+    background-color: rgba(43, 43, 43, 0.8);
+    border: none;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+
+#instanceRunningDialog QLabel#titleLabel {
+    color: rgba(255, 255, 255, 1.0);
+    font-size: 16px;
+    font-weight: bold;
+}
+
+#instanceRunningDialog QPushButton#closeButton {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 1.0);
+    font-size: 16px;
+    font-weight: bold;
+    padding: 4px 8px;
+    qproperty-text: "✕";
+}
+
+#instanceRunningDialog QPushButton#closeButton:hover {
+    color: rgba(0, 0, 0, 1.0);
+    background: transparent;
+}
+
+#instanceRunningDialog QPushButton#instanceOkButton {
+    background-color: rgba(68, 68, 68, 0.9);
+    border: 2px solid rgba(255, 255, 255, 0.6);
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 1.0);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 8px 16px;
+    min-height: 32px;
+}
+
+#instanceRunningDialog QPushButton#instanceOkButton:hover {
+    background-color: rgba(85, 85, 85, 0.95);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+}
+
+#instanceRunningDialog QPushButton#instanceOkButton:pressed {
+    background-color: rgba(51, 51, 51, 1.0);
+    border: 2px solid rgba(255, 255, 255, 1.0);
 }
 
 
@@ -809,6 +873,42 @@ QPushButton#QSmolselect:checked {
 /* Checked hover state */
 QPushButton#QSmolselect:checked:hover {
     /* color-picker: checked-hover-background: #000000; */
+    background-color: rgba(0, 0, 0, 1.0);
+}
+
+/* Compact variant for small numeric toggle buttons (same height, narrower width) */
+QPushButton#QSmolselectMini {
+    /* base consistent with QSmolselect */
+    background-color: rgba(35, 35, 35, 1.0);
+    color: rgba(255, 255, 255, 1.0);
+    border: 1px solid rgba(255, 255, 255, 1.0);
+    border-radius: 10px;
+    /* keep vertical padding to preserve height; trim horizontal padding */
+    padding: 6px 4px; /* v h */
+    /* very compact width, just a bit wider than the numeral */
+    min-width: 22px;
+    max-width: 28px;
+    font-family: 'Segoe UI';
+    font-size: 12px;
+    font-weight: bold;
+    text-transform: uppercase;
+    text-align: center;
+    margin: 4px; /* tight spacing for compact row */
+}
+
+QPushButton#QSmolselectMini:hover {
+    background-color: rgba(0, 0, 0, 1.0);
+}
+
+QPushButton#QSmolselectMini:pressed {
+    background-color: rgba(26, 26, 26, 1.0);
+}
+
+QPushButton#QSmolselectMini:checked {
+    background-color: rgba(0, 0, 0, 1.0);
+}
+
+QPushButton#QSmolselectMini:checked:hover {
     background-color: rgba(0, 0, 0, 1.0);
 }
 

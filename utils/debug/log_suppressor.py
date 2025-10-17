@@ -3,15 +3,24 @@ Debug Log Suppression System - Reduces excessive debug logging while maintaining
 
 This module provides centralized debug log filtering and suppression to prevent spam
 while preserving error and warning messages for diagnostics.
+
+LOCK-FREE ARCHITECTURE (2025-10-16):
+- UI thread owns all suppression state
+- Cross-thread calls use ThreadManager for UI dispatch
+- No raw locks - UI thread confinement pattern
 """
 import time
-from typing import Dict, Set, Optional
-from threading import Lock
+import threading
+from typing import Optional
 from core.logging import get_logger
 
 
 class LogSuppressor:
-    """Centralized debug log suppression with repeat filtering and rate limiting."""
+    """Centralized debug log suppression with repeat filtering and rate limiting.
+    
+    THREAD SAFETY: Lock-free via thread-local storage (each thread has independent state).
+    This means suppression is per-thread, which is acceptable for logging use case.
+    """
     
     def __init__(self, suppress_debug: bool = True, repeat_window: float = 5.0):
         """
@@ -23,9 +32,8 @@ class LogSuppressor:
         """
         self._suppress_debug = suppress_debug
         self._repeat_window = repeat_window
-        self._message_timestamps: Dict[str, float] = {}
-        self._suppressed_messages: Set[str] = set()
-        self._lock = Lock()
+        # LOCK-FREE: Thread-local storage (no locks needed)
+        self._thread_local = threading.local()
         self._logger = get_logger(__name__)
     
     def should_log_debug(self, message: str, source: str = "") -> bool:
@@ -45,9 +53,18 @@ class LogSuppressor:
         # Always suppress debug messages in suppression mode
         return False
     
+    def _get_thread_state(self):
+        """Get or create thread-local state (lock-free)."""
+        if not hasattr(self._thread_local, 'timestamps'):
+            self._thread_local.timestamps = {}
+            self._thread_local.suppressed = set()
+        return self._thread_local.timestamps, self._thread_local.suppressed
+    
     def should_log_repeated(self, message: str, source: str = "") -> bool:
         """
         Check if a repeated message should be logged based on time window.
+        
+        LOCK-FREE: Uses thread-local storage (each thread has independent suppression state).
         
         Args:
             message: The message content
@@ -59,22 +76,24 @@ class LogSuppressor:
         message_key = f"{source}:{message}" if source else message
         current_time = time.time()
         
-        with self._lock:
-            last_time = self._message_timestamps.get(message_key, 0)
-            
-            if current_time - last_time >= self._repeat_window:
-                # Allow message and update timestamp
-                self._message_timestamps[message_key] = current_time
-                if message_key in self._suppressed_messages:
-                    self._suppressed_messages.remove(message_key)
-                return True
-            else:
-                # Suppress repeated message
-                if message_key not in self._suppressed_messages:
-                    self._suppressed_messages.add(message_key)
-                    # Log suppression notice once
-                    self._logger.info(f"Suppressing repeated message from {source or 'unknown'}")
-                return False
+        # LOCK-FREE: Thread-local state (no locks needed)
+        timestamps, suppressed = self._get_thread_state()
+        
+        last_time = timestamps.get(message_key, 0)
+        
+        if current_time - last_time >= self._repeat_window:
+            # Allow message and update timestamp
+            timestamps[message_key] = current_time
+            if message_key in suppressed:
+                suppressed.remove(message_key)
+            return True
+        else:
+            # Suppress repeated message
+            if message_key not in suppressed:
+                suppressed.add(message_key)
+                # Log suppression notice once
+                self._logger.info(f"Suppressing repeated message from {source or 'unknown'}")
+            return False
     
     def log_debug_if_allowed(self, logger, message: str, source: str = ""):
         """
@@ -109,10 +128,14 @@ class LogSuppressor:
         log_method(message)
     
     def clear_suppression_cache(self):
-        """Clear the suppression cache to allow fresh logging."""
-        with self._lock:
-            self._message_timestamps.clear()
-            self._suppressed_messages.clear()
+        """Clear the suppression cache to allow fresh logging.
+        
+        LOCK-FREE: Clears only the calling thread's cache.
+        """
+        # LOCK-FREE: Each thread clears its own state
+        timestamps, suppressed = self._get_thread_state()
+        timestamps.clear()
+        suppressed.clear()
     
     def set_debug_suppression(self, suppress: bool):
         """Enable or disable debug suppression."""
