@@ -135,12 +135,24 @@ class OverlayStateManager:
             
             # Check for overlay manager
             try:
-                overlay_mgr = find_resource_by_description("OverlayManager")
+                # Correct description per overlay manager registration
+                overlay_mgr = find_resource_by_description("OverlayManager singleton")
                 if overlay_mgr and hasattr(overlay_mgr, 'get_all_overlays'):
                     overlays = overlay_mgr.get_all_overlays()
                     if overlays:
                         self._logger.debug("Detected single overlay mode")
                         return "single"
+                # Fallback: instantiate OverlayManager singleton and query overlays directly
+                try:
+                    from core.graphics.overlay_manager import OverlayManager as _OM
+                    om = _OM()
+                    if hasattr(om, 'get_all_overlays'):
+                        overlays = om.get_all_overlays()
+                        if overlays:
+                            self._logger.debug("Detected single overlay mode via fallback")
+                            return "single"
+                except Exception as _e:
+                    self._logger.debug(f"Single overlay detection fallback failed: {_e}")
             except Exception as e:
                 self._logger.debug(f"Single overlay detection failed: {e}")
             

@@ -553,8 +553,14 @@ class ThreadManager:
         # Coalesce drains onto UI thread using existing timer infra
         if not self._mut_drain_scheduled:
             self._mut_drain_scheduled = True
-            # Small window to batch bursts
-            self.single_shot(max(0, int(delay_ms)), self._drain_mutations_on_ui)
+            # Guard against early initialization before Qt app exists
+            from PySide6.QtCore import QCoreApplication
+            if QCoreApplication.instance() is not None:
+                # Small window to batch bursts
+                self.single_shot(max(0, int(delay_ms)), self._drain_mutations_on_ui)
+            else:
+                # No Qt yet - just mark as not scheduled so it can retry later
+                self._mut_drain_scheduled = False
 
     def _drain_mutations_on_ui(self) -> None:
         self._mut_drain_scheduled = False
@@ -610,7 +616,11 @@ class ThreadManager:
 
     def _schedule_stats_publish(self) -> None:
         # Use single_shot to avoid raw timers here and keep cadence light
-        self.single_shot(self._stats_pub_interval_ms, self._publish_stats_once)
+        # Guard against early initialization before Qt app exists
+        from PySide6.QtCore import QCoreApplication
+        if QCoreApplication.instance() is not None:
+            self.single_shot(self._stats_pub_interval_ms, self._publish_stats_once)
+        # else: skip stats publishing until Qt is ready (non-critical feature)
 
     def get_stats_snapshot(self) -> Dict[str, Dict[str, Any]]:
         """Return latest thread pool stats without taking locks if available.

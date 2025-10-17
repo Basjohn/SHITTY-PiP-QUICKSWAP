@@ -800,22 +800,16 @@ class OverlayManager:
             self._closed_window_switch_manager.unregister_overlay(overlay_id)
     
     def _apply_initial_auto_switch_setting(self) -> None:
-        """Apply the initial auto-switch setting from configuration."""
+        """Apply the initial dead_switch setting for closed-window auto-replacement."""
         try:
             from core.settings import get_settings_manager
             settings_manager = get_settings_manager()
             if settings_manager:
-                # Prefer canonical feature flag; fall back to legacy key for backward compatibility
-                auto_switch_enabled = bool(
-                    settings_manager.get(
-                        "features.autoswitch_enabled",
-                        settings_manager.get("behavior.auto_switch", True),
-                    )
-                )
+                auto_switch_enabled = bool(settings_manager.get("behavior.dead_switch", True))
                 self.set_auto_switch_enabled(auto_switch_enabled)
-                self._logger.debug(f"Applied initial auto-switch setting: {auto_switch_enabled}")
+                self._logger.debug(f"Applied initial dead_switch setting: {auto_switch_enabled}")
         except Exception as e:
-            self._logger.warning(f"Failed to apply initial auto-switch setting: {e}")
+            self._logger.warning(f"Failed to apply initial dead_switch setting: {e}")
             # Default to enabled if settings unavailable
             self.set_auto_switch_enabled(True)
 

@@ -10,10 +10,11 @@ Key Components:
 - DockingOverlay: Individual overlay wrapper with synchronization
 """
 
-from .manager import DockingOverlayManager
+from .manager import DockingOverlayManager, get_docking_manager
 from .overlay import DockingOverlay
 
 __all__ = [
     'DockingOverlayManager',
-    'DockingOverlay'
+    'DockingOverlay',
+    'get_docking_manager'
 ]

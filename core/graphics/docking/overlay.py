@@ -145,11 +145,17 @@ class DockingOverlay(QObject):
                 from core.graphics.backend_manager import BackendManager, BackendType
                 backend_manager = BackendManager()
                 self._dwm_overlay = backend_manager.create_overlay(self._config, BackendType.DWM)
-                self._logger.debug(f"BackendManager created overlay for {self.overlay_id}: {self._dwm_overlay is not None}")
             
             if not self._dwm_overlay:
                 self._logger.error(f"Failed to create DWM overlay for {self.overlay_id}")
                 return False
+            
+            # Link back to parent so DWM overlay can access manager for sync operations
+            if hasattr(self._dwm_overlay, '_parent_overlay'):
+                self._dwm_overlay._parent_overlay = self
+            else:
+                # Add attribute if it doesn't exist
+                setattr(self._dwm_overlay, '_parent_overlay', self)
             
             # Initialize DWM overlay (allow secondary overlays to initialize without valid source)
             try:
@@ -979,18 +985,32 @@ class DockingOverlay(QObject):
     def get_menu_ready_windows(self) -> list:
         """Get list of windows ready for context menu display using DWM overlay method."""
         try:
-            # CRITICAL PATH: Prefer centralized WindowEnumerator with icons
-            # This avoids app_instance dependency and provides richer menu entries
+            # CRITICAL PATH: Use same WindowFilter path as single overlay (allows minimized windows)
             try:
+                from utils.window_filter import WindowFilter
                 from core.window.enumerator import WindowEnumerator
-                enumerator = WindowEnumerator()
-                win_with_icons = enumerator.get_capturable_windows_with_icons()
-                if win_with_icons:
-                    # Already in (hwnd, title, icon) form
-                    self._logger.debug(f"ENUMERATION: Retrieved {len(win_with_icons)} windows via WindowEnumerator.get_capturable_windows_with_icons()")
-                    return [(hwnd, title, icon) for hwnd, title, icon in win_with_icons if hwnd and title]
+                import win32gui
+                
+                # Get filtered windows using WindowFilter (matches single overlay behavior)
+                hwnds = WindowFilter.get_filtered_windows()
+                
+                # Get icons for each window
+                icon_manager = WindowEnumerator().icon_manager
+                windows_with_icons = []
+                for hwnd in hwnds:
+                    try:
+                        title = win32gui.GetWindowText(hwnd)
+                        if title and title.strip():
+                            icon = icon_manager.get_window_icon(hwnd)
+                            windows_with_icons.append((hwnd, title, icon))
+                    except Exception:
+                        continue
+                
+                if windows_with_icons:
+                    self._logger.debug(f"ENUMERATION: Retrieved {len(windows_with_icons)} windows via WindowFilter.get_filtered_windows()")
+                    return windows_with_icons
             except Exception as e:
-                self._logger.debug(f"Icon enumeration failed: {e}")
+                self._logger.debug(f"WindowFilter enumeration failed: {e}")
             
             # Secondary: simple direct enumeration (no icons)
             try:

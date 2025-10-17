@@ -174,6 +174,17 @@ class DockingOverlayPool:
     def _destroy_overlay(self, overlay: object) -> None:
         """Safely destroy an overlay."""
         try:
+            # Check if Qt widgets are already deleted before attempting cleanup
+            if hasattr(overlay, '_host') and overlay._host is not None:
+                try:
+                    _ = overlay._host.isVisible()
+                    # Qt widgets still valid, proceed with cleanup
+                except RuntimeError:
+                    # Qt widgets already deleted, skip cleanup entirely
+                    self._logger.debug("Skipping cleanup for overlay with deleted Qt widgets")
+                    return
+            
+            # Proceed with cleanup if widgets are valid
             if hasattr(overlay, 'cleanup'):
                 overlay.cleanup()
             elif hasattr(overlay, 'close'):
@@ -211,49 +222,55 @@ class DockingOverlayPool:
             self._logger.debug(f"Failed to schedule cleanup: {e}")
     
     def _cleanup_idle_overlays(self) -> None:
-        """Clean up overlays that have been idle too long."""
-        with self._lock:
-            try:
-                current_time = time.time()
-                overlays_to_remove = []
+        """Clean up overlays that have been idle too long.
+        
+        UI-thread confined - no lock needed as per pool design.
+        """
+        try:
+            current_time = time.time()
+            overlays_to_remove = []
+            
+            for i, pooled_overlay in enumerate(self._pool):
+                if (current_time - pooled_overlay.last_used) > self._max_idle_time:
+                    overlays_to_remove.append(i)
+            
+            # Remove idle overlays (in reverse order to maintain indices)
+            for i in reversed(overlays_to_remove):
+                pooled_overlay = self._pool.pop(i)
+                self._destroy_overlay(pooled_overlay.overlay)
+            
+            if overlays_to_remove:
+                self._logger.debug(f"Cleaned up {len(overlays_to_remove)} idle overlays")
                 
-                for i, pooled_overlay in enumerate(self._pool):
-                    if (current_time - pooled_overlay.last_used) > self._max_idle_time:
-                        overlays_to_remove.append(i)
-                
-                # Remove idle overlays (in reverse order to maintain indices)
-                for i in reversed(overlays_to_remove):
-                    pooled_overlay = self._pool.pop(i)
-                    self._destroy_overlay(pooled_overlay.overlay)
-                
-                if overlays_to_remove:
-                    self._logger.debug(f"Cleaned up {len(overlays_to_remove)} idle overlays")
-                    
-            except Exception as e:
-                self._logger.debug(f"Error during idle overlay cleanup: {e}")
+        except Exception as e:
+            self._logger.debug(f"Error during idle overlay cleanup: {e}")
     
     def get_pool_stats(self) -> Dict[str, int]:
-        """Get current pool statistics."""
-        with self._lock:
-            return {
-                'pool_size': len(self._pool),
-                'active_overlays': len(self._active_overlays),
-                'max_pool_size': self._max_pool_size
-            }
+        """Get current pool statistics.
+        
+        UI-thread confined - no lock needed as per pool design.
+        """
+        return {
+            'pool_size': len(self._pool),
+            'active_overlays': len(self._active_overlays),
+            'max_pool_size': self._max_pool_size
+        }
     
     def clear_pool(self) -> None:
-        """Clear all pooled overlays."""
-        with self._lock:
-            try:
-                # Destroy all pooled overlays
-                for pooled_overlay in self._pool:
-                    self._destroy_overlay(pooled_overlay.overlay)
+        """Clear all pooled overlays.
+        
+        UI-thread confined - no lock needed as per pool design.
+        """
+        try:
+            # Destroy all pooled overlays
+            for pooled_overlay in self._pool:
+                self._destroy_overlay(pooled_overlay.overlay)
+            
+            self._pool.clear()
+            self._logger.debug("Cleared overlay pool")
                 
-                self._pool.clear()
-                self._logger.debug("Cleared overlay pool")
-                
-            except Exception as e:
-                self._logger.error(f"Error clearing pool: {e}")
+        except Exception as e:
+            self._logger.error(f"Error clearing pool: {e}")
     
     def cleanup(self) -> None:
         """Clean up the pool and all resources."""

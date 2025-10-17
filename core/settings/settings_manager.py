@@ -171,6 +171,13 @@ class _SettingsManagerImpl(ISettingsManager):
                 description='Interval between continuous volume steps when holding volume keys (10-200ms)',
                 category=SettingsCategory.BEHAVIOR
             ),
+            'input.wheel_opacity_modifier': SettingDefinition(
+                default='alt',
+                setting_type=str,
+                options=['alt', 'ctrl'],
+                description='Modifier key for wheel scroll opacity adjustment (alt or ctrl)',
+                category=SettingsCategory.BEHAVIOR
+            ),
             'appearance.opacity': SettingDefinition(
                 default=100,
                 setting_type=int,
@@ -215,6 +222,13 @@ class _SettingsManagerImpl(ISettingsManager):
                 setting_type=str,
                 options=['window', 'monitor', 'docking'],
                 description='Selected mode button state',
+                category=SettingsCategory.GENERAL
+            ),
+            'ui.last_dialog_display': SettingDefinition(
+                default=0,
+                setting_type=int,
+                validator=lambda x: isinstance(x, int) and x >= 0,
+                description='Last display index used for dialog positioning',
                 category=SettingsCategory.GENERAL
             ),
             'ui.block_flash_min_interval_ms': SettingDefinition(
@@ -283,7 +297,7 @@ class _SettingsManagerImpl(ISettingsManager):
                 category=SettingsCategory.BEHAVIOR
             ),
             'docking.overlay_count': SettingDefinition(
-                default=3,
+                default=4,
                 setting_type=int,
                 validator=lambda x: isinstance(x, int) and 2 <= x <= 5,
                 description='Number of overlays to create in docking mode (2-5)',
@@ -417,10 +431,10 @@ class _SettingsManagerImpl(ISettingsManager):
             ),
             
             # Behavior
-            'behavior.auto_switch': SettingDefinition(
+            'behavior.dead_switch': SettingDefinition(
                 default=True,
                 setting_type=bool,
-                description='Automatically switch to the most recently used window',
+                description='Automatically replace blank overlays when source window closes (closed-window auto-replacement)',
                 category=SettingsCategory.BEHAVIOR
             ),
             'behavior.click_through': SettingDefinition(
@@ -739,7 +753,13 @@ class SettingsManager(QObject):
                 finally:
                     self._save_coalesce[tag] = False
 
-            ThreadManager.single_shot(max(0, int(within_ms)), _do_save)
+            # Guard against early calls before Qt app initialization
+            from PySide6.QtCore import QCoreApplication
+            if QCoreApplication.instance() is not None:
+                ThreadManager.single_shot(max(0, int(within_ms)), _do_save)
+            else:
+                # No Qt app yet - perform immediate save
+                _do_save()
 
         try:
             if SettingsManager._on_ui_thread():

@@ -299,14 +299,21 @@ def is_valid_window(hwnd: int, our_pid: Optional[int] = None, check_visible: boo
     if is_system_window(hwnd, our_pid):
         return False
         
-    # Check window rectangle
-    rect = get_window_rect(hwnd)
-    if not rect or rect[2] - rect[0] <= 0 or rect[3] - rect[1] <= 0:
-        return False
+    # Check window rectangle (skip for minimized windows - they often have invalid rects)
+    try:
+        import ctypes
+        is_minimized = bool(ctypes.windll.user32.IsIconic(hwnd))
+    except Exception:
+        is_minimized = False
+    
+    if not is_minimized:
+        rect = get_window_rect(hwnd)
+        if not rect or rect[2] - rect[0] <= 0 or rect[3] - rect[1] <= 0:
+            return False
         
-    # Check window style
+    # Check window style (allow minimized windows in context menu)
     style = get_window_style(hwnd)
-    if not (style & WS_VISIBLE) or (style & WS_MINIMIZE):
+    if not (style & WS_VISIBLE):
         return False
         
     # Check window title and class

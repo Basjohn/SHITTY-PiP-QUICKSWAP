@@ -12,8 +12,6 @@ import os
 import time
 from typing import Any, List, Optional, Tuple
 
-import win32api
-import win32con
 import win32gui
 import win32process
 from PySide6.QtCore import QObject
@@ -124,7 +122,12 @@ class WindowEnumerator(QObject):
         
         def enum_windows_callback(hwnd: int, _: Any) -> bool:
             try:
-                if not ctypes.windll.user32.IsWindowVisible(hwnd):
+                # Check visibility but allow minimized windows (IsIconic returns True for minimized)
+                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                is_minimized = ctypes.windll.user32.IsIconic(hwnd)
+                
+                if not is_visible and not is_minimized:
+                    # Not visible and not minimized = truly hidden/invalid window
                     return True
                     
                 length = ctypes.windll.user32.GetWindowTextLengthW(hwnd) + 1
@@ -206,7 +209,8 @@ class WindowEnumerator(QObject):
         
         for i, (hwnd, title) in enumerate(window_list):
             try:
-                if not self._is_valid_window(hwnd) or hwnd == progman_hwnd:
+                # Allow minimized windows in context menus - don't check visibility
+                if not self._is_valid_window(hwnd, check_visible=False) or hwnd == progman_hwnd:
                     continue
                 
                 window_class = win32gui.GetClassName(hwnd)

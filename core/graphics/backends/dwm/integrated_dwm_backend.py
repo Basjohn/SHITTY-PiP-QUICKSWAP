@@ -172,20 +172,43 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 pass
 
-            # Set content aspect ratio for proper DWM thumbnail scaling (16:9 default)
+            # Set content aspect ratio for proper DWM thumbnail scaling
+            # For docking overlays, skip AR init - let manager handle it via sync_overlay_properties()
+            # For standalone overlays, check if window AR is valid before using dimensions
             try:
-                source_rect = winval.get_window_rect(self._source_hwnd)
-                if source_rect and source_rect[2] > source_rect[0] and source_rect[3] > source_rect[1]:
-                    # rect format: (left, top, right, bottom) - calculate width/height properly
-                    src_w = source_rect[2] - source_rect[0]
-                    src_h = source_rect[3] - source_rect[1]
-                    self._canvas.set_content_aspect(src_w, src_h)
-                else:
-                    # Fallback to default aspect ratio
+                if not self._is_docking_overlay():
+                    # Standalone overlay - check if window AR matches cached source_aspect
+                    if self._source_aspect is not None and self._source_aspect > 0:
+                        source_rect = winval.get_window_rect(self._source_hwnd)
+                        use_window_dims = False
+                        
+                        if source_rect and source_rect[2] > source_rect[0] and source_rect[3] > source_rect[1]:
+                            src_w = source_rect[2] - source_rect[0]
+                            src_h = source_rect[3] - source_rect[1]
+                            window_ar = src_w / src_h
+                            # If window AR matches cached source_aspect (within 5%), use window dimensions
+                            if abs(window_ar - self._source_aspect) / self._source_aspect < 0.05:
+                                use_window_dims = True
+                        
+                        if use_window_dims:
+                            # Valid window AR - use actual dimensions
+                            self._canvas.set_content_aspect(src_w, src_h)
+                            self._logger.debug(f"Applied window AR to canvas: {src_w}x{src_h}")
+                        else:
+                            # Fallback AR - scale from overlay width
+                            overlay_w = self._host.width() if self._host else 800
+                            overlay_h = int(overlay_w / self._source_aspect)
+                            self._canvas.set_content_aspect(overlay_w, overlay_h)
+                            self._logger.debug(f"Applied scaled AR to canvas: {overlay_w}x{overlay_h} (AR={self._source_aspect:.3f})")
+                    else:
+                        # No cached AR - use default
+                        self._canvas.set_content_aspect(*DEFAULT_ASPECT)
+                        self._logger.debug(f"Applied default AR to canvas: {DEFAULT_ASPECT}")
+                # else: Docking overlay - AR will be set via update_thumbnail after manager sizes overlay
+            except Exception as e:
+                self._logger.debug(f"Failed to set canvas AR: {e}")
+                if not self._is_docking_overlay():
                     self._canvas.set_content_aspect(*DEFAULT_ASPECT)
-            except Exception:
-                # Fallback to default aspect ratio
-                self._canvas.set_content_aspect(*DEFAULT_ASPECT)
 
             # Connect canvas content rect changes to thumbnail updates
             self._canvas.contentRectChanged.connect(self._on_content_rect_changed)
@@ -356,6 +379,9 @@ class IntegratedDWMOverlay(OverlayBase):
         Uses client area instead of window rect to avoid decoration and coordinate space issues
         that can cause distortion on secondary displays with different resolutions.
         """
+        # AR will be propagated to canvas either immediately (if canvas exists)
+        # or during _initialize_impl() after canvas creation for new overlays
+        
         try:
             if not self._source_hwnd:
                 self._source_aspect = None
@@ -366,19 +392,55 @@ class IntegratedDWMOverlay(OverlayBase):
                 import ctypes
                 import ctypes.wintypes
                 
-                # Log basic source info for diagnostics
+                # Log basic source info for diagnostics and validate window state
+                is_minimized = False
+                is_fullscreen = False
                 try:
                     title = winval.get_window_title(self._source_hwnd)
                     wclass = winval.get_window_class(self._source_hwnd)
                     wrect = winval.get_window_rect(self._source_hwnd)
+                    
+                    # Check if window is minimized (client rect will be tiny/invalid)
+                    is_minimized = bool(ctypes.windll.user32.IsIconic(self._source_hwnd))
+                    
+                    # Check for fullscreen (window rect == monitor rect)
+                    if wrect and not is_minimized:
+                        try:
+                            from utils.window.monitors import get_monitor_from_point
+                            import win32api
+                            monitor_info = win32api.GetMonitorInfo(
+                                get_monitor_from_point((wrect[0] + 10, wrect[1] + 10))
+                            )
+                            m_rect = monitor_info.get('Monitor', (0, 0, 1920, 1080))
+                            # Fullscreen if window matches monitor within small tolerance
+                            wr_w = wrect[2] - wrect[0]
+                            wr_h = wrect[3] - wrect[1]
+                            m_w = m_rect[2] - m_rect[0]
+                            m_h = m_rect[3] - m_rect[1]
+                            is_fullscreen = abs(wr_w - m_w) < 10 and abs(wr_h - m_h) < 10
+                        except Exception:
+                            pass
+                    
                     if wrect:
                         wr_w = max(0, wrect[2] - wrect[0])
                         wr_h = max(0, wrect[3] - wrect[1])
+                        state_info = []
+                        if is_minimized:
+                            state_info.append("MINIMIZED")
+                        if is_fullscreen:
+                            state_info.append("FULLSCREEN")
+                        state_str = f" [{','.join(state_info)}]" if state_info else ""
                         self._logger.debug(
-                            f"ASPECT_CACHE: hwnd={self._source_hwnd}, title='{title}', class='{wclass}', win_rect={wr_w}x{wr_h}"
+                            f"ASPECT_CACHE: hwnd={self._source_hwnd}, title='{title}', class='{wclass}', win_rect={wr_w}x{wr_h}{state_str}"
                         )
                 except Exception:
                     pass
+                
+                # Skip AR caching for minimized windows (client rect is invalid)
+                if is_minimized:
+                    self._logger.debug(f"Skipping AR cache for minimized window {self._source_hwnd}")
+                    self._source_aspect = None
+                    return
 
                 # Get client rect which excludes window decorations
                 client_rect = ctypes.wintypes.RECT()
@@ -386,24 +448,29 @@ class IntegratedDWMOverlay(OverlayBase):
                     cw = max(0, client_rect.right - client_rect.left)
                     ch = max(0, client_rect.bottom - client_rect.top)
                     if cw > 0 and ch > 0:
-                        # Clamp to reasonable bounds to avoid wild distortion
-                        if cw > 0 and ch > 0:
-                            self._source_aspect = cw / ch
-                            if self._source_aspect < self.MIN_REASONABLE_AR or self._source_aspect > self.MAX_REASONABLE_AR:
-                                self._logger.debug(
-                                    f"Discarding out-of-bounds client aspect: {self._source_aspect:.3f} (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
-                                )
-                            else:
-                                self._logger.debug(
-                                    f"Cached source aspect ratio from client rect: {self._source_aspect:.3f} ({cw}x{ch})"
-                                )
-                                # Propagate fresh content aspect to canvas for correct letterbox/pillarbox
-                                try:
-                                    if self._canvas and hasattr(self._canvas, 'set_content_aspect'):
-                                        self._canvas.set_content_aspect(int(cw), int(ch))
-                                except Exception:
-                                    pass
-                                return
+                        # Calculate AR
+                        calc_aspect = cw / ch
+                        
+                        # Validate bounds BEFORE accepting
+                        if calc_aspect < self.MIN_REASONABLE_AR or calc_aspect > self.MAX_REASONABLE_AR:
+                            self._logger.warning(
+                                f"ASPECT_CACHE: Rejecting out-of-bounds client aspect: {calc_aspect:.3f} ({cw}x{ch}) (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
+                            )
+                            self._source_aspect = None  # Explicitly set to None
+                            # Don't return yet - try window rect fallback
+                        else:
+                            # Valid AR - accept it
+                            self._source_aspect = calc_aspect
+                            self._logger.debug(
+                                f"Cached source aspect ratio from client rect: {self._source_aspect:.3f} ({cw}x{ch})"
+                            )
+                            # Propagate fresh content aspect to canvas for correct letterbox/pillarbox
+                            try:
+                                if self._canvas and hasattr(self._canvas, 'set_content_aspect'):
+                                    self._canvas.set_content_aspect(int(cw), int(ch))
+                            except Exception:
+                                pass
+                            return
             except Exception:
                 # Ignore client-rect failures and fall back to window rect
                 pass
@@ -415,12 +482,18 @@ class IntegratedDWMOverlay(OverlayBase):
                     src_w = max(0, int(rect[2] - rect[0]))
                     src_h = max(0, int(rect[3] - rect[1]))
                     if src_w > 0 and src_h > 0:
-                        self._source_aspect = src_w / src_h
-                        if self._source_aspect < self.MIN_REASONABLE_AR or self._source_aspect > self.MAX_REASONABLE_AR:
-                            self._logger.debug(
-                                f"Discarding out-of-bounds window aspect: {self._source_aspect:.3f} (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
+                        calc_aspect = src_w / src_h
+                        
+                        # Validate bounds BEFORE accepting
+                        if calc_aspect < self.MIN_REASONABLE_AR or calc_aspect > self.MAX_REASONABLE_AR:
+                            self._logger.warning(
+                                f"ASPECT_CACHE: Rejecting out-of-bounds window aspect: {calc_aspect:.3f} ({src_w}x{src_h}) (bounds: {self.MIN_REASONABLE_AR:.1f}-{self.MAX_REASONABLE_AR:.1f})"
                             )
+                            self._source_aspect = None  # Explicitly set to None
+                            # Don't return - allow fallback to run
                         else:
+                            # Valid AR - accept it
+                            self._source_aspect = calc_aspect
                             self._logger.debug(
                                 f"Cached source aspect ratio from window rect: {self._source_aspect:.3f} ({src_w}x{src_h})"
                             )
@@ -430,15 +503,58 @@ class IntegratedDWMOverlay(OverlayBase):
                                     self._canvas.set_content_aspect(int(src_w), int(src_h))
                             except Exception:
                                 pass
-                        return
+                            return  # Only return if we got a valid AR
             except Exception:
                 pass
 
-            self._source_aspect = None
-            self._logger.debug("Could not determine source aspect ratio")
+            # Don't set to None here - would overwrite any valid AR from above
+            # Only log if we get here without a valid AR
+            if self._source_aspect is None:
+                self._logger.debug("Could not determine valid source aspect ratio from window")
         except Exception as e:
             self._source_aspect = None
             self._logger.debug(f"Failed to cache source aspect: {e}")
+        
+        # Three-tier fallback: If source_aspect is still None, try display AR then 16:9
+        if self._source_aspect is None and self._source_hwnd:
+            try:
+                # Tier 2: Try display AR where window is located
+                import ctypes
+                user32 = ctypes.WinDLL('user32')
+                MONITOR_DEFAULTTONEAREST = 0x00000002
+                monitor_handle = user32.MonitorFromWindow(int(self._source_hwnd), MONITOR_DEFAULTTONEAREST)
+                
+                if monitor_handle:
+                    from PySide6.QtGui import QGuiApplication
+                    import win32gui
+                    
+                    wrect = win32gui.GetWindowRect(int(self._source_hwnd))
+                    center_x = (wrect[0] + wrect[2]) // 2
+                    center_y = (wrect[1] + wrect[3]) // 2
+                    
+                    for screen in QGuiApplication.screens():
+                        screen_geo = screen.geometry()
+                        if screen_geo.contains(center_x, center_y):
+                            logical_w = screen_geo.width()
+                            logical_h = screen_geo.height()
+                            
+                            if logical_w > 0 and logical_h > 0:
+                                display_ar = logical_w / logical_h
+                                # Display AR bounds wider than window AR (0.3-4.0 for real displays)
+                                if 0.3 <= display_ar <= 4.0:
+                                    self._source_aspect = display_ar
+                                    self._logger.info(f"AR fallback: using display AR {display_ar:.3f} from {screen.name()}")
+                                    return
+            except Exception as e:
+                self._logger.debug(f"Display AR fallback failed: {e}")
+            
+            # Tier 3: Final fallback to 16:9
+            if self._source_aspect is None:
+                self._source_aspect = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]
+                self._logger.info(f"AR fallback: using DEFAULT_ASPECT 16:9 ({self._source_aspect:.3f})")
+        
+        # Canvas AR will be set by _update_thumbnail_properties() for docking overlays
+        # or by initialization for standalone overlays
 
     def _update_thumbnail_properties(self, content_rect_override: Optional[QRect] = None) -> None:
         """Update DWM thumbnail properties with corner clipping and proper aspect ratio.
@@ -458,6 +574,46 @@ class IntegratedDWMOverlay(OverlayBase):
             
             # Use cached aspect ratio for consistent scaling during manual resize
             source_aspect = self._source_aspect
+            
+            # Three-tier AR fallback when source_aspect is None (rejected/unavailable)
+            if source_aspect is None:
+                # Tier 2: Try display AR where window is located
+                try:
+                    if self._source_hwnd:
+                        import ctypes
+                        user32 = ctypes.WinDLL('user32')
+                        MONITOR_DEFAULTTONEAREST = 0x00000002
+                        monitor_handle = user32.MonitorFromWindow(int(self._source_hwnd), MONITOR_DEFAULTTONEAREST)
+                        
+                        if monitor_handle:
+                            from PySide6.QtGui import QGuiApplication
+                            import win32gui
+                            
+                            wrect = win32gui.GetWindowRect(int(self._source_hwnd))
+                            center_x = (wrect[0] + wrect[2]) // 2
+                            center_y = (wrect[1] + wrect[3]) // 2
+                            
+                            for screen in QGuiApplication.screens():
+                                screen_geo = screen.geometry()
+                                if screen_geo.contains(center_x, center_y):
+                                    logical_w = screen_geo.width()
+                                    logical_h = screen_geo.height()
+                                    
+                                    if logical_w > 0 and logical_h > 0:
+                                        display_ar = logical_w / logical_h
+                                        # Display AR bounds wider than window AR (0.3-4.0 for real displays)
+                                        if 0.3 <= display_ar <= 4.0:
+                                            source_aspect = display_ar
+                                            self._logger.debug(f"AR fallback: using display AR {display_ar:.3f} from {screen.name()}")
+                                            break
+                except Exception as e:
+                    self._logger.debug(f"Display AR fallback failed: {e}")
+                
+                # Tier 3: Final fallback to 16:9
+                if source_aspect is None:
+                    source_aspect = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]
+                    self._logger.debug(f"AR fallback: using DEFAULT_ASPECT 16:9 ({source_aspect:.3f})")
+            
             # Sanity clamp to avoid extreme distortions
             if source_aspect is not None and not (self.MIN_REASONABLE_AR <= source_aspect <= self.MAX_REASONABLE_AR):
                 self._logger.debug(f"Clamping source aspect {source_aspect:.3f} to bounds [{self.MIN_REASONABLE_AR:.1f}, {self.MAX_REASONABLE_AR:.1f}]")
@@ -470,7 +626,39 @@ class IntegratedDWMOverlay(OverlayBase):
             # Docking overlays handle aspect ratio at geometry level in sync_overlay_properties()
             is_docking_overlay = self._is_docking_overlay()
             
-            if not is_docking_overlay and source_aspect is not None and source_aspect > 0:
+            # For docking overlays: ensure canvas has correct AR from window dimensions
+            # If window AR matches source_aspect, use window dims; otherwise scale from overlay size
+            if is_docking_overlay and source_aspect is not None and source_aspect > 0:
+                try:
+                    source_rect = winval.get_window_rect(self._source_hwnd)
+                    use_window_dims = False
+                    
+                    # Check if window dimensions match the cached source aspect
+                    if source_rect and source_rect[2] > source_rect[0] and source_rect[3] > source_rect[1]:
+                        src_w = source_rect[2] - source_rect[0]
+                        src_h = source_rect[3] - source_rect[1]
+                        window_ar = src_w / src_h
+                        # If window AR matches source_aspect (within 5%), use window dimensions
+                        if abs(window_ar - source_aspect) / source_aspect < 0.05:
+                            use_window_dims = True
+                    
+                    if use_window_dims:
+                        # Window AR is valid - use actual window dimensions
+                        if self._canvas._content_aspect != (src_w, src_h):
+                            self._canvas.set_content_aspect(src_w, src_h)
+                            content_rect = content_rect_override if content_rect_override else self._canvas.get_content_rect()
+                            dest_rect = content_rect
+                    else:
+                        # Window AR is invalid (fallback was used) - scale from overlay size
+                        overlay_w = self._host.width() if self._host else 800
+                        overlay_h = int(overlay_w / source_aspect)
+                        if self._canvas._content_aspect != (overlay_w, overlay_h):
+                            self._canvas.set_content_aspect(overlay_w, overlay_h)
+                            content_rect = content_rect_override if content_rect_override else self._canvas.get_content_rect()
+                            dest_rect = content_rect
+                except Exception as e:
+                    self._logger.debug(f"Failed to update docking canvas AR: {e}")
+            elif not is_docking_overlay and source_aspect is not None and source_aspect > 0:
                 content_w = content_rect.width()
                 content_h = content_rect.height()
                 
@@ -491,11 +679,6 @@ class IntegratedDWMOverlay(OverlayBase):
                             new_w = max(1, int(content_h * source_aspect))
                             x_offset = (content_w - new_w) // 2
                             dest_rect = QRect(content_rect.x() + x_offset, content_rect.y(), new_w, content_h)
-            elif is_docking_overlay:
-                # Reduce debug spam - only log once per overlay instance
-                if not hasattr(self, '_logged_docking_detection'):
-                    self._logger.debug("Docking overlay detected: skipping thumbnail-level aspect ratio adjustment")
-                    self._logged_docking_detection = True
             
             # Determine current visual opacity (animation override takes precedence)
             current_opacity = self._visual_opacity if self._visual_opacity is not None else self._opacity
@@ -857,16 +1040,19 @@ class IntegratedDWMOverlay(OverlayBase):
             # For docking overlays, trigger a full sync to recompute tight sizing
             if self._is_docking_overlay():
                 try:
-                    # Get the docking manager and trigger a full sync
-                    from core.graphics.docking.manager import DockingOverlayManager
-                    import gc
-                    for obj in gc.get_objects():
-                        if isinstance(obj, DockingOverlayManager):
-                            if self._is_managed_by_docking(obj):
-                                # Trigger sync which will recompute all overlay sizes with tight framing
-                                obj.sync_overlay_properties()
-                                self._logger.info("[AR] Corrected aspect/framing for docking system (triggered full sync)")
-                                return
+                    # Get the docking manager from the parent overlay wrapper
+                    parent_overlay = getattr(self, '_parent_overlay', None)
+                    if parent_overlay and hasattr(parent_overlay, '_manager'):
+                        docking_manager = parent_overlay._manager
+                        if docking_manager and hasattr(docking_manager, 'sync_overlay_properties'):
+                            # Trigger sync which will recompute all overlay sizes with tight framing
+                            docking_manager.sync_overlay_properties()
+                            self._logger.info("[AR] Corrected aspect/framing for docking system (triggered full sync)")
+                            return
+                        else:
+                            self._logger.debug("Docking manager not accessible via parent overlay")
+                    else:
+                        self._logger.debug("Parent overlay or manager not found")
                 except Exception as e:
                     self._logger.debug(f"Docking sync failed, falling back to standalone logic: {e}")
             
@@ -1268,9 +1454,14 @@ class IntegratedDWMOverlay(OverlayBase):
             except Exception:
                 pass
 
-            # Show host window first so native HWND is valid for DWM APIs
-            self._host.show()
-            self._host.raise_()
+            # Refresh source aspect after show (in case source window state changed)
+            # SKIP for docking overlays - manager controls AR and will trigger sync
+            try:
+                if not self._is_docking_overlay():
+                    self._cache_source_aspect()
+            except Exception:
+                pass
+
             self._host.activateWindow()
 
             # After showing, obtain destination HWND and register DWM thumbnail
@@ -1280,8 +1471,10 @@ class IntegratedDWMOverlay(OverlayBase):
                 self._target_hwnd = 0
 
             # Refresh source aspect after show (in case source window state changed)
+            # SKIP for docking overlays - manager controls AR and will trigger sync
             try:
-                self._cache_source_aspect()
+                if not self._is_docking_overlay():
+                    self._cache_source_aspect()
             except Exception:
                 pass
 
@@ -1301,6 +1494,12 @@ class IntegratedDWMOverlay(OverlayBase):
                 )
                 ThreadManager.single_shot(20, lambda: self._register_after_show_retry(1))
             else:
+                # Ensure host window is visible before first property push
+                try:
+                    if self._host and not self._host.isVisible():
+                        self._host.show()
+                except Exception:
+                    pass
                 # Push initial properties at 0 opacity while invisible
                 self._update_thumbnail_properties()
                 # Now mark visible and start fade-in (800ms)
@@ -1347,6 +1546,12 @@ class IntegratedDWMOverlay(OverlayBase):
                 return
 
             # Success: complete the normal show sequence
+            # Ensure host window is visible before first property push
+            try:
+                if self._host and not self._host.isVisible():
+                    self._host.show()
+            except Exception:
+                pass
             # Keep invisible while pushing first properties at 0 opacity
             self._is_visible = False
             try:

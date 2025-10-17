@@ -57,16 +57,12 @@ class HotkeyManager(QObject):
         self._hotkeys_release: Dict[str, Tuple[Callable[..., None], Tuple[Any, ...]]] = {}
         self._system_hotkeys: Dict[str, int] = {}  # hotkey_id -> win32 hotkey id
         self._hotkey_id_counter = 1  # For generating unique win32 hotkey IDs
-        # Lock-free: All hotkey state mutations confined to hotkey thread
+        # Lock-free: All hotkey state mutations confined to hotkey thread (single-threaded access)
         self._message_thread: Optional[object] = None
         self._message_thread_id: Optional[int] = None
         self._message_thread_running: bool = False
-        # Minimal locks for WM_APP legacy path (queue path stays lock-free)
-        self._hotkey_lock = threading.RLock()
-        self._cmd_lock = threading.RLock()
-        # Custom WM_APP messages for marshalled commands
-        self._WM_APP_REGISTER = win32con.WM_APP + 1
-        self._WM_APP_UNREGISTER = win32con.WM_APP + 2
+        # LOCK-FREE ARCHITECTURE: No locks needed - hotkey thread has exclusive access to _system_hotkeys
+        # All cross-thread commands marshalled via SPSC queue (lock-free data structure)
         # ThreadManager integration and lock-free command queue (P1)
         try:
             self._tm = get_thread_manager()
@@ -74,14 +70,7 @@ class HotkeyManager(QObject):
         except Exception:
             self._tm = None
             self._cmd_queue = None  # type: ignore
-        # Cross-thread marshal for registration/unregistration
-        self._pending_cmds: Dict[int, Any] = {}
-        try:
-            self._WM_APP_REGISTER = int(getattr(win32con, 'WM_APP', 0x8000)) + 1
-            self._WM_APP_UNREGISTER = int(getattr(win32con, 'WM_APP', 0x8000)) + 2
-        except Exception:
-            self._WM_APP_REGISTER = 0x8001
-            self._WM_APP_UNREGISTER = 0x8002
+        # LOCK-FREE: Legacy WM_APP path removed - all commands use SPSC queue
         # Keyboard library backend for single-key suppression
         self._kb_available = False
         self._kb_handlers: Dict[str, Any] = {}  # hotkey_id -> handler or (press, release)
@@ -157,6 +146,12 @@ class HotkeyManager(QObject):
             self._t_debug_release = logger.debug
             self._t_debug_watchdog = logger.debug
             self._d_debug_general = logger.debug
+        # Loop readiness event to coordinate with the message thread
+        try:
+            self._loop_ready = threading.Event()
+        except Exception:
+            # Defensive: keep attribute even if Event creation fails
+            self._loop_ready = None  # type: ignore
         logger.debug("HotkeyManager initialized")
     
     def register_hotkey(self, hotkey_id: str, callback: Callable[..., None], *args: Any, sequence: str = None, suppress: bool = True, global_hotkey: bool = False, on_release: Optional[Callable[..., None]] = None, release_args: Tuple[Any, ...] = ()) -> bool:
@@ -432,31 +427,45 @@ class HotkeyManager(QObject):
                 logger.error(f"Failed to parse hotkey sequence: {sequence}")
                 return False
 
-            # Lock-free: Use ThreadManager callback instead of threading.Event
+            # LOCK-FREE: Use SPSC queue for cross-thread command
             result: Dict[str, Any] = {"ok": False, "error": None}
-            # Lock-free: UI thread only access to hotkey state
             win32_hotkey_id = self._hotkey_id_counter
             self._hotkey_id_counter += 1
-            cmd_id = win32_hotkey_id  # Use hotkey ID as command ID
-            # Lock-free: UI thread only access to pending commands
-            self._pending_cmds[cmd_id] = ("register", hotkey_id, win32_hotkey_id, modifiers, vk_code, result)
-
-            # Post to message thread
-            try:
-                mtid = int(self._message_thread_id or 0)
-                win32api.PostThreadMessage(mtid, self._WM_APP_REGISTER, cmd_id, 0)
-            except Exception as e:
-                # Lock-free: UI thread only access
-                self._pending_cmds.pop(cmd_id, None)
-                logger.error(f"Failed to post register message to hotkey thread: {e}")
+            
+            # Use threading.Event for synchronization (acceptable for infrequent operations)
+            evt = threading.Event()
+            cmd = ("register", hotkey_id, win32_hotkey_id, modifiers, vk_code, evt, result)
+            
+            # Push to SPSC queue (lock-free data structure)
+            if self._cmd_queue is None:
+                logger.error("Command queue not available")
                 return False
-
-            # Lock-free: Use ThreadManager callback pattern instead of blocking wait
-            # For now, assume synchronous operation on hotkey thread
+            
+            try:
+                if not self._cmd_queue.try_push(cmd):
+                    logger.error("Failed to push register command to queue: queue full")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to push register command to queue: {e}")
+                return False
+            
+            # Wake up the message loop to process the command
+            try:
+                if self._message_thread_id:
+                    rc = win32api.PostThreadMessage(int(self._message_thread_id), int(getattr(win32con, 'WM_APP', 0x8000)), 0, 0)
+                    if not rc:
+                        logger.debug("PostThreadMessage returned 0 (wake may have failed)")
+            except Exception as wake_ex:
+                logger.debug(f"Failed to wake hotkey thread: {wake_ex}")
+            
+            # Wait for hotkey thread to process (up to 5 seconds)
+            if not evt.wait(timeout=5.0):
+                logger.error(f"Timeout waiting for hotkey registration: {hotkey_id}")
+                return False
+            
+            # Check result (hotkey thread wrote to this dict)
             ok = bool(result.get("ok"))
             if ok:
-                # Lock-free: UI thread only access
-                self._system_hotkeys[hotkey_id] = win32_hotkey_id
                 logger.debug(f"Registered system hotkey {hotkey_id} with sequence {sequence}")
             else:
                 if result.get("error"):
@@ -469,55 +478,41 @@ class HotkeyManager(QObject):
     def _unregister_system_hotkey(self, hotkey_id: str) -> bool:
         """Unregister a system hotkey on the dedicated message thread."""
         try:
-            # Lock-free: UI thread only access
-            if hotkey_id not in self._system_hotkeys:
-                logger.warning(f"System hotkey {hotkey_id} not found for unregistration")
-                return False
-            win32_hotkey_id = self._system_hotkeys[hotkey_id]
+            # LOCK-FREE: Hotkey thread will look up win32_hotkey_id from _system_hotkeys
+            win32_hotkey_id = 0  # Placeholder
 
-            # Lock-free: Use ThreadManager callback instead of threading.Event
+            # LOCK-FREE: Use SPSC queue and Event for synchronization
             result: Dict[str, Any] = {"ok": False, "error": None}
+            evt = threading.Event()
+            cmd = ("unregister", hotkey_id, win32_hotkey_id, evt, result)
 
-            # Prefer SPSC queue
-            if self._cmd_queue is not None:
-                evt = threading.Event()
-                pushed = self._cmd_queue.try_push(("unregister", hotkey_id, win32_hotkey_id, evt, result))
-                if not pushed:
-                    logger.debug("Hotkey unregister queue full; falling back to WM_APP path")
-                else:
-                    # Wait briefly for the hotkey thread to process the command
-                    try:
-                        evt.wait(0.2)
-                    except Exception:
-                        pass
-                    ok = bool(result.get("ok"))
-                    # Remove mapping regardless to avoid staleness
-                    # Lock-free: UI thread only access
-                    self._system_hotkeys.pop(hotkey_id, None)
-                    if ok:
-                        logger.debug(f"Unregistered system hotkey {hotkey_id}")
-                    else:
-                        if result.get("error"):
-                            logger.error(f"Exception while unregistering system hotkey {hotkey_id}: {result['error']}")
-                    return ok
-
-            # Legacy WM_APP path
-            cmd_id = win32_hotkey_id  # Use hotkey ID as command ID
-            # Lock-free: UI thread only access
-            self._pending_cmds[cmd_id] = ("unregister", hotkey_id, win32_hotkey_id, 0, 0, result)
+            # Push to SPSC queue
+            if self._cmd_queue is None:
+                logger.error("Command queue not available")
+                return False
+            
+            try:
+                if not self._cmd_queue.try_push(cmd):
+                    logger.error("Failed to push unregister command to queue: queue full")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to push unregister command to queue: {e}")
+                return False
+            
+            # Wake up the message loop to process the command
             try:
                 if self._message_thread_id:
-                    win32api.PostThreadMessage(int(self._message_thread_id), self._WM_APP_UNREGISTER, cmd_id, 0)
-                else:
-                    win32api.PostThreadMessage(int(win32api.GetCurrentThreadId()), self._WM_APP_UNREGISTER, cmd_id, 0)
-            except Exception as e:
-                logger.error(f"Failed to post unregister command: {e}")
+                    win32api.PostThreadMessage(int(self._message_thread_id), int(getattr(win32con, 'WM_APP', 0x8000)), 0, 0)
+            except Exception as wake_ex:
+                logger.debug(f"Failed to wake hotkey thread: {wake_ex}")
+            
+            # Wait for hotkey thread to process (up to 5 seconds)
+            if not evt.wait(timeout=5.0):
+                logger.error(f"Timeout waiting for hotkey unregistration: {hotkey_id}")
                 return False
-            # Lock-free: Use ThreadManager callback pattern instead of blocking wait
+            
+            # Check result (hotkey thread already removed from _system_hotkeys)
             ok = bool(result.get("ok"))
-            # Remove mapping regardless to avoid staleness
-            # Lock-free: UI thread only access
-            self._system_hotkeys.pop(hotkey_id, None)
             if ok:
                 logger.debug(f"Unregistered system hotkey {hotkey_id}")
             else:
@@ -637,6 +632,15 @@ class HotkeyManager(QObject):
             except Exception:
                 self._message_thread_id = None
 
+            # Ensure this thread has a message queue before any PostThreadMessage calls
+            try:
+                # PeekMessage with no removal to initialize the queue
+                win32gui.PeekMessage(None, 0, 0, 0, 0)
+                logger.debug("Hotkey message loop: message queue primed via PeekMessage")
+            except Exception:
+                # Non-fatal; GetMessage will still create the queue on first call
+                pass
+
             # Helper to drain SPSC commands (P1)
             def _drain_commands():
                 try:
@@ -650,9 +654,8 @@ class HotkeyManager(QObject):
                         if ctype == "register":
                             _tag, hotkey_id, win32_hotkey_id, modifiers, vk_code, evt, result = cmd
                             try:
-                                prev_id = None
-                                with self._hotkey_lock:
-                                    prev_id = self._system_hotkeys.get(hotkey_id)
+                                # LOCK-FREE: Single-threaded access on hotkey thread
+                                prev_id = self._system_hotkeys.get(hotkey_id)
                                 if prev_id is not None:
                                     try:
                                         win32gui.UnregisterHotKey(self._hwnd or None, int(prev_id))
@@ -675,6 +678,8 @@ class HotkeyManager(QObject):
                                         logger.error(f"Failed to create message-only window for hotkeys: {wh_ex}")
                                         self._hwnd = None
                                 win32gui.RegisterHotKey(self._hwnd or None, int(win32_hotkey_id), int(modifiers), int(vk_code))
+                                # LOCK-FREE: Store mapping on hotkey thread (single-threaded access)
+                                self._system_hotkeys[hotkey_id] = win32_hotkey_id
                                 result["ok"] = True
                             except Exception as rex:
                                 result["ok"] = False
@@ -689,9 +694,14 @@ class HotkeyManager(QObject):
                                 except Exception:
                                     pass
                         elif ctype == "unregister":
-                            _tag, hotkey_id, win32_hotkey_id, evt, result = cmd
+                            _tag, hotkey_id, _placeholder, evt, result = cmd
                             try:
-                                win32gui.UnregisterHotKey(self._hwnd or None, int(win32_hotkey_id))
+                                # LOCK-FREE: Look up win32_hotkey_id on hotkey thread (single-threaded access)
+                                win32_hotkey_id = self._system_hotkeys.get(hotkey_id)
+                                if win32_hotkey_id is not None:
+                                    win32gui.UnregisterHotKey(self._hwnd or None, int(win32_hotkey_id))
+                                    # LOCK-FREE: Remove mapping on hotkey thread (single-threaded access)
+                                    self._system_hotkeys.pop(hotkey_id, None)
                                 result["ok"] = True
                             except Exception as uex:
                                 result["ok"] = False
@@ -703,11 +713,9 @@ class HotkeyManager(QObject):
                                     pass
                         elif ctype == "clear":
                             try:
-                                # Unregister all system hotkeys
-                                ids = []
-                                with self._hotkey_lock:
-                                    ids = list(self._system_hotkeys.values())
-                                    self._system_hotkeys.clear()
+                                # LOCK-FREE: Single-threaded access on hotkey thread
+                                ids = list(self._system_hotkeys.values())
+                                self._system_hotkeys.clear()
                                 for hid in ids:
                                     try:
                                         win32gui.UnregisterHotKey(self._hwnd or None, int(hid))
@@ -726,6 +734,9 @@ class HotkeyManager(QObject):
                 except Exception:
                     pass
 
+            # Pre-drain any pending commands before blocking on GetMessage
+            _drain_commands()
+
             while True:
                 # Block until a message arrives; returns 0 on WM_QUIT
                 res = win32gui.GetMessage(None, 0, 0)
@@ -735,6 +746,8 @@ class HotkeyManager(QObject):
                 # Also honor external stop signal promptly
                 if not self._message_thread_running:
                     break
+                # Drain SPSC commands immediately on any wake before message processing
+                _drain_commands()
                 # Unpack message in a version-tolerant way
                 msg_id = None
                 wparam = None
@@ -767,98 +780,20 @@ class HotkeyManager(QObject):
                 if not msg_id:
                     continue
 
-                # First drain any pending lock-free commands (P1)
+                # LOCK-FREE: Drain SPSC command queue (second pass after handling message)
                 _drain_commands()
 
-                # Handle marshalled registration (legacy path)
-                if msg_id == self._WM_APP_REGISTER:
-                    cmd_id = int(wparam)
-                    with self._cmd_lock:
-                        cmd = self._pending_cmds.pop(cmd_id, None)
-                    if cmd:
-                        _, hotkey_id, win32_hotkey_id, modifiers, vk_code, evt, result = cmd
-                        try:
-                            # If a previous mapping existed, unregister it first
-                            prev_id = None
-                            with self._hotkey_lock:
-                                prev_id = self._system_hotkeys.get(hotkey_id)
-                            if prev_id is not None:
-                                try:
-                                    win32gui.UnregisterHotKey(self._hwnd or None, int(prev_id))
-                                except Exception:
-                                    pass
-                            # Ensure we have a message-only window to bind to
-                            if not self._hwnd:
-                                try:
-                                    hinst = win32api.GetModuleHandle(None)
-                                    wc = win32gui.WNDCLASS()
-                                    wc.hInstance = hinst
-                                    wc.lpszClassName = "SPQ_HotkeyMsgWnd"
-                                    wc.lpfnWndProc = win32gui.DefWindowProc
-                                    try:
-                                        win32gui.RegisterClass(wc)
-                                    except Exception:
-                                        pass
-                                    parent = getattr(win32con, 'HWND_MESSAGE', 0)
-                                    self._hwnd = win32gui.CreateWindowEx(
-                                        0,
-                                        wc.lpszClassName,
-                                        "SPQ_HotkeyMsgWnd",
-                                        0,
-                                        0, 0, 0, 0,
-                                        parent,
-                                        0,
-                                        hinst,
-                                        None,
-                                    )
-                                except Exception as wh_ex:
-                                    logger.error(f"Failed to create message-only window for hotkeys: {wh_ex}")
-                                    self._hwnd = None
-                            win32gui.RegisterHotKey(self._hwnd or None, int(win32_hotkey_id), int(modifiers), int(vk_code))
-                            result["ok"] = True
-                        except Exception as rex:
-                            result["ok"] = False
-                            try:
-                                lasterr = win32api.GetLastError()
-                            except Exception:
-                                lasterr = None
-                            result["error"] = f"{repr(rex)} last_error={lasterr}"
-                        finally:
-                            try:
-                                evt.set()
-                            except Exception:
-                                pass
-                    continue
-
-                # Handle marshalled unregistration (legacy path)
-                if msg_id == self._WM_APP_UNREGISTER:
-                    cmd_id = int(wparam)
-                    with self._cmd_lock:
-                        cmd = self._pending_cmds.pop(cmd_id, None)
-                    if cmd:
-                        _, hotkey_id, win32_hotkey_id, _m, _v, evt, result = cmd
-                        try:
-                            win32gui.UnregisterHotKey(self._hwnd or None, int(win32_hotkey_id))
-                            result["ok"] = True
-                        except Exception as uex:
-                            result["ok"] = False
-                            result["error"] = str(uex)
-                        finally:
-                            try:
-                                evt.set()
-                            except Exception:
-                                pass
-                    continue
+                # Legacy WM_APP paths removed - all commands via SPSC queue
 
                 # Handle WM_HOTKEY
                 if msg_id == win32con.WM_HOTKEY:
                     win32_hotkey_id = wparam
                     hotkey_id: Optional[str] = None
-                    with self._hotkey_lock:
-                        for hk_id, win32_id in self._system_hotkeys.items():
-                            if win32_id == win32_hotkey_id:
-                                hotkey_id = hk_id
-                                break
+                    # LOCK-FREE: Single-threaded access on hotkey thread
+                    for hk_id, win32_id in self._system_hotkeys.items():
+                        if win32_id == win32_hotkey_id:
+                            hotkey_id = hk_id
+                            break
                     if hotkey_id and hotkey_id in self._hotkeys:
                         logger.debug(f"WM_HOTKEY received for {hotkey_id} (win32_id={win32_hotkey_id}); dispatching")
                         self.trigger_hotkey(hotkey_id)

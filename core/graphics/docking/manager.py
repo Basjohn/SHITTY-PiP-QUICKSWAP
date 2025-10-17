@@ -29,6 +29,14 @@ from utils.window.overlay_persistence import (
 
 logger = get_logger(__name__)
 
+# Global singleton instance
+_docking_manager_instance: Optional['DockingOverlayManager'] = None
+
+
+def get_docking_manager() -> Optional['DockingOverlayManager']:
+    """Get the global docking manager instance if it exists."""
+    return _docking_manager_instance
+
 
 class DockingOverlayManager(QObject):
     """Manages the lifecycle of the 3-overlay docking system."""
@@ -45,6 +53,8 @@ class DockingOverlayManager(QObject):
     def __init__(self):
         """Initialize the docking overlay manager."""
         super().__init__()
+        global _docking_manager_instance
+        _docking_manager_instance = self
         self._main_overlay: Optional[DockingOverlay] = None
         self._secondary_overlays: List[DockingOverlay] = []
         self._positioner = None
@@ -121,6 +131,17 @@ class DockingOverlayManager(QObject):
             self._logger.warning(f"Failed to initialize FocusTracker: {e}")
             self._focus_tracker = None
         
+        # Initialize WindowMonitor for closed window detection
+        self._window_monitor = None
+        try:
+            from core.graphics.window_monitor import WindowMonitor
+            self._window_monitor = WindowMonitor()
+            self._window_monitor.window_closed.connect(self._on_window_closed)
+            suppress_debug_log(self._logger, "Initialized WindowMonitor for docking mode", "DockingManager")
+        except Exception as e:
+            self._logger.warning(f"Failed to initialize WindowMonitor: {e}")
+            self._window_monitor = None
+        
         # NOTE: No MRU listener needed - DockingManager reads directly from MRUManager
         # This is the SINGLE SOURCE OF TRUTH architecture (no synchronization, no stale data)
         
@@ -131,6 +152,10 @@ class DockingOverlayManager(QObject):
         
         # Normal mode: Track explicit overlay assignments (which window each overlay shows)
         # In Normal mode, overlays maintain sticky assignments unless explicitly changed
+        
+        # AR validation control: validate on creation/restoration/swaps, skip during user resizes
+        self._last_validated_main_hwnd = None  # Track which HWND was last validated
+        self._user_resize_in_progress = False  # True during wheel/handle resizes
         # Format: {"main": hwnd, "secondary_0": hwnd, "secondary_1": hwnd, ...}
         self._normal_mode_assignments: dict[str, Optional[int]] = {}
         for i in range(5):  # Support up to 5 secondary overlays
@@ -195,6 +220,15 @@ class DockingOverlayManager(QObject):
                      (used for transient hide/show cycles).
         """
         self._is_active = False
+        
+        # Stop window monitoring
+        try:
+            if self._window_monitor:
+                self._window_monitor.clear_all()
+                self._window_monitor.window_closed.disconnect(self._on_window_closed)
+        except Exception as e:
+            self._logger.debug(f"Failed to cleanup window monitor: {e}")
+        
         # Persist current main geometry before tearing down
         try:
             if persist and not getattr(self, "_suppress_persist_on_destroy", False):
@@ -266,6 +300,22 @@ class DockingOverlayManager(QObject):
         self._config = DockingConfig()
         self._positioner = None
         self._bound_as_unit = False
+        
+        # Clear global singleton instance
+        global _docking_manager_instance
+        if _docking_manager_instance is self:
+            _docking_manager_instance = None
+        
+        # Clear overlay pool to prevent stale overlays with deleted Qt widgets
+        try:
+            from .overlay_pool import get_docking_overlay_pool
+            pool = get_docking_overlay_pool()
+            if pool:
+                pool.clear_pool()
+                self._logger.debug("Cleared docking overlay pool")
+        except Exception as e:
+            self._logger.debug(f"Failed to clear overlay pool: {e}")
+        
         self._logger.info("Docking system destroyed")
 
     def set_restoring(self, restoring: bool) -> None:
@@ -834,6 +884,26 @@ class DockingOverlayManager(QObject):
             
             # Only trigger sync if main was resized (not secondaries)
             if is_main_host:
+                # Mark as user resize if not during batch operations
+                # This prevents AR validation from running during manual resize
+                if not getattr(self, '_batch_applying', False):
+                    try:
+                        self._user_resize_in_progress = True
+                        # Clear flag after 500ms of no resize events
+                        if hasattr(self, '_clear_resize_timer'):
+                            try:
+                                self._clear_resize_timer.cancel()
+                            except Exception:
+                                pass
+                        # Schedule clearing the flag
+                        def clear_resize_flag():
+                            try:
+                                self._user_resize_in_progress = False
+                            except Exception:
+                                pass
+                        self._clear_resize_timer = self._thread_manager.single_shot(500, clear_resize_flag)
+                    except Exception:
+                        pass
                 self._coalesced_sync(5)
         elif et == QEvent.Type.MouseButtonPress:
             try:
@@ -908,6 +978,26 @@ class DockingOverlayManager(QObject):
                     except Exception:
                         pass
                 self._coalesced_sync(1)
+            except Exception:
+                pass
+        elif et == QEvent.Type.Wheel:
+            # Mark user resize in progress during wheel events
+            # This prevents AR validation from interfering with manual resizing
+            try:
+                self._user_resize_in_progress = True
+                # Clear flag after 500ms of no wheel events
+                if hasattr(self, '_clear_resize_timer'):
+                    try:
+                        self._clear_resize_timer.cancel()
+                    except Exception:
+                        pass
+                # Schedule clearing the flag
+                def clear_resize_flag():
+                    try:
+                        self._user_resize_in_progress = False
+                    except Exception:
+                        pass
+                self._clear_resize_timer = self._thread_manager.single_shot(500, clear_resize_flag)
             except Exception:
                 pass
         return False
@@ -1049,6 +1139,10 @@ class DockingOverlayManager(QObject):
             # Use the centralized update mechanism which handles all the logic
             self._update_overlay_displays()
             
+            # Trigger sync after cycle updates to validate AR for new windows
+            if getattr(self, '_initialization_complete', False):
+                self._coalesced_sync(10)  # Small delay to let swap complete
+            
             # Continue polling
             self._schedule_cycle_tick()
         except Exception as e:
@@ -1138,15 +1232,17 @@ class DockingOverlayManager(QObject):
                 new_count = max(2, min(5, int(value)))
             except Exception:
                 new_count = 3
-            current_count = 1 + len(self._secondary_overlays) if self._is_active else 0
             if not self._is_active:
                 self._overlay_count = new_count
-                return
-            if new_count == current_count:
+            if not self._is_active or new_count < 2 or new_count > 5:
                 return
             # Schedule rebuild on UI thread shortly to avoid reentrancy
             from core.threading import ThreadManager
-            ThreadManager.single_shot(10, lambda: self._recreate_for_overlay_count_change(new_count))
+            from PySide6.QtCore import QCoreApplication
+            if QCoreApplication.instance() is not None:
+                ThreadManager.single_shot(10, lambda: self._recreate_for_overlay_count_change(new_count))
+            else:
+                self._logger.debug("Skipping overlay_count change (app not initialized)")
         except Exception as e:
             self._logger.debug(f"Failed to handle overlay_count change: {e}")
 
@@ -1540,6 +1636,64 @@ class DockingOverlayManager(QObject):
                 suppress_debug_log(self._logger, "Main overlay has no valid geometry; skipping sync", "DockingManager")
                 return
 
+            # STEP 0: Validate main overlay AR when needed (creation/restoration/swaps)
+            # Skip during user-initiated resizes to avoid interfering with wheel/handle resizing
+            try:
+                # Get current main overlay source HWND
+                current_main_hwnd = None
+                try:
+                    if hasattr(self._main_overlay, 'get_source_hwnd'):
+                        current_main_hwnd = self._main_overlay.get_source_hwnd()
+                except Exception:
+                    pass
+                
+                # Only validate AR if:
+                # 1. Not currently being resized by user, AND
+                # 2. HWND changed (new window swapped in) OR never validated before
+                should_validate = (
+                    not getattr(self, '_user_resize_in_progress', False) and
+                    (current_main_hwnd != self._last_validated_main_hwnd or self._last_validated_main_hwnd is None)
+                )
+                
+                if should_validate:
+                    cached_main_ar = self._main_overlay.get_cached_source_aspect()
+                    if cached_main_ar and cached_main_ar > 0:
+                        # Get canvas insets for main overlay
+                        main_ix = main_iy = 0
+                        try:
+                            if hasattr(self._main_overlay, '_dwm_overlay') and self._main_overlay._dwm_overlay:
+                                canvas = getattr(self._main_overlay._dwm_overlay, '_canvas', None)
+                                if canvas and hasattr(canvas, 'get_content_insets'):
+                                    cx, cy = canvas.get_content_insets()
+                                    main_ix = max(0, int(cx))
+                                    main_iy = max(0, int(cy))
+                        except Exception:
+                            main_ix = main_iy = 0
+                        
+                        # Check if current geometry matches AR
+                        current_inner_w = max(1, main_rect.width() - 2 * main_ix)
+                        current_inner_h = max(1, main_rect.height() - 2 * main_iy)
+                        current_ar = current_inner_w / current_inner_h
+                        
+                        # If AR mismatch > 5%, resize main to match cached AR
+                        if abs(current_ar - cached_main_ar) / cached_main_ar > 0.05:
+                            # Keep width, adjust height to match AR
+                            target_inner_h = max(1, int(current_inner_w / cached_main_ar))
+                            target_outer_h = target_inner_h + 2 * main_iy
+                            
+                            self._logger.info(f"SIZING: main AR mismatch detected: current={current_ar:.3f}, cached={cached_main_ar:.3f}, resizing {main_rect.width()}x{main_rect.height()} -> {main_rect.width()}x{target_outer_h}")
+                            
+                            # Resize main overlay (preserves position)
+                            self._main_overlay.set_geometry(main_rect.x(), main_rect.y(), main_rect.width(), target_outer_h)
+                            
+                            # Refresh main_rect for secondary calculations
+                            main_rect = self._main_overlay.get_geometry()
+                        
+                        # Mark this HWND as validated
+                        self._last_validated_main_hwnd = current_main_hwnd
+            except Exception as e:
+                self._logger.debug(f"Main AR validation failed: {e}")
+
             # DOCKING SINGLE-PASS SNAPSHOT SIZING/POSITIONING
             # Strictly decreasing ratios to enforce hierarchy: A > B > C > D > E
             # B starts at ~70% of A; each subsequent secondary decays by ~15%
@@ -1616,9 +1770,16 @@ class DockingOverlayManager(QObject):
                 # ultra-wide/tall sources (e.g., title-bar rects) from exploding geometry
                 if cached_ar is not None:
                     try:
-                        if not (0.2 <= float(cached_ar) <= 5.0):
+                        # Validate AR is a finite number
+                        if not isinstance(cached_ar, (int, float)) or not (0 < float(cached_ar) < float('inf')):
+                            self._logger.warning(f"SIZING: sec={i} invalid cached_ar={cached_ar}, ignoring")
+                            cached_ar = None
+                        elif not (0.2 <= float(cached_ar) <= 5.0):
+                            original_ar = cached_ar
                             cached_ar = max(0.2, min(5.0, float(cached_ar)))
-                    except Exception:
+                            self._logger.debug(f"SIZING: sec={i} AR clamped from {original_ar:.3f} to {cached_ar:.3f}")
+                    except Exception as e:
+                        self._logger.debug(f"SIZING: sec={i} AR validation failed: {e}")
                         cached_ar = None
                 if cached_ar and cached_ar > 0:
                     # Compute OUTER width AND height so INNER (after insets) exactly matches AR
@@ -1626,14 +1787,90 @@ class DockingOverlayManager(QObject):
                     # outer_w = inner_w + 2*ix, outer_h = sec_h + 2*iy (symmetric inset handling)
                     inner_h = max(1, int(sec_h - 2 * iy))
                     inner_w = max(1, int(round(inner_h * float(cached_ar))))
+                    
+                    # DEFENSIVE: Clamp computed width to prevent excessive values from malformed ARs
+                    # Maximum reasonable width is 3x the main overlay width (even for ultra-wide sources)
+                    max_reasonable_w = main_rect.width() * 3
+                    if inner_w > max_reasonable_w:
+                        self._logger.warning(f"SIZING: sec={i} inner_w={inner_w} exceeds max={max_reasonable_w}, clamping (AR={cached_ar:.3f})")
+                        inner_w = int(max_reasonable_w)
+                    
                     sec_w = max(1, int(inner_w + 2 * ix))
                     sec_h = max(1, int(sec_h + 2 * iy))  # Add canvas insets to height (was missing!)
                     ar_source = f"cached={cached_ar:.3f} (insets {ix},{iy})"
                 else:
-                    # Fallback to proportional sizing (no AR available); include insets proportionally
-                    sec_w = max(1, int(main_rect.width() * float(ratio)))
-                    sec_h = max(1, int(sec_h + 2 * iy))  # Add canvas insets to height
-                    ar_source = "proportional"
+                    # Three-tier AR fallback:
+                    # 1. Valid cached AR (already tried above)
+                    # 2. Display AR where window is located (try here)
+                    # 3. DEFAULT_ASPECT 16:9 (final fallback)
+                    
+                    from utils.window.overlay_constants import DEFAULT_ASPECT
+                    fallback_ar = None
+                    ar_source = None
+                    
+                    # Try to get monitor AR for the window this overlay is showing
+                    try:
+                        overlay_hwnd = overlay.get_target_hwnd()
+                        if overlay_hwnd:
+                            import ctypes
+                            
+                            # Get monitor handle for this window
+                            user32 = ctypes.WinDLL('user32')
+                            MONITOR_DEFAULTTONEAREST = 0x00000002
+                            monitor_handle = user32.MonitorFromWindow(int(overlay_hwnd), MONITOR_DEFAULTTONEAREST)
+                            
+                            if monitor_handle:
+                                # Get the QScreen for this monitor to use logical dimensions (DPI-independent)
+                                from PySide6.QtGui import QGuiApplication
+                                screens = QGuiApplication.screens()
+                                
+                                # Find matching screen by checking if window center is on it
+                                try:
+                                    import win32gui
+                                    wrect = win32gui.GetWindowRect(int(overlay_hwnd))
+                                    center_x = (wrect[0] + wrect[2]) // 2
+                                    center_y = (wrect[1] + wrect[3]) // 2
+                                    
+                                    for screen in screens:
+                                        screen_geo = screen.geometry()
+                                        if screen_geo.contains(center_x, center_y):
+                                            # Use LOGICAL dimensions (DPI-independent)
+                                            logical_w = screen_geo.width()
+                                            logical_h = screen_geo.height()
+                                            
+                                            if logical_w > 0 and logical_h > 0:
+                                                display_ar = logical_w / logical_h
+                                                
+                                                # Validate display AR is within real-world display bounds
+                                                # Wider than window AR bounds (0.4-3.0) because displays are manufactured products
+                                                # Min 0.3: Extreme portrait (1080x3840, theoretical but possible)
+                                                # Max 4.0: Super-ultrawide 32:9 displays like Samsung Odyssey G9 (AR ~3.556)
+                                                if 0.3 <= display_ar <= 4.0:
+                                                    fallback_ar = display_ar
+                                                    ar_source = f"display={display_ar:.3f} (monitor logical)"
+                                                    self._logger.debug(f"SIZING: sec={i} using display AR {display_ar:.3f} from monitor {screen.name()}")
+                                                    break
+                                                else:
+                                                    self._logger.debug(f"SIZING: sec={i} rejecting display AR {display_ar:.3f} (out of bounds 0.3-4.0)")
+                                            break
+                                except Exception as e:
+                                    self._logger.debug(f"SIZING: sec={i} failed to get window center: {e}")
+                    except Exception as e:
+                        self._logger.debug(f"SIZING: sec={i} failed to get monitor AR: {e}")
+                    
+                    # Final fallback to 16:9 if display AR wasn't usable
+                    if fallback_ar is None:
+                        fallback_ar = DEFAULT_ASPECT[0] / DEFAULT_ASPECT[1]  # 16:9 = 1.777...
+                        ar_source = f"default={fallback_ar:.3f} (16:9 fallback)"
+                    
+                    # Compute inner dimensions using fallback AR, then add insets
+                    inner_h = max(1, int(sec_h - 2 * iy))
+                    inner_w = max(1, int(round(inner_h * fallback_ar)))
+                    
+                    # Add canvas insets to get outer dimensions
+                    sec_w = max(1, int(inner_w + 2 * ix))
+                    sec_h = max(1, int(sec_h + 2 * iy))
+                    # ar_source already set above
                 
                 sec_sizes.append((sec_w, sec_h))
                 sec_meta.append({'ix': ix, 'iy': iy, 'ar': (float(cached_ar) if cached_ar and cached_ar > 0 else None)})
@@ -1915,7 +2152,12 @@ class DockingOverlayManager(QObject):
         Normal mode: Swap overlay content with foreground (foreground → overlay, overlay → foreground)
         Cycle mode: Focus overlay's window, all overlays update based on MRU
         """
-        if self._overlays_locked:
+        # Respect global lock and per-overlay individual lock
+        try:
+            overlay = self._main_overlay if overlay_id == "main" else self._get_overlay_by_id(overlay_id)
+        except Exception:
+            overlay = None
+        if self._overlays_locked or self._is_overlay_locked(overlay):
             # When locked, just bring window to focus without MRU changes
             self._bring_overlay_window_to_focus(overlay_id)
             return
@@ -2035,6 +2277,8 @@ class DockingOverlayManager(QObject):
             # In Normal mode, use MRU[0] as the new window (after rotation)
             # Don't search for "first non-displayed" - that's wrong
             new_main_hwnd = current_mru[0] if current_mru else None
+            # Capture if this new window is currently displayed in a secondary overlay
+            dup_overlay_before = self._find_overlay_showing_window(int(new_main_hwnd)) if new_main_hwnd else None
             
             if not new_main_hwnd:
                 self._mru_logger.warning("QUICKSWITCH (Normal): No valid MRU[0] after rotation")
@@ -2057,6 +2301,20 @@ class DockingOverlayManager(QObject):
             # Swap main overlay to show new MRU[0]
             self._assign_overlay("main", int(new_main_hwnd), update_tracking=True)
             self._mru_logger.debug(f"QUICKSWITCH (Normal): Main overlay swapped from {self._pink_hwnd(current_main_hwnd) if current_main_hwnd else 'None'} to {self._pink_hwnd(new_main_hwnd)}")
+
+            # Duplication-aware swap: if the new main was previously shown in a secondary overlay,
+            # and that secondary is unlocked, move that secondary to show the old main content.
+            if (
+                dup_overlay_before
+                and dup_overlay_before != "main"
+                and current_main_hwnd
+                and self._is_window_valid(int(current_main_hwnd))
+                and not self._is_overlay_locked_by_key(dup_overlay_before)
+            ):
+                self._assign_overlay(dup_overlay_before, int(current_main_hwnd), update_tracking=True)
+                self._mru_logger.debug(
+                    f"QUICKSWITCH (Normal): Swapped contents between main and {dup_overlay_before} to avoid duplication"
+                )
 
     def _bring_secondary_to_focus(self, secondary_index: int) -> None:
         """Bring secondary overlay's window to focus.
@@ -2166,20 +2424,29 @@ class DockingOverlayManager(QObject):
                 current_main = getattr(self._main_overlay, 'get_target_hwnd', lambda: None)()
                 if current_main:
                     assigned.add(int(current_main))
-                    self._logger.debug(f"[CYCLE] Main overlay locked; reserving HWND {current_main}")
+                    self._logger.info(f"[CYCLE_LOCK] Main overlay locked; preserving HWND {current_main}")
             
             # Also reserve all locked secondary overlay windows BEFORE assignment
+            locked_count = 0
             for i, overlay in enumerate(self._secondary_overlays):
                 if self._is_overlay_locked(overlay):
                     current_target = overlay.get_target_hwnd()
                     if current_target:
                         assigned.add(int(current_target))
-                        self._logger.debug(f"[CYCLE] Secondary overlay {i} locked; reserving HWND {current_target}")
+                        locked_count += 1
+                        self._logger.info(f"[CYCLE_LOCK] Secondary overlay {i} locked; preserving HWND {current_target}")
+            
+            # Log lock state summary for visibility
+            total_locked = (1 if main_locked else 0) + locked_count
+            if total_locked > 0:
+                self._logger.debug(f"[CYCLE_LOCK] {total_locked} overlay(s) locked, {len(assigned)} window(s) reserved")
             
             # Now proceed with assignment logic (locked windows already in 'assigned' set)
             if main_locked:
-                # Already handled above - main overlay keeps its target
-                pass
+                # Locked overlay: skip assignment, it keeps its current target
+                current_main = getattr(self._main_overlay, 'get_target_hwnd', lambda: None)()
+                if current_main:
+                    self._logger.debug(f"[CYCLE_LOCK] Skipping main overlay assignment (locked to {current_main})")
             else:
                 # Main overlay uses the first valid unique item NOT already assigned (or clears if none)
                 main_hwnd = None
@@ -2500,6 +2767,10 @@ class DockingOverlayManager(QObject):
             
             # Refresh overlays (will exclude foreground in Cycle mode)
             self._update_overlay_displays()
+            
+            # Trigger sync after autoswitch to validate AR for new windows
+            if getattr(self, '_initialization_complete', False):
+                self._coalesced_sync(10)  # Small delay to let swap complete
         except Exception as e:
             self._logger.debug(f"focus_and_promote_to_mru failed for {hwnd}: {e}")
 
@@ -2653,6 +2924,11 @@ class DockingOverlayManager(QObject):
             # Cycle mode: _update_cycle_mode_displays() reassigns all overlays
             # Normal mode: _update_normal_mode_displays() only replaces invalid/closed windows
             self._update_overlay_displays()
+            
+            # Trigger sync after autoswitch/cycle swaps to validate AR for new windows
+            # This ensures AR validation runs immediately after source window changes
+            if getattr(self, '_initialization_complete', False):
+                self._coalesced_sync(10)  # Small delay to let swap complete
         else:
             self._logger.debug(f"Skipping MRU update: hwnd_list={len(hwnd_list) if hwnd_list else 0} items, init_complete={getattr(self, '_initialization_complete', False)}")
         
@@ -3174,6 +3450,11 @@ class DockingOverlayManager(QObject):
         Push A→B, B→C, and assign most recent valid MRU to A.
         """
         try:
+            # Check if main overlay is locked - if so, skip cycling entirely
+            if self._is_overlay_locked(self._main_overlay):
+                self._logger.info("CYCLE: Main overlay locked - skipping cycle logic")
+                return
+            
             # Get fresh MRU list
             mru_list = self._mru_manager.get_recent(limit=5)  # Get more for cycling
             
@@ -3192,17 +3473,26 @@ class DockingOverlayManager(QObject):
             old_main = current_assignments.get('main')
             old_secondary_0 = current_assignments.get('secondary_0')
             
-            # Skip locked overlays but still maintain the chain
-            if not self._is_overlay_locked(self._main_overlay):
-                self._assign_window_to_overlay('main', new_main_hwnd)
+            # Main is not locked (checked above), perform cycle
+            self._assign_window_to_overlay('main', new_main_hwnd)
             
+            # Only cycle to secondary_0 if it's not locked AND we have a valid window to assign
+            # Also check it's not creating a duplicate with the new main
             if len(self._secondary_overlays) > 0 and not self._is_overlay_locked(self._secondary_overlays[0]):
-                if old_main:
+                if old_main and old_main != new_main_hwnd:
                     self._assign_window_to_overlay('secondary_0', old_main)
+                else:
+                    self._logger.debug(f"CYCLE: Skipping secondary_0 assignment (old_main={old_main}, would duplicate)")
             
+            # Only cycle to secondary_1 if it's not locked AND we have a valid window to assign
+            # Check it's not creating duplicates with main or secondary_0
             if len(self._secondary_overlays) > 1 and not self._is_overlay_locked(self._secondary_overlays[1]):
-                if old_secondary_0:
+                # Get fresh assignment to check what secondary_0 actually has now (after cycle above)
+                current_sec0_hwnd = getattr(self._secondary_overlays[0], '_target_hwnd', None) if self._secondary_overlays else None
+                if old_secondary_0 and old_secondary_0 != new_main_hwnd and old_secondary_0 != current_sec0_hwnd:
                     self._assign_window_to_overlay('secondary_1', old_secondary_0)
+                else:
+                    self._logger.debug(f"CYCLE: Skipping secondary_1 assignment (old_sec0={old_secondary_0}, would duplicate main={new_main_hwnd} or sec0={current_sec0_hwnd})")
             
             suppress_debug_log(self._logger, f"Cycling: {new_main_hwnd}→A, {old_main}→B, {old_secondary_0}→C", "DockingManager")
             
@@ -3220,21 +3510,43 @@ class DockingOverlayManager(QObject):
                     break
             
             if duplicate_overlay:
-                # Swap content to maintain uniqueness
-                old_target_hwnd = current_assignments.get(target_overlay)
-                
-                # Assign new window to target overlay
-                if not self._is_overlay_locked_by_key(target_overlay):
-                    self._assign_window_to_overlay(target_overlay, new_hwnd)
-                
-                # Assign old target window to duplicate overlay (if not locked)
-                if old_target_hwnd and not self._is_overlay_locked_by_key(duplicate_overlay):
-                    self._assign_window_to_overlay(duplicate_overlay, old_target_hwnd)
-                elif not self._is_overlay_locked_by_key(duplicate_overlay):
-                    # Find next available MRU for the duplicate overlay
-                    self._assign_next_available_mru(duplicate_overlay, current_assignments)
-                
-                suppress_debug_log(self._logger, f"Swapped: {target_overlay}←→{duplicate_overlay} to prevent duplicate", "DockingManager")
+                # Check if duplicate overlay is locked
+                if self._is_overlay_locked_by_key(duplicate_overlay):
+                    # Locked overlay has this window - can't swap it out
+                    # Instead, find next available MRU for target overlay (skip the duplicate)
+                    self._logger.info(f"AUTOSWITCH: Window {new_hwnd} in locked {duplicate_overlay}, skipping and finding next MRU for {target_overlay}")
+                    
+                    # Get next available window that's not already assigned
+                    mru_list = self._mru_manager.get_recent(limit=10)
+                    assigned_hwnds = set(current_assignments.values())
+                    
+                    alternative_hwnd = None
+                    for hwnd in mru_list:
+                        if hwnd and hwnd not in assigned_hwnds and self._is_window_valid(hwnd):
+                            alternative_hwnd = hwnd
+                            break
+                    
+                    if alternative_hwnd and not self._is_overlay_locked_by_key(target_overlay):
+                        self._assign_window_to_overlay(target_overlay, alternative_hwnd)
+                        self._logger.info(f"AUTOSWITCH: Assigned alternative window {alternative_hwnd} to {target_overlay}")
+                    else:
+                        self._logger.debug(f"AUTOSWITCH: No alternative window available for {target_overlay}")
+                else:
+                    # Duplicate overlay is unlocked - can swap
+                    old_target_hwnd = current_assignments.get(target_overlay)
+                    
+                    # Assign new window to target overlay
+                    if not self._is_overlay_locked_by_key(target_overlay):
+                        self._assign_window_to_overlay(target_overlay, new_hwnd)
+                    
+                    # Assign old target window to duplicate overlay
+                    if old_target_hwnd:
+                        self._assign_window_to_overlay(duplicate_overlay, old_target_hwnd)
+                    else:
+                        # Find next available MRU for the duplicate overlay
+                        self._assign_next_available_mru(duplicate_overlay, current_assignments)
+                    
+                    suppress_debug_log(self._logger, f"Swapped: {target_overlay}←→{duplicate_overlay} to prevent duplicate", "DockingManager")
             else:
                 # No duplicate, direct assignment
                 if not self._is_overlay_locked_by_key(target_overlay):
@@ -3310,13 +3622,13 @@ class DockingOverlayManager(QObject):
             self._closed_window_switch_manager = closed_window_switch_manager
             self._logger.debug("Closed-window switch manager initialized for docking mode")
             
-            # Apply initial autoswitch setting
+            # Apply initial dead_switch setting for closed-window auto-replacement
             try:
                 from core.settings import get_settings_manager
                 settings = get_settings_manager()
-                auto_switch_enabled = bool(settings.get("features.autoswitch_enabled", False))
+                auto_switch_enabled = bool(settings.get("behavior.dead_switch", True))
                 self.set_auto_switch_enabled(auto_switch_enabled)
-                self._logger.debug(f"Applied initial auto-switch setting: {auto_switch_enabled}")
+                self._logger.debug(f"Applied initial dead_switch setting: {auto_switch_enabled}")
             except Exception as e:
                 self._logger.warning(f"Failed to apply initial auto-switch setting: {e}")
             
@@ -3464,6 +3776,27 @@ class DockingOverlayManager(QObject):
                 # Update Normal mode tracking if requested
                 if update_tracking and not self.is_cycle_mode():
                     self._normal_mode_assignments[overlay_id] = hwnd
+                
+                # Update window monitoring
+                if self._window_monitor:
+                    try:
+                        # Stop monitoring previous window if it's not shown in other overlays
+                        if prev_hwnd and prev_hwnd != hwnd:
+                            other_overlays_showing = False
+                            for other_id in ["main"] + [f"secondary_{i}" for i in range(len(self._secondary_overlays))]:
+                                if other_id != overlay_id:
+                                    other_overlay = self._get_overlay_by_id(other_id)
+                                    if other_overlay and other_overlay.get_target_hwnd() == prev_hwnd:
+                                        other_overlays_showing = True
+                                        break
+                            if not other_overlays_showing:
+                                self._window_monitor.remove_window(prev_hwnd)
+                        
+                        # Start monitoring new window
+                        if hwnd:
+                            self._window_monitor.add_window(hwnd)
+                    except Exception as e:
+                        self._logger.debug(f"Window monitor update failed: {e}")
                 
                 self._logger.debug(f"Assigned {overlay_id} → HWND {hwnd} (prev: {prev_hwnd})")
                 return True
@@ -3635,6 +3968,154 @@ class DockingOverlayManager(QObject):
                 
             self._logger.debug(f"NORMAL_SWAP: {overlay_id} swapped with MRU window (fg={fg_hwnd}, prev={current_overlay_hwnd}, focus_target={focus_target})")
             
+            # After swap, resolve any duplicates across unlocked overlays
+            self._resolve_duplicates_across_overlays()
+            
         except Exception as e:
             self._logger.error(f"Normal mode swap failed for {overlay_id}: {e}", exc_info=True)
             self._logger.debug(f"Failed to unregister {overlay_id} from auto-switch: {e}")
+    
+    def _on_window_closed(self, hwnd: int) -> None:
+        """Handle window close event from WindowMonitor.
+        
+        When a window closes, find which overlay(s) show it and replace with next valid MRU.
+        
+        Args:
+            hwnd: Handle of closed window
+        """
+        try:
+            self._logger.info(f"Window closed: {hwnd} - refreshing affected overlays")
+            
+            # In Normal mode, only update affected overlays
+            # In Cycle mode, update all overlays (they'll re-populate from MRU)
+            if self.is_cycle_mode():
+                # Cycle mode: all overlays update from MRU automatically
+                self._update_cycle_mode_displays()
+            else:
+                # Normal mode: find and update only affected overlays
+                affected_overlays = []
+                
+                # Check main overlay
+                if self._main_overlay and self._main_overlay.get_target_hwnd() == hwnd:
+                    affected_overlays.append("main")
+                
+                # Check secondary overlays
+                for i, overlay in enumerate(self._secondary_overlays):
+                    if overlay and overlay.get_target_hwnd() == hwnd:
+                        affected_overlays.append(f"secondary_{i}")
+                
+                if affected_overlays:
+                    self._logger.debug(f"Affected overlays: {affected_overlays}")
+                    # Trigger Normal mode display update which will replace invalid windows
+                    self._update_normal_mode_displays()
+                else:
+                    self._logger.debug(f"Window {hwnd} not displayed in any overlay")
+                    
+        except Exception as e:
+            self._logger.error(f"Error handling window close: {e}", exc_info=True)
+    
+    def _resolve_duplicates_across_overlays(self) -> None:
+        """Resolve duplicate window assignments across all unlocked overlays.
+        
+        When one overlay is locked and others are updated via autoswitch, duplicates
+        can occur. This method finds and resolves them by reassigning unlocked overlays
+        to next available MRU windows.
+        
+        Only runs in Normal mode (Cycle mode handles this automatically).
+        """
+        if self.is_cycle_mode():
+            return
+        
+        try:
+            # Build map of which windows are shown where
+            window_to_overlays: dict[int, list[str]] = {}
+            
+            # Check main overlay
+            if self._main_overlay:
+                main_hwnd = self._main_overlay.get_target_hwnd()
+                if main_hwnd:
+                    window_to_overlays.setdefault(int(main_hwnd), []).append("main")
+            
+            # Check secondary overlays
+            for i, overlay in enumerate(self._secondary_overlays):
+                if overlay:
+                    sec_hwnd = overlay.get_target_hwnd()
+                    if sec_hwnd:
+                        overlay_id = f"secondary_{i}"
+                        window_to_overlays.setdefault(int(sec_hwnd), []).append(overlay_id)
+            
+            # Find duplicates
+            duplicates = {hwnd: overlay_ids for hwnd, overlay_ids in window_to_overlays.items() if len(overlay_ids) > 1}
+            
+            if not duplicates:
+                return  # No duplicates found
+            
+            self._logger.warning(f"DUPLICATE_RESOLVE: Found {len(duplicates)} duplicate window(s): {duplicates}")
+            
+            # For each duplicate, keep it in the first unlocked overlay and reassign others
+            validated_mru = self._get_validated_mru()
+            assigned = set(window_to_overlays.keys())  # Start with all currently assigned windows
+            
+            for hwnd, overlay_ids in duplicates.items():
+                # Find which overlays showing this duplicate are locked vs unlocked
+                locked_showing_this = []
+                unlocked_showing_this = []
+                for oid in overlay_ids:
+                    if self._is_overlay_locked_by_id(oid):
+                        locked_showing_this.append(oid)
+                    else:
+                        unlocked_showing_this.append(oid)
+                
+                # If ANY locked overlay has this window, ALL unlocked overlays must be reassigned
+                if locked_showing_this:
+                    if unlocked_showing_this:
+                        self._logger.warning(f"DUPLICATE_RESOLVE: Window {hwnd} in locked overlay(s) {locked_showing_this} AND unlocked {unlocked_showing_this}")
+                        reassign_overlays = unlocked_showing_this  # Reassign ALL unlocked showing this window
+                    else:
+                        # All overlays showing this are locked, no action possible
+                        continue
+                else:
+                    # No locked overlays have this window
+                    if len(unlocked_showing_this) <= 1:
+                        # Only one unlocked overlay, no duplicate issue
+                        continue
+                    
+                    # Multiple unlocked overlays have same window - keep first, reassign others
+                    reassign_overlays = unlocked_showing_this[1:]
+                
+                # Log resolution strategy
+                if locked_showing_this:
+                    self._logger.debug(f"DUPLICATE_RESOLVE: Window {hwnd} locked in {locked_showing_this}, reassigning {reassign_overlays}")
+                else:
+                    keep_in = unlocked_showing_this[0] if unlocked_showing_this else "none"
+                    self._logger.debug(f"DUPLICATE_RESOLVE: Keeping {hwnd} in {keep_in}, reassigning {reassign_overlays}")
+                
+                # Reassign duplicate overlays to next available MRU windows
+                for oid in reassign_overlays:
+                    new_hwnd = self._get_next_available_mru(validated_mru, assigned)
+                    if new_hwnd:
+                        self._assign_overlay(oid, new_hwnd, update_tracking=True)
+                        assigned.add(new_hwnd)
+                        self._logger.info(f"DUPLICATE_RESOLVE: Reassigned {oid} from duplicate {hwnd} to {new_hwnd}")
+                    else:
+                        self._logger.warning(f"DUPLICATE_RESOLVE: No available MRU for {oid}, leaving duplicate")
+                        
+        except Exception as e:
+            self._logger.error(f"Error resolving duplicates: {e}", exc_info=True)
+    
+    def _is_overlay_locked_by_id(self, overlay_id: str) -> bool:
+        """Check if an overlay is locked by its ID.
+        
+        Args:
+            overlay_id: Overlay identifier ("main", "secondary_0", etc.)
+            
+        Returns:
+            True if overlay is locked
+        """
+        try:
+            overlay = self._get_overlay_by_id(overlay_id)
+            if overlay:
+                return self._is_overlay_locked(overlay)
+        except Exception:
+            pass
+        return False
