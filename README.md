@@ -26,8 +26,9 @@ Display Locked Switching when enabled will not let autoswitch or quickswitch get
 Media key functionality is especially fun. Spacebar pause/play, left right for backwards and forwards, up and down for windows mixer volume control of the captured application with a snazzy OSD.
 
 Every feature (except old ass keypassthrough) built to standards that should be completely compatible with even the most anal anit-cheats by using legitimate windows api functions.
-
-## OLD SAUCE
+----------
+## OLD SAUCE - EVERYTHING BELOW THIS LINE IS DEPRECATED AND EVEN MORE SILLY.
+----------
 - * Live Window Overlay creation that tracks your most recent application and let's you seamlessly swap applications like Microsoft remembered what Alt-Tab was meant to do. Swapping can be done via double-click, right click or custom hotkey combo.
 
 - * Overlay Passthrough. This was surprisingly less hellish than everything else to get working but you probably DON'T WANT TO TURN THIS ON if you game online. DEFAULTS TO OFF, gives a big fucking warning too. It's a benign feature but I don't want false positives on users. Neat for pure media though, when it works. You can't accidentally turn this on.
