@@ -26,6 +26,7 @@ Display Locked Switching when enabled will not let autoswitch or quickswitch get
 Media key functionality is especially fun. Spacebar pause/play, left right for backwards and forwards, up and down for windows mixer volume control of the captured application with a snazzy OSD.
 
 Every feature (except old ass keypassthrough) built to standards that should be completely compatible with even the most anal anit-cheats by using legitimate windows api functions.
+
 ----------
 ## OLD SAUCE - EVERYTHING BELOW THIS LINE IS DEPRECATED AND EVEN MORE SILLY.
 ----------
